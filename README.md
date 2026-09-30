@@ -99,7 +99,8 @@ Strap** is supported (the app looks for that name; the Helio Ring is not tested)
   only between 30 and 42 °C.
 - **Background sync.** With the strap chosen, it syncs without the app being opened, through
   the same mechanisms as the ring: the app's background refresh and processing tasks, the
-  optional "Sync after Sleep Focus" filter, and Bluetooth state restoration.
+  optional "Sync after Sleep Focus" filter, and Bluetooth state restoration. iOS decides when
+  background syncs run; hours can pass between them; pull to refresh syncs at once.
 - **Nothing is deleted from the strap.** Every history round is acknowledged "keep"; the strap
   keeps its data whatever OpenCircuit does.
 - **Find My Strap**: makes the strap vibrate, with Bluetooth signal strength as a distance
