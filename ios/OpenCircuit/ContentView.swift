@@ -165,7 +165,7 @@ struct ContentView: View {
                 .tag(Tab.profile)
         }
         .tint(Theme.accent)
-#if DEBUG
+#if DEBUG && targetEnvironment(simulator)
         .modifier(DemoScreenModifier())   // screenshot harness (#216); inert without -OCDemoData
 #endif
             // Shared trends cache: load once, then refresh on foreground return and after each sync.
@@ -195,8 +195,9 @@ struct ContentView: View {
                 // Wire persistence into the scanner/session so the (currently gated)
                 // epoch-sync decoder can persist Layer-A records once enabled. #24
                 scanner.setLocalStore(LocalStore(modelContext))
-#if DEBUG
-                // Screenshot fixtures (#216): no-op unless launched with `-OCDemoData YES`.
+#if DEBUG && targetEnvironment(simulator)
+                // Screenshot fixtures (#216): simulator only, and a no-op unless launched with
+                // `-OCDemoData YES` on a store with no rows of any seeded type.
                 DemoData.seedIfRequested(modelContext)
 #endif
             }

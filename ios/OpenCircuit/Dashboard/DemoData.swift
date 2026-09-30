@@ -7,7 +7,7 @@
 // comes from, or resembles a copy of, any real wearer's data. It refuses to touch a store that
 // already holds sleep history, so it can never mix into real data on a developer's own phone.
 
-#if DEBUG
+#if DEBUG && targetEnvironment(simulator)
 import Foundation
 import SwiftData
 import UIKit
@@ -26,8 +26,7 @@ enum DemoData {
     static func seedIfRequested(_ context: ModelContext, now: Date = Date()) {
         guard isRequested else { return }
         scheduleScrollIfRequested()
-        let existing = (try? context.fetchCount(FetchDescriptor<StoredSleepSummary>())) ?? 0
-        guard existing == 0 else { return }
+        guard holdsNoSeedableRows(context) else { return }
 
         let cal = Calendar.current
         let today = cal.startOfDay(for: now)
@@ -107,6 +106,19 @@ enum DemoData {
         try? context.save()
     }
 
+    /// True only when the store holds no row of ANY type this seeder writes. A single real sample,
+    /// step delta, temperature, daily total or night is enough to refuse: seeded `StoredSample`s are
+    /// what `LocalStore.pendingHealthSamples()` hands to the Health flush, so mixing them into real
+    /// data would send synthetic vitals to Apple Health. A count that can't be read refuses too.
+    @MainActor
+    static func holdsNoSeedableRows(_ context: ModelContext) -> Bool {
+        func isEmpty<T: PersistentModel>(_: T.Type) -> Bool {
+            (try? context.fetchCount(FetchDescriptor<T>())) == 0
+        }
+        return isEmpty(StoredSleepSummary.self) && isEmpty(StoredSample.self) && isEmpty(StoredDaytimeTemp.self)
+            && isEmpty(StoredStepSample.self) && isEmpty(StoredDaily.self)
+    }
+
     private static func demoHypnogram(bed: Date, wake: Date, salt: Double) -> [SleepSegment] {
         var out: [SleepSegment] = []
         var t = bed
@@ -158,7 +170,7 @@ enum DemoData {
 }
 #endif
 
-#if DEBUG
+#if DEBUG && targetEnvironment(simulator)
 import SwiftUI
 
 /// DEBUG-only: `-OCDemoScreen metric-hrv | pastNights | liveHR` presents that screen full-screen on
