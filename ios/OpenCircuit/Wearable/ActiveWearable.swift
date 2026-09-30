@@ -36,16 +36,22 @@ final class ActiveWearable {
     /// What the active device can do; empty while nothing is connected.
     var capabilities: WearableCapabilities { session?.capabilities ?? [] }
 
-    /// The identity to name on a Health write, or nil when no device has ever been known.
+    /// The identity to name on a Health write, or nil when there is none to name yet: no device has
+    /// ever been known, or the connected one hasn't identified itself.
     ///
-    /// Merged with (and recorded into) the last identity persisted for the same device id, so a
-    /// field known once is never dropped again for that device. Without this, a flush before the
-    /// DIS reads land, or with the ring out of range, would name the same ring with fewer fields
-    /// and Apple Health would list it as several devices. See `WearableIdentity.merging(previous:)`.
+    /// Merged with (and recorded into) the last identity persisted for the same device id, so once a
+    /// full identity has been persisted, a field known once is never dropped again for that device —
+    /// a flush before this connection's DIS reads land, or with the ring out of range, still names it
+    /// in full. See `WearableIdentity.merging(previous:)`.
+    ///
+    /// The merge can't help on a device's FIRST connection, when nothing is persisted: a write that
+    /// lands before the firmware read would name a sparser device than every later write, and Apple
+    /// Health would list it twice. So until the device has reported a firmware version, with nothing
+    /// persisted, this returns nil and records nothing, and the write carries no device — exactly
+    /// what every write did before the seam.
     func identityForHealthWrite() -> WearableIdentity? {
         if let live = session?.identity {
             let previous = identityStore.load(id: live.id)
-            // Nothing persisted and the firmware read not landed: name no device, not a sparse one.
             if previous == nil, live.firmwareVersion == nil { return nil }
             let merged = live.merging(previous: previous)
             if merged != previous { identityStore.save(merged) }
