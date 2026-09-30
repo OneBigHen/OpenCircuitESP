@@ -46,6 +46,8 @@ Health** — no cloud, no subscription.
 | `docs/RUNBOOK_HEADACHE_VALIDATION.md` | **On-device validation for #183 (freeze / migration / HealthKit) + the tester-facing "What to Test"** |
 | `docs/RUNBOOK_SCHEMA_MIGRATION_REHEARSAL.md` | **MANDATORY before shipping any SwiftData schema change. Two gates: "Gate A" is the named suite invocation `-only-testing:OpenCircuitTests/ShippedStoreMigrationTests` — run it on its own and check the executed-test COUNT, because a full-target run has already skipped the whole suite silently; then rehearse the upgrade on a real phone from a PRE-45 build. Build 44 deleted every raw history row on upgrade; a simulator pass and a current-build store both skip the defect** |
 | `docs/HEALTHKIT_MAPPING.md` | Each metric → HealthKit type |
+| `docs/ZEPP_PROTOCOL.md` | **Amazfit Helio Strap (Zepp OS) clean-room protocol spec (#215).** The Swift implementation must be built from this file ALONE: never open Gadgetbridge (AGPL) or HelioCore (unlicensed). Its worked examples (§3.6, §3.7, §4.6, §6.2) are our own vectors and can be used as test fixtures. §10 is the capture checklist that promotes claims to 🟢 |
+| `docs/HELIO_KEY_EXTRACTION.md` | User guide: getting the Helio Strap's 16-byte auth key (one-time Zepp pairing; needs a computer). Unpairing in Zepp invalidates the key, so users should delete the app instead |
 | `docs/BACKGROUND_SYNC.md` | **How the official RingConn app syncs to Apple Health without being opened (RE'd blueprint) → mapped to our BGTask + CoreBluetooth-restoration implementation (#119); deliberate divergences + validation runbook** |
 | `docs/HANDOFF_MACOS_IOS.md` | **Pickup instructions for the iOS work on macOS** |
 | `docs/ROADMAP.md` | Phases + risks |
