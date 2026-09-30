@@ -5,6 +5,10 @@
 // logged, nor is the strap's serial number. The history fetch acks `03 09` (keep on strap) unless
 // `--allow-delete` AND `--out` are both given; then a round is delete-acked only after its raw
 // bytes are written and fsynced to the `--out` file.
+//
+// Device controls (`--find`, `--vibrate`, `--alarms`, `--set-alarm`, `--delete-alarm`, `--alerts`)
+// live in Controls.swift. Alarm writes need `--allow-write`; nothing else writes strap state
+// except the opt-in `--set-time`.
 
 import CoreBluetooth
 import Foundation
@@ -24,6 +28,18 @@ struct Options {
                                   .sleepRespiratoryRate, .sleepSession]
     var setTime = false
     var timeoutSeconds: Double = 300
+    // Device controls (Controls.swift).
+    var findSeconds: Double?
+    var vibrate = false
+    var listAlarms = false
+    var setAlarm: (hour: UInt8, minute: UInt8, days: ZeppAlarmDays)?
+    var deleteAlarmSlot: UInt8?
+    var allowWrite = false
+    var alerts = false
+
+    var writesAlarms: Bool { setAlarm != nil || deleteAlarmSlot != nil }
+    /// Any control flag: the run does the controls instead of live HR and the history fetch.
+    var hasControls: Bool { findSeconds != nil || vibrate || listAlarms || writesAlarms || alerts }
 }
 
 let usage = """
@@ -57,8 +73,30 @@ OPTIONS
                       but only after it is durably written to --out. Requires --key-file and --out.
   --help              Show this help.
 
+DEVICE CONTROLS (Helio Strap only; all need --key-file)
+  Any of these runs the controls INSTEAD of live HR and the history fetch. After auth the strap's
+  services list is printed with each endpoint's encryption, then which controls it supports. A
+  control the strap does not list is reported as unsupported and nothing is sent for it.
+  --find [n]          Find my strap: start "find device", stop it after n seconds (default 10,
+                      max 60). A stop is also sent on Ctrl-C, on timeout and before exiting.
+  --vibrate           One short buzz: find-device start, then stop 500 ms later. There is no
+                      dedicated vibrate opcode (ZEPP_PROTOCOL.md §13.2).
+  --alerts            Read-only: the config capabilities and the strap's haptic alert settings
+                      (high/low HR, low SpO2, relax reminder), with the values it allows.
+  --alarms            Read-only: list the alarms on the strap.
+  --set-alarm HH:MM[,days]
+                      WRITES STRAP STATE; needs --allow-write. Adds one enabled alarm in the lowest
+                      free slot (never overwrites or deletes another), printing the list before and
+                      after. days: once (default), daily, weekdays, weekend, or mon..sun joined by
+                      ',' or '+', e.g. 07:30,mon,wed,fri. Sets the strap's clock first: alarms fire
+                      in strap-local time.
+  --delete-alarm <n>  WRITES STRAP STATE; needs --allow-write. Deletes the alarm in slot n (0-9),
+                      e.g. the one --set-alarm made. Prints the list before and after.
+  --allow-write       Permits --set-alarm / --delete-alarm. Without it nothing is written.
+
 EXIT CODES
   0 ok · 1 usage · 2 Bluetooth unavailable · 3 timeout · 4 auth failed · 5 no device found
+  130 interrupted (Ctrl-C)
 """
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
@@ -92,6 +130,29 @@ func parseOptions(_ args: [String]) -> Options {
         case "--since-hours": o.sinceHours = number("--since-hours")
         case "--timeout": o.timeoutSeconds = number("--timeout")
         case "--set-time": o.setTime = true
+        case "--find":
+            // Optional value: `--find` alone buzzes for 10 s.
+            if i + 1 < args.count, let n = Double(args[i + 1]) {
+                i += 1
+                guard n > 0, n <= ZeppFindDevice.Configuration.maxFindDuration else { fail("--find takes a number of seconds above 0 and at most 60") }
+                o.findSeconds = n
+            } else {
+                o.findSeconds = 10
+            }
+        case "--vibrate": o.vibrate = true
+        case "--alarms": o.listAlarms = true
+        case "--alerts": o.alerts = true
+        case "--allow-write": o.allowWrite = true
+        case "--set-alarm":
+            guard let alarm = parseAlarmSpec(value("--set-alarm")) else {
+                fail("--set-alarm takes HH:MM[,days], e.g. 06:30 or 07:30,weekdays or 08:00,mon+wed")
+            }
+            o.setAlarm = alarm
+        case "--delete-alarm":
+            guard let slot = UInt8(value("--delete-alarm")), slot < ZeppAlarm.slotCount else {
+                fail("--delete-alarm takes a slot number 0-9")
+            }
+            o.deleteAlarmSlot = slot
         case "--types":
             let list = value("--types").split(separator: ",")
             o.types = list.map { code in
@@ -110,7 +171,37 @@ func parseOptions(_ args: [String]) -> Options {
     if o.allowDelete && (o.keyFile == nil || o.outPath == nil) {
         fail("--allow-delete requires --key-file and --out: data is only dropped from the strap after it is durably saved")
     }
+    if o.hasControls && o.keyFile == nil {
+        fail("--find, --vibrate, --alerts and the alarm flags need --key-file: the strap only takes them after auth")
+    }
+    if o.writesAlarms && !o.allowWrite {
+        fail("--set-alarm and --delete-alarm write the strap's alarms: add --allow-write to confirm")
+    }
+    if o.allowWrite && !o.writesAlarms {
+        fail("--allow-write only applies to --set-alarm / --delete-alarm")
+    }
+    if o.setAlarm != nil && o.deleteAlarmSlot != nil {
+        fail("one alarm write per run: use --set-alarm or --delete-alarm, not both")
+    }
+    // Alarm edits need the strap's clock set on this connection (ZEPP_PROTOCOL.md §14).
+    if o.writesAlarms { o.setTime = true }
     return o
+}
+
+/// `HH:MM` or `HH:MM,days` (days per `ZeppAlarmDays(list:)`; omitted = once).
+func parseAlarmSpec(_ text: String) -> (hour: UInt8, minute: UInt8, days: ZeppAlarmDays)? {
+    let parts = text.split(separator: ",", maxSplits: 1).map(String.init)
+    guard let time = parts.first else { return nil }
+    let hm = time.split(separator: ":", omittingEmptySubsequences: false)
+    guard hm.count == 2, (1...2).contains(hm[0].count), hm[1].count == 2,
+          hm.allSatisfy({ $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) }),
+          let hour = UInt8(hm[0]), let minute = UInt8(hm[1]), hour < 24, minute < 60 else { return nil }
+    var days = ZeppAlarmDays.once
+    if parts.count == 2 {
+        guard let parsed = ZeppAlarmDays(list: parts[1]) else { return nil }
+        days = parsed
+    }
+    return (hour, minute, days)
 }
 
 /// Reads and parses the key file. Never echoes its contents, even on error.
@@ -130,7 +221,7 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
 
     enum Step: String {
         case scanning, connecting, discovering, readingBasics, liveHR, enablingChunked, authenticating,
-             servicesList, battery, setTime, config, authedHR, enablingFetch, fetching, done
+             servicesList, battery, setTime, config, authedHR, enablingFetch, fetching, controls, done
     }
 
     let options: Options
@@ -150,6 +241,16 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     var outHandle: FileHandle?
     var roundsDelivered = 0
     var isFinishing = false
+    // Device controls (Controls.swift).
+    var model: ZeppDeviceModel?
+    var controlCapabilities = ZeppControlCapabilities.disconnected
+    var find = ZeppFindDevice()
+    var alarmEditor: ZeppAlarmEditor?
+    var controlTasks: [ControlTask] = []
+    var controlWait: ControlWait?
+    var controlWaitToken = 0
+    var controlTimer: Timer?
+    var configCapabilities: ZeppConfigCapabilities?
 
     init(options: Options, key: ZeppAuthKey?) {
         self.options = options
@@ -176,14 +277,22 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         isFinishing = true
         if let message { log(code == 0 ? message : "FAILED: \(message)") }
         hrTimer?.invalidate()
+        controlTimer?.invalidate()
         if var fetch, fetch.phase != .finished && fetch.phase != .idle {
             // Never leave the strap mid-round; the abort ack is always 03 09 (keep).
             perform(fetch.abort())
             self.fetch = fetch
         }
         try? outHandle?.close()
-        if let peripheral { central.cancelPeripheralConnection(peripheral) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(code) }
+        // Never leave the strap buzzing: pair a running find or buzz with its stop, and give the
+        // write a moment to go out before disconnecting.
+        let stopping = stopFindBeforeExit()
+        let central: CBCentralManager? = self.central
+        let peripheral = self.peripheral
+        DispatchQueue.main.asyncAfter(deadline: .now() + (stopping ? 0.5 : 0)) {
+            if let peripheral { central?.cancelPeripheralConnection(peripheral) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(code) }
+        }
     }
 
     // MARK: Central
@@ -213,6 +322,7 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         guard let model = ZeppDeviceModel.match(advertisedName: name) else { return }
         if let wanted = options.name, wanted != name { return }
         log("found \(model.rawValue) (\"\(name)\", RSSI \(RSSI)); connecting")
+        self.model = model
         central.stopScan()
         step = .connecting
         self.peripheral = peripheral
@@ -231,6 +341,10 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard step != .done else { return }
+        if find.isBuzzing {
+            find.connectionLost()
+            log("WARNING: the link dropped while the strap was buzzing; it may keep vibrating until its own timeout. Run --find 1 to send a stop.")
+        }
         finish("disconnected in step '\(step.rawValue)': \(error?.localizedDescription ?? "no error")", code: 3)
     }
 
@@ -369,10 +483,7 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             }
             services = list
             link?.apply(servicesList: list)
-            let described = list.entries.map { e in
-                String(format: "%04x", e.endpoint) + (e.encrypted == true ? "*" : "")
-            }
-            log("services (* = encrypted): \(described.joined(separator: " "))")
+            printServices(list)
             guard list.contains(ZeppEndpoint.battery) else {
                 log("battery (endpoint): 0x0029 not in the services list; skipped")
                 return afterBattery()
@@ -389,6 +500,7 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             afterBattery()
         case (.setTime, ZeppEndpoint.time):
             log(ZeppTimeCommand.isSuccessReply(message.payload) ? "time set" : "time set: unexpected reply")
+            alarmEditor?.noteTimeSetReply(message.payload)
             readConfig()
         case (.config, ZeppEndpoint.config):
             if let reply = ZeppConfig.parseReadReply(message.payload) {
@@ -399,9 +511,15 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             } else {
                 log("HEALTH settings: unreadable reply")
             }
-            startAuthedHR()
+            afterConfig()
         case (_, ZeppEndpoint.heartRate):
             if let event = ZeppHeartRateControl.parse(message.payload) { log("HR endpoint: \(event)") }
+        case (_, ZeppEndpoint.findDevice):
+            performFind(find.receive(message.payload, now: Date()))
+        case (_, ZeppEndpoint.alarms):
+            receiveAlarmMessage(message.payload)
+        case (.controls, ZeppEndpoint.config):
+            receiveAlertsMessage(message.payload)
         case (.fetching, ZeppEndpoint.activityFetch):
             feedFetchControl(message.payload)
         default:
@@ -428,11 +546,16 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     func readConfig() {
         guard services?.contains(ZeppEndpoint.config) == true else {
             log("HEALTH settings: config endpoint 0x000A not in the services list; skipped")
-            return startAuthedHR()
+            return afterConfig()
         }
         step = .config
         send(ZeppEndpoint.config, ZeppConfig.readRequest(group: ZeppConfig.healthGroup,
                                                           arguments: ZeppConfig.recordingArguments))
+    }
+
+    /// Controls replace live HR and the history fetch when any control flag is given.
+    func afterConfig() {
+        options.hasControls ? startControls() : startAuthedHR()
     }
 
     func startAuthedHR() {
@@ -635,9 +758,17 @@ let key = options.keyFile.map(loadKey)
 if options.allowDelete {
     print("WARNING: --allow-delete: rounds durably written to --out will be DROPPED from the strap (ack 03 01).")
 }
+if options.writesAlarms {
+    print("NOTE: this run WRITES the strap's alarms (--allow-write), and sets its clock first.")
+}
 if #available(macOS 10.15.4, *) {
     let verifier = HelioVerifier(options: options, key: key)
-    withExtendedLifetime(verifier) { dispatchMain() }
+    // Ctrl-C must not leave the strap buzzing: finish() sends the stop first.
+    signal(SIGINT, SIG_IGN)
+    let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+    interrupt.setEventHandler { verifier.finish("interrupted", code: 130) }
+    interrupt.resume()
+    withExtendedLifetime((verifier, interrupt)) { dispatchMain() }
 } else {
     fail("HelioVerify needs macOS 10.15.4 or newer")
 }
