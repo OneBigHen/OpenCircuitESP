@@ -1,0 +1,165 @@
+# Device seam (#214)
+
+A thin "any wearable" seam in front of `RingSession`, so a second device (Amazfit Helio Strap,
+Zepp OS) can land as its own driver without rewriting the app. **This is not a rehaul.**
+`RingSession` keeps its internals; it gains a protocol conformance in a separate file. v1 has
+**one active device at a time**.
+
+Measured on `origin/master` b1c2fdd (build 56), 2026-09-30.
+
+## 1. Where `RingSession` is used today
+
+`grep -rl RingSession ios/OpenCircuit` finds 29 files besides `RingSession.swift` itself.
+- **12 mention it only in comments:** AppDelegate, BackgroundRefreshScheduler, EpochArchiveStore,
+  RingMetadataStore, ObservabilityStore, NapEditView, EditSleepView, DayDetailView, ExportBuilder,
+  SleepCardView, HeadacheEngine, HealthKitWriter.
+- **17 use it in code.** 16 name the type. `RingBackgroundSyncService` reaches it through
+  `scanner.session`.
+- `App.swift` never names it (so the grep misses it) but reaches it through
+  `RingScanner.shared.session`. That makes 18 rows below.
+
+"Agnostic" means any wearable could answer it: connection, battery, live HR, a history sync.
+"RingConn" means it depends on the RingConn wire protocol or on a ring-only feature.
+
+| File | Members used | Kind |
+|---|---|---|
+| `BLE/RingScanner.swift` | Owns the session. `ready`, `syncing`, `syncHistory`, `liveHR`, `steps`, `lastFrameAt`, `startMonitoring`, `stopLiveMonitoring`, `invalidate`, `setLocalStore` · `epochArchiveStore`, `healthSleepSegments`, `isInSleepWindow`, `resumeChannelHint`, `interruptedDrainChannel`, `rediscoverIfNeeded` | Mixed. It is the RingConn transport and stays ring-only |
+| `ContentView.swift` | `ready`, `syncing`, `syncStatus`, `syncHistory`, `batteryPercent`, `batteryStale`, `batteryFetchedAt`, `charging`, `inferredCharging`, `liveHR`, `liveSpO2`, `liveMode`, `monitoring`, `historySamples`, `firmwareInfo` · `caseBattery`, `batteryTTESamples`, `batteryChargeSamples`, `notStreaming`, `appearsNotWorn`, `autoMeasuring`, `liveHRWarmup`, `livePreparing`, `userMeasuring`, `userMeasureFailed(Message)`, `workoutHolding`, `calibrationCapturing`, `probing`, `probeStatus`, `probeActivityChannels`, `captureHistoricPull`, `capturingHistoricPull`, `historicPullStatus`, `captureForensicSweep`, `capturingForensicSweep`, `forensicSweepStatus`, `rawCaptureLog`, `lastFrame`, `lastDrainSummary`, `lastDrainTraces`, `lastAdoptedRecordCount`, `recorderStallEvidence`, `lastSyncAnomalies`, `lastSleepPersistOutcome`, `healthSleepSegments`, `stagedSegments`, `applySleepEdit`, `sleepEditDataCoverage`, `automaticWorkoutCandidates` | Mixed. The status card is agnostic; the RE tools, drain traces, calibration and sleep edit are RingConn |
+| `VitalsTableView.swift` | `ready`, `syncing`, `monitoring`, `liveMode`, `liveSpO2`, `liveTemperature`, `liveHRTrend`, `liveReadingsStale`, `lastFrameAt`, `steps`, `historySamples`, `startMonitoring`, `stopLiveMonitoring`, `RingSession.LiveMode` · `notStreaming`, `livePreparing`, `userMeasuring`, `workoutHolding`, `probing`, `capturingHistoricPull`, `capturingForensicSweep`, `calibrationCapturing` | Mixed. On-demand HR/SpO₂ measure buttons |
+| `DeviceInfoView.swift` | `ready`, `syncing`, `monitoring`, `firmwareInfo` · `sourceRingIdentity`, `setAirplaneModeOn`, `setOSAAssessment`, `osaAssessmentArmed`, `latestOSABurst`, `setAutomaticWorkoutDetection`, `automaticWorkoutDetectionEnabled`, `diagnosticsFrameCount`, `clearDiagnosticsCapture`, `repairFromRecoveredRecords`, `RingSession.diagnosticsCaptureKey` | RingConn (a ring device screen) |
+| `FindMyRingView.swift` | `ready`, `ringRSSI`, `startFindingRing`, `stopFindingRing`, `setFindRingLight`, `findRingLightOn` | RingConn |
+| `RingVibrationView.swift` | `ready` (it passes the session to `RingAlarmController`) | RingConn |
+| `RingAlarmController.swift` | `supportsVibration`, `vibrate`, `vibrateBurst`, `lastVibrationBlock` | RingConn (Gen 3 motor) |
+| `CalibrationSupport.swift` | `startPPGCalibrationCapture` | RingConn (raw PPG, `06 05 00`) |
+| `CalibrationSessionView.swift` | `ready` (it passes the session to `CalibrationSupport`) | RingConn |
+| `WorkoutSessionManager.swift` | `ready`, `liveHR`, `liveHRAt` · `beginSportSession`, `endSportSession`, `workoutHRActive`, `sportFrameCursors`, `sportUsingLivePollFallback`, `bufferedSportSamples`, `noteManualWorkout`, `clearManualWorkout`, `RingScanner.onSessionReplaced` | Mixed. The HR feed is agnostic; native sport mode is RingConn |
+| `WorkoutView.swift` | `ready`, `syncing`, `workoutHolding` · `automaticWorkoutCandidates`, `resolveAutomaticWorkoutCandidate` | Mixed |
+| `HealthNotificationCenter.swift` | `isLinkConnected`, `lastFrameAt`, `charging`, `historySamples` | Agnostic |
+| `Observability/ActivityLogView.swift` | `firmwareInfo`, `lastSyncAnomalies` | RingConn (firmware-mismatch banner, decode anomalies) |
+| `Diagnostics/DiagnosticsReport.swift` | `firmwareInfo`, `frameCaptureReport`, `diagnosticsFrameCount`, `archivedEpochs` | RingConn |
+| `Background/RingBackgroundSyncService.swift` | `refreshNightWindowIfNeeded` (via `scanner.session`) | RingConn |
+| `App.swift` | `RingScanner.shared.session` → `RingAlarmController.evaluate` | RingConn |
+| `UserProfile.swift` | `RingSession.autoMeasureEnabledKey` (static) | RingConn setting key |
+| `Store/LocalStore.swift` | `RingSession.lastNotifiedNightKey` (static) | Agnostic key that happens to live on `RingSession` |
+
+**What this says:** the device-agnostic surface is small, and every view already uses it through
+the same member names: connection (`ready`, `isLinkConnected`, `lastFrameAt`), battery
+(`batteryPercent`, `charging`), live HR (`liveHR`, `liveHRAt`, `steps`) and history
+(`syncing`, `syncStatus`, `syncHistory`). Everything else is the RingConn protocol surfacing in
+UI. HealthKit writes had no `HKDevice`: `grep -rn HKDevice ios` returned 0.
+
+## 2. The seam (Part A, no schema change)
+
+| Piece | Where | Notes |
+|---|---|---|
+| `WearableDeviceKind`, `WearableCapabilities`, `WearableIdentity`, `HealthDeviceFields` | `OpenCircuitKit/Wearable.swift` | Pure value types with no Apple frameworks. Tested by `WearableTests` |
+| `protocol WearableSession` | `ios/OpenCircuit/Wearable/WearableSession.swift` | `@MainActor`, `AnyObject`, `Observable`. It stays in the app target because Observation needs macOS 14 and the Kit manifest declares no platforms; editing `Package.swift` would collide with the Zepp targets |
+| `extension RingSession: WearableSession` | `ios/OpenCircuit/BLE/RingSession+Wearable.swift` | Three computed properties. Everything else is satisfied by existing members |
+| `ActiveWearable`, `WearableIdentityStore` | `ios/OpenCircuit/Wearable/ActiveWearable.swift` | `@Observable` holder of "the active `WearableSession`". Always the ring in v1. Injected once in `App.swift` |
+| `HKDevice` attribution | `HealthKitWriter` | Mapping is `HealthDeviceAttribution.fields(for:origin:)` (Kit, tested) → `HKDevice` |
+
+**Protocol members reuse `RingSession`'s existing names on purpose** (`ready`, `syncing`,
+`batteryPercent`, `liveHR`, …). When a view is later retyped from `RingSession?` to
+`(any WearableSession)?`, none of its agnostic call sites change, so the diff shows only the
+type change. It is also why the conformance is three properties and not a wrapper.
+
+**The one edit inside `RingSession.swift`** is a one-line accessor, `peripheralIdentifier`, next
+to `isLinkConnected`. `peripheral` is `private` (file scope), so no extension in another file can
+read the ring's stable id. Nothing is moved or restructured.
+
+**Capabilities.** The brief's minimum set, plus what the table shows ring-only UI depends on:
+`airplaneMode`, `sleepApneaAssessment` (OSA arming), `automaticWorkoutDetection`,
+`nativeWorkoutMode` (sport mode `0x4e`), `diagnosticsCapture` (raw-frame capture, repair
+import, RE probes). A RingConn ring's set is a pure function of its generation
+(`WearableCapabilities.ringConn(generation:)`) and mirrors the gates the UI already applies:
+- `vibration` and `alarm` are Gen 3 only, `RingVibration.isSupported`. This fails closed while
+  the generation is unknown.
+- `sleepApneaAssessment` is withheld only from a positively identified Gen 2 Air (#186). It fails
+  open, like `DeviceInfoView.sleepApneaUnavailable`.
+
+Data the UI shows only when present (`caseBattery`, `liveTemperature`) gets no capability; the
+UI already gates it on the data itself.
+
+**Capability gating in views: none in this PR, on purpose.** Every view with ring-only UI is typed
+`RingSession?`, so `session?.capabilities.contains(.findMyDevice)` inside it is always true for a
+ring and never reached by any other device. It would be a tautology that can't change behaviour
+and can't be tested, and it adds merge surface next to the parallel dashboard work. Each gate
+becomes a real one-liner in the PR that retypes its view (follow-ups §4).
+
+### Identity and `HKDevice` field mapping
+
+| `HKDevice` | From `WearableIdentity` | RingConn value |
+|---|---|---|
+| `name` | `displayName` (`name ?? manufacturer`) | Model family, e.g. "RingConn Gen2". The advertised name's MAC suffix is stripped by `RingMetadataStore.modelFamily`, the same privacy rule the export uses |
+| `manufacturer` | `manufacturer` | "RingConn", the brand, from the device kind. DIS 0x2A29 reads `JZ_Tech` (the OEM, PROTOCOL.md §1) and stays on the Device Info screen |
+| `model` | `model` | Generation label ("Gen 2", "Gen 2 Air", "Gen 3"), or nil while unknown. Never "Unknown" |
+| `hardwareVersion` | `hardwareVersion` | DIS 0x2A27 |
+| `firmwareVersion` | `firmwareVersion` | DIS 0x2A26, e.g. "FR02.018" |
+| `localIdentifier` | `id` | CoreBluetooth peripheral UUID: per-install, never the MAC. Already the per-ring key for EpochArchiveStore and RingMetadataStore |
+| `softwareVersion`, `udiDeviceIdentifier` | none | nil |
+
+Empty strings map to nil, so no field is ever written as "".
+
+**Consistency across connection states.** Apple Health lists one device per distinct `HKDevice`.
+A flush can run while the ring is connected (all DIS fields known) or in a cold background
+launch before it connects (the fields are unknown). If each write used whatever happened to be
+known at that moment, one ring would show up as several devices. So `ActiveWearable` persists the
+last identity per device id (`WearableIdentityStore`, UserDefaults, no schema). It merges live
+fields over the persisted ones with `WearableIdentity.merging(previous:)`: a known field is never
+downgraded to unknown for the same id, and a different id never inherits another ring's fields
+(the rule `RingMetadataStore.record` already uses). When no session exists, the persisted identity
+of the active ring (`RingScanner.activeRingID`) is used, falling back to the last-connected ring's
+id in `RingMetadataStore`.
+
+**Which samples carry the device.** Everything the wearable measured or that is derived from its
+data: HR, HRV, SpO₂, RR, temperature, steps, distance, resting HR, active and basal energy,
+measured sleep, and the BP estimate (the correlation and both components). **Not attributed:**
+samples a person entered, which are headache and menstrual-flow logs plus sleep spans written
+with `HKMetadataKeyWasUserEntered: true` (asserted spans and manually added naps). HealthKit's
+own semantics for user-entered data is "not from a device", and the app's provenance model
+(measured vs asserted) depends on keeping them apart. This is a deliberate narrowing of "every
+sample" and an open question for Juan (§5). Flipping it is one line in
+`HealthDeviceAttribution.fields(for:origin:)`.
+
+**Not changed:** `WorkoutSessionManager` builds its workout with `HKWorkoutBuilder(device:
+.local())` (the iPhone) and its route with `device: nil`. It is outside `HealthKitWriter`, and
+re-attributing workouts is a visible Health change of its own (follow-ups §4).
+
+## 3. Store (Part B, schema change)
+
+_See the section appended by the `feat/device-seam-store` branch._
+
+## 4. Follow-ups (not in this PR)
+
+1. **Retype views to `(any WearableSession)?` and gate ring-only controls.** One line per gate:
+   - `DeviceInfoView` Find My Ring → `.findMyDevice`.
+   - Vibration row → `.vibration`: replace `RingVibration.isSupported(info.generation)` with
+     `session?.capabilities.contains(.vibration) == true`. They are equivalent by construction.
+   - Airplane mode → `.airplaneMode`.
+   - OSA toggle → `.sleepApneaAssessment`.
+   - Automatic workout detection → `.automaticWorkoutDetection`.
+   - ContentView calibration section → `.bloodPressureCalibration`.
+   - ContentView RE tools / `DeviceInfoView` diagnostics → `.diagnosticsCapture`.
+   - VitalsTableView measure buttons → `.onDemandHeartRate` / `.onDemandSpO2`.
+
+   `DeviceInfoView`, `FindMyRingView`, `RingVibrationView`, `CalibrationSessionView` and
+   `DiagnosticsReport` are ring device screens; the Helio gets its own screen rather than a branch
+   inside these.
+2. **`WorkoutSessionManager`**: move native sport mode (`beginSportSession`/`endSportSession`, sport
+   frame cursors) behind `.nativeWorkoutMode`, with a live-HR-only fallback for devices without it.
+   Decide whether workout samples keep `device: .local()` or name the wearable.
+3. **`RingScanner` → device registry.** Typed saved devices (`.ringConn(model)` / `.zeppOS(model)`)
+   with a Keychain key ref per Zepp device. `ActiveWearable.session` then picks between drivers
+   instead of reading `RingScanner.shared.session`.
+4. **Static keys on `RingSession`.** `lastNotifiedNightKey` is device-agnostic and belongs somewhere
+   else (e.g. `HealthNotificationCenter`), but moving it changes nothing today, so it is left alone.
+5. **Samples flushed after a ring swap** are attributed to the ring active at flush time, because
+   the store has no device column in Part A. Part B adds `StoredSample.deviceID`; resolving each
+   row's `HKDevice` from its own device id is a follow-up once a registry holds more than one
+   identity.
+
+## 5. Open questions for Juan
+
+1. User-entered samples (headache, menstrual flow, asserted/typed sleep) are **not** given the
+   ring's `HKDevice` (§2). OK, or do you want literally every sample attributed?
+2. `manufacturer` = brand ("RingConn") rather than the DIS string (`JZ_Tech`). OK?
