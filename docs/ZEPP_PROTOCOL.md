@@ -59,7 +59,7 @@ disagree, §9 says so.
 | Manufacturer data / advertised service UUIDs: **not used by either reference; unknown.** | 🔴 | — (capture item §10) |
 | HelioCore's scanner accepts any name containing `helio`, `amazfit` or `zepp` (case-insensitive). Too loose for OpenCircuit: it would also match watches. | 🟡 | `HC:1056` |
 | A post-auth **device-info** request (§5.3) returns a flags word; for the Helio Strap Gadgetbridge records it as `0x7f`. It also returns a PnP ID from which a product id / version can be read at PnP bytes 3–4 and 5–6 (little-endian). | 🟡 | `SVC/DeviceInfo:95-101,158-160` |
-| Gadgetbridge supports a Bluetooth-Classic transport for some Zepp OS watches. **Ignore it**: iOS is BLE-only, and the Helio uses the BLE path. | 🟡 | `GB/devices/huami/zeppos/ZeppOsCoordinator.java` `getDeviceSupportClass` |
+| Gadgetbridge supports a Bluetooth-Classic transport for some Zepp OS watches. **Ignore it**: iOS is BLE-only, and the Helio uses the BLE path. | 🟡 | `GB/devices/huami/zeppos/ZeppOsCoordinator.java:121-132` |
 
 Firmware seen in the wild on Helio Straps: **3.11.0** and **3.11.0.1** (user reports,
 Gadgetbridge issues #5986 opened 2026-04-08 and #5843 opened 2026-03-06). 🔴 Pin the version
@@ -83,7 +83,7 @@ which service holds them (that is what HelioCore does, `HC:1101-1106`).
 | `0x180D` / `0x2A37` | Heart Rate Measurement | notify | live HR (§7) | **yes** | 🟡 `BTLE:72`, `SUP:1089-1090`, `HC:611` |
 | `0x180A` | Device Information Service | read | firmware / hardware revision strings, PnP ID; a leading `V` on the firmware string is stripped by Gadgetbridge | recommended | 🟡 `BTLE:73,78-105` |
 | `0x2A2B` | Current Time | write | time-set fallback when the time endpoint is absent (§5.1) | fallback | 🟡 `BTLE:180-183` |
-| `0x180F` / `0x2A19` | Battery Level | read/notify | HelioCore looks for it; Gadgetbridge does not use it. **Existence on the Helio unconfirmed.** | optional | 🔴 `HC:612,1106,1127` |
+| `0x180F` / `0x2A19` | Battery Level | read/notify | HelioCore records the characteristic if discovered but never reads or subscribes to it; Gadgetbridge does not use it. **Existence on the Helio unconfirmed.** | optional | 🔴 `HC:612,1106,1127` |
 | `…0001` / `…0002` | raw sensor control / data | — | raw accelerometer stream; not needed | no | 🟡 `HS:37-38` |
 | `…0023` / `…0024` | file transfer v3 | — | not needed | no | 🟡 `HS:63-64` |
 | `00001530-…` service, `…1531`/`…1532` | firmware update | — | **never write** | no | 🟡 `HS:31-34` |
@@ -298,12 +298,12 @@ Reject a device public key that is the point at infinity or is not on the curve.
 ```
 Phone                                                        Strap
   |  enable notify on …0017                                    |
-  |--- [h=1] 04 02 00 02 ‖ phonePub(48) ---------------------->|   52 B  "CMD_PUB_KEY"
+  |--- [h=1] 04 02 00 02 ‖ phonePub(48) ---------------------->|   52 B  public-key message
   |<-- 10 04 01 ‖ random(16) ‖ strapPub(48) -------------------|   67 B
   |    shared = ECDH(phonePriv, strapPub)                      |
   |    encSeq = u32 LE of shared[0..3]                         |
   |    sessionKey[i] = shared[8+i] XOR authKey[i], i = 0..15   |
-  |--- [h=2] 05 ‖ AES(authKey, random) ‖ AES(sessionKey, random) ->|  33 B  "CMD_SESSION_KEY"
+  |--- [h=2] 05 ‖ AES(authKey, random) ‖ AES(sessionKey, random) ->|  33 B  session message
   |<-- 10 05 <status> -----------------------------------------|
   |    status 01 = authenticated; 25 = wrong auth key          |
 ```
@@ -555,7 +555,7 @@ Phone                                                          Strap
 | Message | Layout | Tag / source |
 |---|---|---|
 | **start** | `01`, u8 fetch type (§6.5), then the 8-byte **since** timestamp: u16 LE year, month, day, hour, minute (local), u8 second, i8 UTC offset **including DST** in quarter-hours. Gadgetbridge sends second = `00` by default (minute precision; seconds broke the GTR 3). | 🟡 `FETCH:145-151`, `SUP:679-688`, `BLT:121-134,380-387`, `GB/service/devices/huami/HuamiFetcher.java:150-156`, `HC:926-928,1258-1266` |
-| **start reply** | `10 01 <status>`; status `01` = ok, else the type is unsupported/refused: skip it. Then u32 LE **expected length** (bytes of data excluding the per-packet counter bytes), then the 8-byte **start** timestamp of the first record, same format as *since*. Gadgetbridge accepts 15 bytes, or 16 with a trailing `00`. | 🟡 `FETCH:153-221` |
+| **start reply** | `10 01 <status>`; status `01` = ok, else the type is unsupported/refused: skip it. Then u32 LE **expected length** (bytes of data excluding the per-packet counter bytes), then the 8-byte **start** timestamp of the first record, same format as *since*. Gadgetbridge accepts 15 or 16 bytes (a 16th byte, `00`, was seen on another Zepp OS band). | 🟡 `FETCH:153-221` |
 | **fetch data** | the single byte `02` | 🟡 `FETCH:220`, `HC:944` |
 | **data packet** | on `…0005`: byte `[0]` = u8 **packet counter** starting at `00` for each round and incrementing by 1 (wrapping); the rest is data. Concatenate the data parts. | 🟡 `FETCH:123-143`, `HC:955-965` |
 | **transfer done** | `10 02 <status>`; status `01` = ok. 7-byte form carries u32 LE **CRC-32** (same CRC as §3.3) of the concatenated data parts, counters excluded. | 🟡 `FETCH:223-246` |
@@ -607,8 +607,7 @@ chosen by the phone).
 - The strap returns at most a limited window per round. After processing a round, set the
   next *since* to the **last record's time + 1 minute** and start another round of the same
   type while: the round advanced by ≥ 1 s, fewer than ~11 rounds have run, and the new
-  *since* is not in the future. 🟡 `REPEAT:64-114` (file lines of
-  `processBufferedData`/`needsAnotherFetch`). HelioCore does the same with ≤ 20 rounds
+  *since* is not in the future. 🟡 `REPEAT:64-114`. HelioCore does the same with ≤ 20 rounds
   (`HC:973-981`).
 - First-ever cursor: Gadgetbridge starts 100 days back (`FETCH:293-303`). Keep one cursor
   **per fetch type**.
@@ -633,7 +632,7 @@ support, and the strap inherits all Zepp OS defaults except display-dependent on
 |---|---|---|---|---|---|---|---|
 | `0x01` | **activity** | **8 bytes/min** on Zepp OS: `[0]` kind, `[1]` intensity, `[2]` steps, `[3]` HR, `[4]` unknown, `[5]` sleep, `[6]` deep-sleep, `[7]` REM (sleep bytes: use low 7 bits) | 1/min from *start* | steps = count in that minute; HR bpm, `ff` or `00` = no reading (HelioCore drops them; GB stores raw); intensity 0–255 (GB divides by 256). CRC is **not** checked by GB for this type. | per-minute activity sample | yes (always) | 🟡 `FOP/Activity:71-164`, `SUP:984-986`, `HC:1180-1193` |
 | `0x02` | manual HR | 6 bytes: u32 ts, i8 tz (¼ h), u8 bpm | event | bpm | manual-HR sample | yes | 🟡 `FOP/HeartRateManual:63-90` |
-| `0x0d` | PAI | 102 bytes: u8 type (`05` valid, `00` pre-reset: skip), u32 ts, i8 tz, 31 unknown, f32 PAI low, f32 moderate, f32 high, u16 min low, u16 min moderate, u16 min high, f32 PAI today, f32 PAI total, 39 unknown | daily | PAI points, minutes | PAI sample | yes | 🟡 `FOP/Pai` `handleActivityData` |
+| `0x0d` | PAI | 102 bytes: u8 type (`05` valid, `00` pre-reset: skip), u32 ts, i8 tz, 31 unknown, f32 PAI low, f32 moderate, f32 high, u16 min low, u16 min moderate, u16 min high, f32 PAI today, f32 PAI total, 39 unknown | daily | PAI points, minutes | PAI sample | yes | 🟡 `FOP/Pai:62-129` |
 | `0x12` | stress (manual) | 5 bytes: u32 ts, u8 stress | event | 0–100 | stress, type manual | yes | 🟡 `FOP/StressManual:64-95` |
 | `0x13` | **stress (auto)** | 1 byte/min, `ff` = none (the minute still advances) | 1/min from *start* | 0–100; bands 0–39 relaxed, 40–59 mild, 60–79 moderate, 80–100 high | stress, type automatic | yes | 🟡 `FOP/StressAuto:62-91`, `HC:1195-1199` |
 | `0x25` | **SpO₂** (normal: manual + auto) | one leading **version byte `02`** per round, then 65-byte records: u32 ts, u8 value (**bit 7 set = automatic**, value = low 7 bits), 60 unknown bytes. Other versions: reject. | event | % | SpO₂ sample, type auto/manual | yes | 🟡 `FOP/Spo2Normal:64-103`, `HC:1201-1212` |
@@ -707,8 +706,8 @@ should use both and flag gaps.
 - **Without auth (Tier 0)**: Amazfit documents a **"Heart Rate Push"** switch (Zepp › Device ›
   Amazfit Helio Strap › Health Monitoring) that makes the strap serve HR to third-party
   devices over "the standard Bluetooth protocol" (support.amazfit.com, "How to set the heart
-  rate push function?", © 2025, fetched 2026-09-30). HelioCore subscribes to `0x2A37`
-  directly after auth without the `0x001D` start command (`HC:1105,1125`). 🔴 whether an
+  rate push function?", © 2025, fetched 2026-09-30). HelioCore finds `0x2A37` and has a parser for it but never enables notifications on it
+  (`HC:618,1105,1125`), so it is no evidence either way. 🔴 whether an
   **unauthenticated** central gets `0x2A37` notifications with Heart Rate Push on (§10).
 - Parse `0x2A37` per the Bluetooth HRS spec: flags bit0 → u8/u16 HR; bit3 energy expended
   present; bit4 RR intervals present (u16, 1/1024 s). Gadgetbridge only accepts the
@@ -778,8 +777,8 @@ Other defensive points:
 - **Config writes** carry Gadgetbridge's own group version (HEALTH `03`), not necessarily the
   version the device reported (`SVC/Config:944-947`). 🔴 whether a v1/v2 device accepts that;
   prefer echoing the version from the read reply.
-- **Start-reply length**: accept 15 bytes, or 16 when the extra byte is `00`
-  (`FETCH:190-195`); treat other lengths as a failed round.
+- **Start-reply length**: accept 15 or 16 bytes (`FETCH:190-195`; Gadgetbridge's check
+  effectively accepts any 16th byte); treat other lengths as a failed round.
 - **Competing central**: while the Zepp app is installed and running, it reconnects to the
   strap and may win the connection. Auth failures other than `25` right after connect may
   mean another central holds the strap. 🔴 (plan-of-record §7; no protocol-level signal
