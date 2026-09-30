@@ -175,7 +175,8 @@ persisted active-ring id.** Why:
 - `cumulativeState`: a step delta is never taken against another device's raw counter.
 - `pendingHealthSamples`, `markHealthWritten`, `loadHealthCursor`: the `hk:` watermark is per device.
 - `repairFutureSyncCursors`: resets a row to its own device's latest sample.
-- `upsertCursor`: labels new rows with their device.
+- `upsertCursor(name:last:device:)`: takes the cursor NAME and builds the unique key from the same
+  device it labels the row with, so a key and a device can never disagree.
 
 `SyncCursor.selectNew` itself is unchanged; what changed is that the cursor it runs on belongs to
 one device. **Every existing caller passes no device**, so the ring reads and writes exactly the
