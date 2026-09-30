@@ -6,10 +6,18 @@ import Foundation
 public enum ZeppEndpoint {
     public static let servicesList: UInt16 = 0x0000
     public static let config: UInt16 = 0x000A
+    /// Alarms (§12).
+    public static let alarms: UInt16 = 0x000F
     public static let connection: UInt16 = 0x0015
     public static let realtimeSteps: UInt16 = 0x0016
     public static let userInfo: UInt16 = 0x0017
+    /// Vibration patterns (§13.1). Never written in v1 (§14, §15.1).
+    public static let vibrationPatterns: UInt16 = 0x0018
+    /// Find device / find phone (§11).
+    public static let findDevice: UInt16 = 0x001A
     public static let heartRate: UInt16 = 0x001D
+    /// Notifications. Never used for the strap (§13.3).
+    public static let notifications: UInt16 = 0x001E
     public static let battery: UInt16 = 0x0029
     public static let deviceInfo: UInt16 = 0x0043
     public static let time: UInt16 = 0x0047
@@ -20,16 +28,42 @@ public enum ZeppEndpoint {
     public static let defaultEncryption: [UInt16: Bool] = [
         servicesList: false,
         config: true,
+        alarms: false,
         connection: true,
         realtimeSteps: false,
         userInfo: true,
+        vibrationPatterns: true,
+        findDevice: true,
         heartRate: false,
+        notifications: true,
         battery: true,
         deviceInfo: false,
         time: false,
         activityFetch: true,
         authentication: false,
     ]
+
+    /// A short human-readable name for the §3.5 endpoints, for logs; nil for any other endpoint.
+    public static func displayName(_ endpoint: UInt16) -> String? {
+        switch endpoint {
+        case servicesList: return "services list"
+        case config: return "config"
+        case alarms: return "alarms"
+        case connection: return "connection"
+        case realtimeSteps: return "realtime steps"
+        case userInfo: return "user info"
+        case vibrationPatterns: return "vibration patterns"
+        case findDevice: return "find device"
+        case heartRate: return "heart rate"
+        case notifications: return "notifications"
+        case battery: return "battery"
+        case deviceInfo: return "device info"
+        case time: return "time"
+        case activityFetch: return "activity fetch"
+        case authentication: return "authentication"
+        default: return nil
+        }
+    }
 }
 
 /// The endpoint table a device returns for a services-list request (§5.2).

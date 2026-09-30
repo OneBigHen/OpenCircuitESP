@@ -37,6 +37,19 @@ final class FakeZeppDevice {
     /// An empty type answers with an all-zero start instead of echoing the *since* (§6.2).
     var emptyStartAllZero = false
 
+    // Device controls (§11–§13). Only reachable when a test lists their endpoints in `services`.
+    /// The find-device capabilities reply (§11.2); nil = the strap never answers `01`.
+    var findCapabilitiesReply: [UInt8]? = hex("02 01 02")
+    /// Alarm slot → the 10-byte record as the strap returns it (byte [8] = 01, §12.3).
+    var alarmRecords: [UInt8: [UInt8]] = [:]
+    /// Status byte of the alarm create/delete acks; anything but 01 leaves the alarms unchanged.
+    var alarmAckStatus: UInt8 = 0x01
+    /// Send `0f` (alarms changed) after each accepted alarm write.
+    var announcesAlarmChanges = false
+    var configCapabilitiesReply = hex("02 03 01 08")
+    /// Config read replies by exact request payload; any other read gets `configReply`.
+    var configReplies: [[UInt8]: [UInt8]] = [:]
+
     // Observed state
     private(set) var sessionKey: [UInt8]?
     private(set) var authenticated = false
@@ -45,6 +58,13 @@ final class FakeZeppDevice {
     private(set) var fetchAcks: [UInt8] = []
     private(set) var fetchStarts: [[UInt8]] = []
     private(set) var failures: [String] = []
+    /// Opcodes received on the find-device endpoint, in order.
+    private(set) var findOpcodes: [UInt8] = []
+    private(set) var isBuzzing = false
+    /// Every payload received on the alarms endpoint, in order.
+    private(set) var alarmCommands: [[UInt8]] = []
+    private(set) var timeSetCount = 0
+    private(set) var configWrites: [[UInt8]] = []
 
     private var expectedPhoneSequence: UInt32 = 0
     private var deviceSequence: UInt32 = 0
@@ -136,11 +156,77 @@ final class FakeZeppDevice {
         case 0x0029 where p == [0x03]:
             return send(endpoint: 0x0029, batteryReply)
         case 0x000A where p.first == 0x03:
-            return send(endpoint: 0x000A, configReply)
+            return send(endpoint: 0x000A, configReplies[p] ?? configReply)
+        case 0x000A where p == [0x01]:
+            return send(endpoint: 0x000A, configCapabilitiesReply)
+        case 0x000A where p.first == 0x05:
+            configWrites.append(p)
+            return send(endpoint: 0x000A, [0x06, 0x01])
+        case 0x0047 where p.first == 0x05:
+            guard p.count == 12 else { failures.append("bad time set"); return [] }
+            timeSetCount += 1
+            return send(endpoint: 0x0047, [0x06, 0x01])
+        case 0x001A:
+            return findDevice(p)
+        case 0x000F:
+            return alarms(p)
         default:
             failures.append("unhandled message on \(endpoint)")
             return []
         }
+    }
+
+    // MARK: Device controls (§11, §12)
+
+    private func findDevice(_ p: [UInt8]) -> [Notification] {
+        guard let opcode = p.first, p.count == 1 || p == [0x12, 0x01] else {
+            failures.append("bad find-device payload \(p)")
+            return []
+        }
+        findOpcodes.append(opcode)
+        switch opcode {
+        case 0x01: return findCapabilitiesReply.map { send(endpoint: 0x001A, $0) } ?? []
+        case 0x03:
+            isBuzzing = true
+            return send(endpoint: 0x001A, [0x04])
+        case 0x06:
+            isBuzzing = false
+            return []
+        case 0x12, 0x14: return []
+        default:
+            failures.append("find-device opcode \(opcode) is never sent by a phone")
+            return []
+        }
+    }
+
+    private func alarms(_ p: [UInt8]) -> [Notification] {
+        alarmCommands.append(p)
+        var out = [Notification]()
+        switch p.first {
+        case 0x09 where p.count == 1:
+            var reply: [UInt8] = [0x0a, UInt8(alarmRecords.count)]
+            for slot in alarmRecords.keys.sorted() { reply += alarmRecords[slot]! }
+            return send(endpoint: 0x000F, reply)
+        case 0x03 where p.count == 12 && p[1] == 0x01:
+            var record = Array(p[2...])
+            guard record[1] < 10 else { failures.append("alarm slot \(record[1])"); return [] }
+            record[8] = 0x01
+            if alarmAckStatus == 0x01 { alarmRecords[record[1]] = record }
+            out = send(endpoint: 0x000F, [0x04, alarmAckStatus])
+        case 0x05 where p.count == 3 && p[1] == 0x01:
+            if alarmAckStatus == 0x01 { alarmRecords[p[2]] = nil }
+            out = send(endpoint: 0x000F, [0x06, alarmAckStatus])
+        default:
+            failures.append("alarm command \(p) is never sent by ZeppKit")
+            return []
+        }
+        if announcesAlarmChanges && alarmAckStatus == 0x01 { out += send(endpoint: 0x000F, [0x0f]) }
+        return out
+    }
+
+    /// A strap-originated message (find device `07`, find phone `11`, alarms changed `0f`, …).
+    func unsolicited(endpoint: UInt16, _ payload: [UInt8]) -> [Notification] {
+        send(endpoint: endpoint, payload)
     }
 
     // MARK: Device → phone
