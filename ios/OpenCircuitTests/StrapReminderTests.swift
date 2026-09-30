@@ -67,4 +67,17 @@ final class StrapReminderTests: XCTestCase {
                                                                ringReminders: false, store: nil, now: now, defaults: defaults)
         XCTAssertEqual(pass, [.bedtimeReminder])
     }
+
+    /// Review-224c N-b: the hook runs every step, in order, and fires once per sync.
+    func testTheSyncEndHookRunsEveryStepOncePerSync() {
+        var ran: [HelioSyncEndStep] = []
+        HelioSyncEndStep.runAll { ran.append($0) }
+        XCTAssertEqual(ran, HelioSyncEndStep.allCases)
+        XCTAssertEqual(ran.filter { $0 == .evaluateReminders }.count, 1)
+
+        // `syncing` as the session reports it: two syncs, the second ended by a link drop (→ nil).
+        let observed: [Bool?] = [nil, false, true, true, false, false, true, nil, nil]
+        let ends = zip(observed, observed.dropFirst()).filter { HelioSyncEndStep.syncEnded(from: $0, to: $1) }.count
+        XCTAssertEqual(ends, 2, "one run per sync, however many times `syncing` is re-published")
+    }
 }

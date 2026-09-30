@@ -205,7 +205,7 @@ struct ContentView: View {
                 // Its connection already wrote the store and flushed Apple Health; refresh the dashboard
                 // and run the post-sync passes the ring's `session.syncing` hook runs (review-224b F-1).
                 onSyncFinished: {
-                    for step in HelioSyncEndStep.allCases {
+                    HelioSyncEndStep.runAll { step in
                         switch step {
                         case .reloadTrends: Task { await loadTrends(.syncFinished) }
                         case .refreshObservability: refreshObservability()
@@ -2492,6 +2492,15 @@ enum HelioSyncEndStep: CaseIterable {
     case refreshObservability
     case evaluateHealthAlerts
     case evaluateReminders
+
+    /// Runs every step, in order: what the hook's `onSyncFinished` does (review-224c N-b).
+    static func runAll(_ perform: (HelioSyncEndStep) -> Void) {
+        for step in allCases { perform(step) }
+    }
+
+    /// Whether a change of the session's `syncing` ends a sync: true → false, or true → nil (the link
+    /// dropped mid-sync and the session went). Once per sync.
+    static func syncEnded(from old: Bool?, to new: Bool?) -> Bool { old == true && new != true }
 }
 
 /// ContentView's Helio Strap hooks (#215): the end of a strap sync, a device switch, and the setup sheet.
@@ -2505,7 +2514,7 @@ private struct HelioDashboardHooks: ViewModifier {
     func body(content: Content) -> some View {
         content
             // true → false (finished) or true → nil (the link dropped mid-sync and the session went).
-            .onChange(of: syncing) { old, now in if old == true, now != true { onSyncFinished() } }
+            .onChange(of: syncing) { old, now in if HelioSyncEndStep.syncEnded(from: old, to: now) { onSyncFinished() } }
             .onChange(of: choice) { _, now in onChoiceChanged(now) }
             .sheet(isPresented: $showSetup) { NavigationStack { HelioSetupView() } }
     }
