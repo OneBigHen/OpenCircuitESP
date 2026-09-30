@@ -6,8 +6,10 @@ metrics over Bluetooth LE, decodes them on the phone, and writes them to **Apple
 Inspired by [openwhoop](https://github.com/bWanShiTong/openwhoop), which does the same for the
 Whoop 4.0.
 
-One wearable at a time: pick the ring or the strap in the app (Profile ▸ Device). Switching keeps
-both devices' history on the phone.
+One wearable at a time: pick the ring or the strap in the app (Profile ▸ Device). Each device owns
+the time it was chosen for, and only its readings for that time reach Apple Health and the daily
+totals. What the other device recorded in that time is never written to Apple Health: the ring's
+readings are kept in the app, and the strap's are left on the strap.
 
 <a href="https://www.buymeacoffee.com/standardsoftware" target="_blank"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=standardsoftware&button_colour=5F7FFF&font_colour=ffffff&font_family=Bree&outline_colour=000000&coffee_colour=FFDD00" alt="Buy me a coffee" height="40"></a>
 
@@ -150,7 +152,8 @@ waits for you to try again.
   or synced, and the other way round.
 - **No sleep stages for nights the strap didn't stage.** OpenCircuit uses the strap's own
   staging; a night the strap has no staging for is not staged, stored or written.
-- The first sync reaches back 7 days.
+- **The strap's first sync starts when you switch to it.** Only on a phone that never used a ring
+  does it reach back 7 days. So switch to the strap before bed if you want it to have tonight.
 - Workouts recorded on the strap aren't imported.
 
 ## Use it alongside Bevel or Athlytic
