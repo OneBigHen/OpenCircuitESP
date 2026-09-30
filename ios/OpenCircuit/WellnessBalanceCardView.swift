@@ -35,7 +35,15 @@ struct WellnessBalanceCardView: View {
     /// kcal, so it must price the day exactly as the Goals rings and Apple Health do.
     @Query private var recentStepSamples: [StoredStepSample]
 
-    init() {
+    /// Reports what the card ended up showing, so the Today synthesis line (#216) speaks about the
+    /// SAME readiness instead of recomputing its own. Called after every recompute.
+    var onReport: ((ReadinessReport) -> Void)?
+
+    @ScaledMetric(relativeTo: .largeTitle) private var ringSize: CGFloat = 132
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    init(onReport: ((ReadinessReport) -> Void)? = nil) {
+        self.onReport = onReport
         let dayStart = Calendar.current.startOfDay(for: Date())
         let stepsFrom = dayStart.addingTimeInterval(-86_400)
         let hrKind = MetricKind.heartRate.rawValue
@@ -121,32 +129,69 @@ struct WellnessBalanceCardView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "heart.circle.fill").foregroundStyle(.pink)
-                Text("READINESS").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text("READINESS").font(.caption.weight(.semibold)).tracking(1.2).foregroundStyle(.secondary)
             }
+            // Ring beside the details; stacked at accessibility text sizes so nothing truncates.
+            let layout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 14))
+                : AnyLayout(HStackLayout(alignment: .center, spacing: 20))
             if let r = result {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("\(r.score)")
-                        .font(.system(size: 44, weight: .bold, design: .rounded))
-                        .monospacedDigit().contentTransition(.numericText())
-                        .foregroundStyle(tierColor(r.tier))
-                    Text(tierLabel(r.tier)).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                layout {
+                    ReadinessRing(progress: Double(r.score) / 100, tint: r.tier.ringColor,
+                                  lowConfidence: isLowConfidence(r)) {
+                        VStack(spacing: 0) {
+                            Text("\(r.score)")
+                                .font(.system(size: ringSize * 0.32, weight: .bold, design: .rounded))
+                                .monospacedDigit().contentTransition(.numericText())
+                                .minimumScaleFactor(0.5).lineLimit(1)
+                            Text("of 100").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(width: ringSize, height: ringSize)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(tierLabel(r.tier))
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        ForEach(WellnessBalance.Result.Factor.allCases, id: \.self) { factor in
+                            if let v = r.factors[factor] {
+                                ReadinessFactorBar(label: factorLabel(factor), value: v,
+                                                   tint: r.tier.ringColor)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Text(breakdown(r)).font(.caption).foregroundStyle(.secondary)
+                if isLowConfidence(r) {
+                    Text("Based on last night's sleep alone — overnight recovery and today's activity aren't in yet.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Text("Estimate — a blend of last night's sleep, overnight recovery & today's activity. Not the RingConn app's readiness score, and not medical advice.")
                     .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
-                Text(emptyStateText)
-                    .font(.callout).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                layout {
+                    ReadinessRing(progress: nil) {
+                        Text("—").font(.system(size: ringSize * 0.26, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .frame(width: ringSize * 0.7, height: ringSize * 0.7)
+                    Text(emptyStateText)
+                        .font(.callout).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(result.map { "Readiness, estimate, \($0.score) out of 100, \(tierLabel($0.tier))" }
-                            ?? emptyStateAccessibilityLabel)
+        .accessibilityLabel(result.map {
+            "Readiness, estimate, \($0.score) out of 100, \(tierLabel($0.tier)). \(breakdown($0))"
+            + (isLowConfidence($0) ? ". Based on last night's sleep alone" : "")
+        } ?? emptyStateAccessibilityLabel)
         .task(id: inputsKey) {
             // Snapshot SwiftData rows to Sendable value types on the main actor, run the O(n) activity
             // math off-main, then compose the readiness on the way back.
@@ -201,6 +246,33 @@ struct WellnessBalanceCardView: View {
             result = WellnessBalance.anchoredScore(.init(
                 sleepScore: sleepScore, overnightStress: stress,
                 vitalsStatus: nil, activityScore: activityScore))
+            onReport?(report)
+        }
+    }
+
+    /// What this card is showing, for the synthesis line. Mirrors `readinessGap` for the empty states.
+    private var report: ReadinessReport {
+        let asleep = sleepCredited ? latestSleep.first.flatMap { $0.asleepMin > 0 ? $0.asleepMin : nil } : nil
+        if let r = result {
+            return ReadinessReport(readiness: .scored(score: r.score, tier: r.tier, factorCount: r.factors.count),
+                                   lastNightAsleepMin: asleep)
+        }
+        switch readinessGap {
+        case .noNight:   return ReadinessReport(readiness: .noNight, lastNightAsleepMin: nil)
+        case .noScore:   return ReadinessReport(readiness: .noScore, lastNightAsleepMin: asleep)
+        case .computing: return ReadinessReport(readiness: .pending, lastNightAsleepMin: asleep)
+        }
+    }
+
+    /// A score resting on last night's sleep alone (no overnight recovery, no activity yet).
+    private func isLowConfidence(_ r: WellnessBalance.Result) -> Bool { r.factors.count <= 1 }
+
+    private func factorLabel(_ f: WellnessBalance.Result.Factor) -> String {
+        switch f {
+        case .sleep:    return "Sleep"
+        case .recovery: return "Overnight recovery"
+        case .vitals:   return "Vitals"
+        case .activity: return "Activity"
         }
     }
 
@@ -217,14 +289,6 @@ struct WellnessBalanceCardView: View {
         case .excellent:        return "Excellent"
         case .good:             return "Good"
         case .needsImprovement: return "Needs improvement"
-        }
-    }
-
-    private func tierColor(_ t: WellnessBalance.Tier) -> Color {
-        switch t {
-        case .excellent:        return .green
-        case .good:             return .teal   // dashboard mid/secondary accent (matches SleepCardView)
-        case .needsImprovement: return .orange
         }
     }
 }

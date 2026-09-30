@@ -95,10 +95,15 @@ struct ContentView: View {
     @State private var trends = TrendsData()
     /// When `trends` was last (re)loaded — the debounce input for `TrendsRefreshPolicy`.
     @State private var trendsLoadedAt: Date?
+    /// True once a trends load has LANDED (`trendsLoadedAt` is stamped before the await, so it
+    /// can't say that) — the Today header and tiles show a loading state until then (#216).
+    @State private var trendsHaveLoaded = false
     /// Rolling buffer of recent live readings feeding the liveline live chart during an on-demand
     /// measurement (HR or SpO₂). Accumulated from `session.liveHR`/`liveSpO2` onChange, reset when
     /// monitoring stops. Display units: bpm for HR, whole-percent for SpO₂.
     @State private var liveBuffer = LiveBuffer()
+    /// What the readiness card last showed, so the Today synthesis line (#216) agrees with it.
+    @State private var readinessReport: ReadinessReport?
 
     // Display units (#83) — SI is stored; only the display layer converts. Shared keys with settings.
     @AppStorage("units.temperature") private var tempUnitRaw = TemperatureUnit.localeDefault.rawValue
@@ -160,6 +165,9 @@ struct ContentView: View {
                 .tag(Tab.profile)
         }
         .tint(Theme.accent)
+#if DEBUG
+        .modifier(DemoScreenModifier())   // screenshot harness (#216); inert without -OCDemoData
+#endif
             // Shared trends cache: load once, then refresh on foreground return and after each sync.
             // Every hook goes through `TrendsRefreshPolicy` — at a cold launch `.task` and
             // `scenePhase == .active` both fire within a frame or two of each other, and one load
@@ -187,6 +195,10 @@ struct ContentView: View {
                 // Wire persistence into the scanner/session so the (currently gated)
                 // epoch-sync decoder can persist Layer-A records once enabled. #24
                 scanner.setLocalStore(LocalStore(modelContext))
+#if DEBUG
+                // Screenshot fixtures (#216): no-op unless launched with `-OCDemoData YES`.
+                DemoData.seedIfRequested(modelContext)
+#endif
             }
             // First-run onboarding (#103): full-screen on first launch only, until completed/skipped.
             .fullScreenCover(isPresented: Binding(
@@ -381,6 +393,8 @@ struct ContentView: View {
         NavigationStack(path: $path) {
             List {
                 Group {
+                    // One plain-language sentence about today (#216), above everything else.
+                    TodaySynthesisHeader(sentence: synthesisSentence)
                     connectionCard
                     // First-run Health authorization banner (#143) — right under the connection card.
                     if !healthAuthorized, HealthKitWriter.isAvailable {
@@ -417,6 +431,10 @@ struct ContentView: View {
                 OCSectionHeader(isHR ? "Live Heart Rate" : "Live SpO₂",
                                 systemImage: isHR ? "heart.fill" : "lungs.fill",
                                 tint: isHR ? Theme.hr : Theme.spo2)
+                // Large live readout above the scrolling chart (#216). nil/0 = still warming up.
+                LiveVitalReadout(value: (isHR ? session.liveHR : session.liveSpO2).flatMap { $0 > 0 ? $0 : nil },
+                                 unit: isHR ? "bpm" : "%", tint: isHR ? Theme.hr : Theme.spo2,
+                                 pulses: isHR, sessionValues: liveBuffer.points.map(\.value))
                 LiveVitalsChart(buffer: liveBuffer,
                                 color: isHR ? Theme.hr : Theme.spo2,
                                 window: 90,
@@ -440,6 +458,20 @@ struct ContentView: View {
                                  metricUnit: "h", metricDecimals: 1)
                     }
                     sleepCard
+                    // Browse any of the last 30 nights with its stage chart (#216).
+                    NavigationLink { SleepNightsBrowserView() } label: {
+                        card {
+                            HStack(spacing: 8) {
+                                KeylineGlyph(.calendar, size: 16).foregroundStyle(Theme.sleep)
+                                Text("PAST NIGHTS").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                Spacer()
+                                KeylineGlyph(.chevronRight, size: 12, relativeTo: .caption).foregroundStyle(.tertiary)
+                            }
+                            Text("Browse earlier nights and their sleep stages")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
                     if !trends.points.isEmpty {
                         OCSectionHeader("Sleep Trends", systemImage: "chart.xyaxis.line", tint: Theme.sleep)
                         SleepTrendsSection(points: trends.points, tempUnitRaw: tempUnitRaw)
@@ -609,6 +641,7 @@ struct ContentView: View {
         // which is the exact double-load being fixed.
         trendsLoadedAt = Date()
         trends = await TrendsData.loadAsync(container: modelContext.container, tempUnitRaw: tempUnitRaw)
+        trendsHaveLoaded = true
     }
 
     /// Append one live reading (already in display units) to the liveline buffer, stamped now.
@@ -647,9 +680,31 @@ struct ContentView: View {
             }
         }
         for s in DashboardSection.allCases where !seen.contains(s) {
-            result.append(s); seen.insert(s)
+            // The metric tiles (#216) are new since most saved orders: put them straight under
+            // readiness, where they belong, rather than at the bottom of an existing layout.
+            if s == .metrics, let i = result.firstIndex(of: .readiness) {
+                result.insert(s, at: i + 1)
+            } else {
+                result.append(s)
+            }
+            seen.insert(s)
         }
         return result
+    }
+
+    /// The Today metric tiles (#216), built from the shared trends load.
+    private var todayTiles: [TodayTile] {
+        TodayTiles.build(points: trends.points, restingHR: trends.restingHR,
+                         tempUnit: TemperatureUnit(rawValue: tempUnitRaw) ?? .celsius)
+    }
+
+    /// The Today synthesis sentence (#216) — deterministic rules in `TodaySynthesis`.
+    private var synthesisSentence: String {
+        // Before the first trends load there is nothing to judge — and "no ring data yet" would be
+        // a false claim to a wearer who has plenty.
+        guard trendsHaveLoaded else { return "Gathering today's numbers…" }
+        return TodaySynthesis.sentence(TodaySynthesis.input(trends: trends, tiles: todayTiles,
+                                                             readiness: readinessReport, lastSyncAt: lastSyncAt))
     }
 
     /// The sections actually rendered right now — `sectionOrder` minus any feature-gated card that's
@@ -679,7 +734,9 @@ struct ContentView: View {
     @ViewBuilder
     private func sectionView(_ section: DashboardSection) -> some View {
         switch section {
-        case .readiness:    card { WellnessBalanceCardView() }
+        case .readiness:    card { WellnessBalanceCardView(onReport: { readinessReport = $0 }) }
+        case .metrics:      MetricTilesSection(tiles: todayTiles, isLoading: !trendsHaveLoaded,
+                                               onSelect: { path.append(.metric($0)) })
         case .vitals:       vitalsCard
         case .vitalsStatus: vitalsStatusCard
         case .calories:     caloriesCard
@@ -698,6 +755,7 @@ struct ContentView: View {
         case .cycle:       CycleCalendarView()
         case .headache:    HeadacheSignalsView()
         case .activityLog: ActivityLogView(session: session)
+        case .metric(let m): MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw)
         }
     }
 
@@ -2258,7 +2316,7 @@ struct ContentView: View {
 /// (first-run) layout. (Sleep / workout / trends moved to their own tabs and are no longer sections;
 /// the order decoder ignores those now-unknown saved ids, so existing saved orders still load.)
 private enum DashboardSection: String, CaseIterable, Identifiable, Hashable {
-    case readiness, vitals, vitalsStatus, calories, goals, cycle, headache, sync
+    case readiness, metrics, vitals, vitalsStatus, calories, goals, cycle, headache, sync
     var id: String { rawValue }
 }
 
@@ -2267,6 +2325,8 @@ private enum DashboardSection: String, CaseIterable, Identifiable, Hashable {
 /// top of the cards' custom ones.
 private enum Route: Hashable {
     case cycle, headache, activityLog
+    /// A Today metric tile's 14/30-day trend chart (#216).
+    case metric(TodayTile.Metric)
 }
 
 /// A headache the quick-log deep link just stored, identified by its `onset` — the store key — so

@@ -23,6 +23,12 @@ struct TrendsData {
     var goalDays: [GoalHistory.Day] = []
     /// Streak / met-count roll-up over `goalDays`.
     var goalSummary: GoalHistory.Summary = GoalHistory.summarize([], now: Date())
+    /// Per-day resting HR over the same window (`RestingHR.dailyValues`, the derivation Vitals Status
+    /// uses), oldest first — the Today tab's Resting HR tile (#216). `DailyPoint` carries no resting HR.
+    var restingHR: [RestingHR.DailyValue] = []
+    /// Start time of the newest stored ring reading of any kind in the window, or nil when there is
+    /// none — what the Today synthesis line judges freshness by (#216).
+    var newestSampleAt: Date?
 
     static let lookbackDays = 14
 
@@ -89,19 +95,35 @@ struct TrendsData {
     /// `.syncFinished` trigger fires after the commit — so nothing this reads can be stranded in an
     /// unsaved main-context change. A future caller that reloads trends mid-transaction would be
     /// the exception, and should save first rather than reach back onto the main actor.
-    static func loadAsync(container: ModelContainer, tempUnitRaw: String) async -> TrendsData {
+    /// `lookbackDays` defaults to the shared two-week window every tab uses; the Today metric
+    /// detail chart (#216) passes 30 for its longer range.
+    static func loadAsync(container: ModelContainer, tempUnitRaw: String,
+                          lookbackDays: Int = TrendsData.lookbackDays) async -> TrendsData {
         let profile = await MainActor.run { HealthKitWriter.storedUserProfile() }
         // Goals live in UserDefaults, which `@AppStorage` also binds on the main actor; snapshot
         // them here alongside the profile so the detached work touches nothing main-isolated.
         let goals = await MainActor.run { GoalHistory.Goals.fromDefaults() }
         let inputs = await Task.detached {
-            fetchInputs(container: container, profile: profile, goals: goals, tempUnitRaw: tempUnitRaw)
+            fetchInputs(container: container, profile: profile, goals: goals, tempUnitRaw: tempUnitRaw,
+                        lookbackDays: lookbackDays)
         }.value
         let points = await Task.detached { computePoints(inputs) }.value
         let goalDays = await Task.detached { computeGoalDays(inputs, points: points) }.value
         let recentRows = await buildRecentMetricRows(inputs)
+        let restingHR = await Task.detached {
+            RestingHR.dailyValues(hr: inputs.hr.filter { $0.value > 0 }
+                .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) })
+        }.value
         return TrendsData(points: points, recentRows: recentRows,
-                          goalDays: goalDays, goalSummary: GoalHistory.summarize(goalDays, now: Date()))
+                          goalDays: goalDays, goalSummary: GoalHistory.summarize(goalDays, now: Date()),
+                          restingHR: restingHR, newestSampleAt: newestSample(inputs))
+    }
+
+    /// Newest reading start across every series the window fetched.
+    nonisolated private static func newestSample(_ i: Inputs) -> Date? {
+        let starts: [Date?] = [i.hr.last?.start, i.hrv.last?.start, i.spo2.last?.start, i.rr.last?.start,
+                               i.temps.map(\.time).max(), i.stepDeltas.map(\.end).max()]
+        return starts.compactMap { $0 }.max()
     }
 
     /// Off-main fetch + extraction into the `Sendable` `Inputs` snapshot.
@@ -112,7 +134,8 @@ struct TrendsData {
     nonisolated private static func fetchInputs(container: ModelContainer,
                                                 profile: UserProfile,
                                                 goals: GoalHistory.Goals,
-                                                tempUnitRaw: String) -> Inputs {
+                                                tempUnitRaw: String,
+                                                lookbackDays: Int) -> Inputs {
         let context = ModelContext(container)
         let cal = Calendar.current
         let now = Date()
