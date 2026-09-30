@@ -578,8 +578,10 @@ final class HelioSession: WearableSession {
             // The hardware-validated read (#223): byte-identical to what HelioVerify sent on a real
             // strap (§10.1 item 8), `03 00 08 07 01 04 05 11 12 13 31`. It includes `0x04`, which is
             // read but never shown as a warning (`recordingWarnings`).
-            send(ZeppEndpoint.config, ZeppConfig.readRequest(group: ZeppConfig.healthGroup,
-                                                             arguments: ZeppConfig.healthReadArguments))
+            let request = ZeppConfig.readRequest(group: ZeppConfig.healthGroup, arguments: ZeppConfig.healthReadArguments)
+            let spaced = request.map { String(format: "%02x", $0) }.joined(separator: " ")
+            helioLog.notice("helio: HEALTH read \(spaced, privacy: .public)")   // control bytes only
+            send(ZeppEndpoint.config, request)
             return true
         case .findCapabilities:
             // Sends a stop owed since a link loss first (decision 18), then the read-only `01`.
@@ -690,6 +692,9 @@ final class HelioSession: WearableSession {
         case .healthConfig?:
             if let reply = ZeppConfig.parseReadReply(payload), reply.group == ZeppConfig.healthGroup {
                 recordingWarnings = Self.recordingWarnings(ZeppHealthSettings(reply))
+                helioLog.notice("helio: HEALTH reply read, \(self.recordingWarnings.count, privacy: .public) recording warning(s)")
+            } else {
+                helioLog.notice("helio: HEALTH reply unreadable; no recording warnings")
             }
             advance(from: .healthConfig)
         case .alertCapabilities?:
