@@ -454,6 +454,8 @@ extension HelioVerifier {
         case let error as ZeppAlarmEditor.Error:
             switch error {
             case .busy: return "another alarm read or write is in flight"
+            case .listMalformedThisConnection(let problem):
+                return "the strap returned a malformed alarm list (\(problem)); alarms are off for this connection"
             case .listNotRead: return "no well-formed alarm list was read on this connection"
             case .listChangedOnStrap: return "the strap's alarms changed since the read (0f); run again"
             case .timeNotSet: return "the strap's clock was not confirmed set on this connection (needs endpoint 0x0047 and a 06 01 reply)"

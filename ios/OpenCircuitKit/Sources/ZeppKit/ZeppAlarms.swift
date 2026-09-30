@@ -305,6 +305,7 @@ public struct ZeppAlarmEditor {
         case notRead
         case read([ZeppAlarm])
         /// The last read failed. Never show "no alarms" for this: it is a different statement (§14).
+        /// A malformed list (anything but `.timedOut`) disables alarms for the rest of the connection.
         case unreadable(ZeppAlarmListError)
     }
 
@@ -354,6 +355,9 @@ public struct ZeppAlarmEditor {
     public enum Error: Swift.Error, Equatable {
         /// A read or write is in flight.
         case busy
+        /// The strap returned a malformed list on this connection: alarms are unsupported until the
+        /// next connection, and nothing is written (§12.4).
+        case listMalformedThisConnection(ZeppAlarmListError)
         /// No well-formed list was read on this connection.
         case listNotRead
         /// `0f` arrived after the last read: re-read, then ask the user to confirm again.
@@ -388,6 +392,8 @@ public struct ZeppAlarmEditor {
     public private(set) var isTimeSet = false
     /// A `0f` arrived after the last list request.
     public private(set) var isListStale = false
+    /// The malformed list that disabled alarms for this connection (§12.4); nil while usable.
+    public private(set) var malformedList: ZeppAlarmListError?
     private var pending: Pending = .none
     private var changeSeenSinceRequest = false
 
@@ -404,7 +410,7 @@ public struct ZeppAlarmEditor {
 
     /// §14 "Alarms (view)": endpoint listed and a well-formed list read on this connection.
     public var canView: Bool {
-        capabilities.isSupported(.alarms) && alarms != nil
+        capabilities.isSupported(.alarms) && malformedList == nil && alarms != nil
     }
 
     /// §14 "Alarms (edit)": the view condition, a confirmed time set, no `0f` since the read, and
@@ -443,6 +449,7 @@ public struct ZeppAlarmEditor {
     /// Reads the list (`09`). Read-only.
     public mutating func read(now: Date) throws -> Output {
         try capabilities.require(.alarms)
+        if let malformedList { throw Error.listMalformedThisConnection(malformedList) }
         guard pending == .none else { throw Error.busy }
         pending = .reading(deadline: now.addingTimeInterval(configuration.replyTimeout))
         changeSeenSinceRequest = false
@@ -528,6 +535,7 @@ public struct ZeppAlarmEditor {
     /// §15.2 step 1 (and step 5's race check). Returns the list the edit is based on.
     private func writePreconditions() throws -> [ZeppAlarm] {
         try capabilities.require(.alarms)
+        if let malformedList { throw Error.listMalformedThisConnection(malformedList) }
         guard pending == .none else { throw Error.busy }
         guard let alarms else { throw Error.listNotRead }
         guard !isListStale else { throw Error.listChangedOnStrap }
@@ -573,6 +581,7 @@ public struct ZeppAlarmEditor {
                 return Output(events: [.listRead(alarms)])
             case .failure(let error):
                 list = .unreadable(error)
+                malformedList = error
                 return Output(events: [.listUnreadable(error)])
             }
         case .verifying(let write, let before, _):
@@ -585,6 +594,7 @@ public struct ZeppAlarmEditor {
             case .failure(let error):
                 list = .unreadable(error)
                 isListStale = true
+                malformedList = error
                 return Output(events: [.writeUnverified(write, error)])
             }
         case .none, .writing:

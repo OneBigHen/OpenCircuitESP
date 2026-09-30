@@ -340,10 +340,22 @@ final class AlarmEditorTests: XCTestCase {
         XCTAssertNil(editor.alarms)
         XCTAssertEqual(editor.freeSlots, [])
         editor.noteTimeSetReply([0x06, 0x01])
-        XCTAssertThrowsError(try editor.add(hour: 6, minute: 0, now: t0)) { XCTAssertEqual($0 as? ZeppAlarmEditor.Error, .listNotRead) }
-        // A later well-formed read recovers.
-        _ = try editor.read(now: t0)
-        _ = editor.receive(listG, now: t0)
-        XCTAssertTrue(editor.canEdit)
+        XCTAssertThrowsError(try editor.add(hour: 6, minute: 0, now: t0)) {
+            XCTAssertEqual($0 as? ZeppAlarmEditor.Error, .listMalformedThisConnection(.duplicateSlot(0)))
+        }
+        // §12.4: unsupported for the rest of this connection, even for a read.
+        XCTAssertEqual(editor.malformedList, .duplicateSlot(0))
+        XCTAssertThrowsError(try editor.read(now: t0)) {
+            XCTAssertEqual($0 as? ZeppAlarmEditor.Error, .listMalformedThisConnection(.duplicateSlot(0)))
+        }
+        XCTAssertFalse(editor.canEdit)
+        // A timeout is not a malformed list: a re-read may still succeed.
+        var timedOut = ZeppAlarmEditor(capabilities: ControlsFixtures.strapCapabilities())
+        _ = try timedOut.read(now: t0)
+        _ = timedOut.tick(now: t0 + 60)
+        XCTAssertNil(timedOut.malformedList)
+        _ = try timedOut.read(now: t0 + 61)
+        _ = timedOut.receive(listG, now: t0 + 62)
+        XCTAssertTrue(timedOut.canView)
     }
 }

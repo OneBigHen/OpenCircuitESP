@@ -217,6 +217,9 @@ final class FindDeviceTests: XCTestCase {
         XCTAssertEqual(machine.mode, .oneShotEmulation)
         XCTAssertEqual(machine.receive(hex("02 01 03"), now: t0).events, [.capabilities(version: 3)])
         XCTAssertEqual(machine.mode, .continuous)
+        // §11.2: a malformed reply is ignored; it does not undo a well-formed one.
+        XCTAssertEqual(machine.receive(hex("02 01"), now: t0).events, [.capabilities(version: nil)])
+        XCTAssertEqual(machine.version, 3)
     }
 
     func testBuzzIsStartThenStopAfter500ms() throws {

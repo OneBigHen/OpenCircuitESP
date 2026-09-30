@@ -56,7 +56,7 @@ public enum ZeppFindPhoneMode: Equatable {
 public enum ZeppFindDeviceMessage: Equatable {
     /// A well-formed capabilities reply `02 01 <version>` (exactly 3 bytes, §11.2, §14).
     case capabilities(version: UInt8)
-    /// Any other reply starting `02`: ignored, the version stays unknown (§11.2).
+    /// Any other reply starting `02`: ignored, the version is left as it was (§11.2).
     case malformedCapabilities
     /// `04`: the strap acknowledges a start. Further bytes are not read.
     case startAcknowledged
@@ -287,7 +287,7 @@ public struct ZeppFindDevice {
             version = reported
             return Output(events: [.capabilities(version: reported)])
         case .malformedCapabilities:
-            version = nil
+            // Ignored: the version stays whatever it was (unknown, unless a well-formed reply came).
             return Output(events: [.capabilities(version: nil)])
         case .startAcknowledged:
             // One-shot emulation: another `03` after the delay, unless the stop comes first.
