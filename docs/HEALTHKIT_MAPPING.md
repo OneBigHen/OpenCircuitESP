@@ -17,6 +17,32 @@ device's own timestamps (so historical sync backfills correctly).
 | Sleep stages | `HKCategoryType(.sleepAnalysis)` | Category | — | values: `inBed`, `asleepCore`, `asleepDeep`, `asleepREM`, `awake` |
 | Workout / strain | `HKWorkout` | Workout | — | openwhoop "strain" has no native type; store as workout + metadata |
 
+## Amazfit Helio Strap (Zepp OS), proposed (#215)
+
+The strap's metrics land on the **same `MetricKind`s and HealthKit types as the ring**. Wire
+layouts are in `ZEPP_PROTOCOL.md` §6.5. Nothing below is implemented yet, and every wire
+claim is 🟡 until checked on a real strap.
+
+| Helio fetch type | `MetricKind` → HealthKit type | Conversion | Gap / decision needed |
+|---|---|---|---|
+| `0x01` activity: per-minute HR byte | `.heartRate` → `.heartRate` | bpm as-is; drop `0x00`/`0xFF` (no reading) | none |
+| `0x01` activity: per-minute steps | `.steps` → `.stepCount` | one sample per minute (or folded per quarter-hour), count as-is | the strap reports **true per-minute counts with a backlog**, unlike the ring's quarter-hour bucket (#192). Don't route these through `StepAccumulator`. Double-counting with the phone is the same trade-off as the ring |
+| `0x3A` resting HR | `.restingHeartRate` → `.restingHeartRate` | bpm, one per day | **device-reported**, unlike the ring's derived `RestingHR`. Write it as-is; skip `RestingHR` derivation for this device |
+| `0x3D` max HR | none | — | **gap**: no HealthKit type. Keep it local (or drop it) |
+| `0x49` HRV | `.hrvSDNN` → `.heartRateVariabilitySDNN` | ms | **statistic unknown** (RMSSD vs SDNN). Until a capture settles it, tag the metadata with `OpenCircuitHRVStatistic = "unknown"` rather than guessing "RMSSD" |
+| `0x25` SpO₂ (auto + manual) | `.spo2` → `.oxygenSaturation` | % ÷ 100 (fraction), from the low 7 bits of the value byte | none. `0x26` sleep SpO₂ is optional (Gadgetbridge doesn't store it) |
+| `0x2E` temperature | `.temperature` → `.bodyTemperature` | centi-°C ÷ 100 | per-minute **all day**, not just the sleep window like the ring. Decide whether to write every minute, only the sleep window (matching the ring's #29 behaviour), or a downsampled series. Same skin-vs-core caveat as the ring |
+| `0x38` sleep respiratory rate | `.respiratoryRate` → `.respiratoryRate` | breaths/min as-is | none |
+| `0x48` sleep session + stages | `.sleep` → `.sleepAnalysis` | stage `04` light → `asleepCore`, `05` deep → `asleepDeep`, `08` REM → `asleepREM`, `07` awake → `awake`; unknown stage → `asleepUnspecified` | the strap's own staging. Decide device staging vs `SleepStaging`, and whether to write `inBed` (the record has no separate in-bed span, 🔴) |
+| `0x13` stress (auto) | none | — | **gap**: no HealthKit type. Local only |
+| `0x0D` PAI | none | — | **gap**: no HealthKit type. Local only |
+| active energy | `.activeEnergy` → `.activeEnergyBurned` | derived from HR with `Calories` (the strap sends no energy history) | same derivation as the ring. Needs dense HR, which the strap's per-minute HR provides |
+| `0x05`/`0x06` workouts | `HKWorkout` | — | **out of scope for v1** (see protocol §6.5) |
+
+Cross-device rules (plan of record §4): attach an `HKDevice` naming the strap to every write,
+and allow **one active device at a time** in v1, because Apple Health can't dedupe two
+devices writing under the same source app.
+
 ## User-entered logs
 
 Not everything we write comes from the ring. These types carry what the **user typed**,
