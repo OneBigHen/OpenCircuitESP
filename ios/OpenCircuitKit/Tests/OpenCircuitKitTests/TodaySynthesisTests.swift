@@ -13,9 +13,11 @@ final class TodaySynthesisTests: XCTestCase {
                      hrv: BaselineTrend.Direction? = nil,
                      rhr: BaselineTrend.Direction? = nil,
                      temp: BaselineTrend.Direction? = nil,
+                     fever: Bool = false,
                      sleep: Int? = nil, usualSleep: Double? = nil,
                      newest: Date?? = .none) -> String {
         TodaySynthesis.sentence(.init(readiness: readiness, hrv: hrv, restingHR: rhr, skinTemp: temp,
+                                      feverSuspected: fever,
                                       lastNightSleepMinutes: sleep, usualSleepMinutes: usualSleep,
                                       newestDataAt: newest ?? fresh, now: now))
     }
@@ -89,10 +91,70 @@ final class TodaySynthesisTests: XCTestCase {
     }
 
     func testFeverPairTakesPrecedence() {
-        XCTAssertEqual(say(.scored(score: 80, tier: .good, factorCount: 3), hrv: .above, rhr: .above, temp: .above),
+        XCTAssertEqual(say(.scored(score: 80, tier: .good, factorCount: 3), hrv: .above, rhr: .above, temp: .above,
+                           fever: true),
                        "Readiness is good at 80, but skin temperature and resting heart rate are both above your usual, so take today gently.")
-        XCTAssertEqual(say(rhr: .above, temp: .above),
+        XCTAssertEqual(say(rhr: .above, temp: .above, fever: true),
                        "Skin temperature and resting heart rate are both above your usual, so take today gently.")
+    }
+
+    /// Both tiles above their usual is NOT the fever pairing: only Vitals Status's own verdict is.
+    func testBothTilesAboveWithoutVitalsStatusFeverIsOrdinaryClauses() {
+        XCTAssertEqual(say(.scored(score: 80, tier: .good, factorCount: 3), rhr: .above, temp: .above),
+                       "Readiness is good at 80, though resting heart rate is above your usual.")
+        XCTAssertEqual(say(rhr: .above, temp: .above), "Resting heart rate is above your usual.")
+        XCTAssertEqual(say(.noNight, rhr: .above, temp: .above),
+                       "Last night's sleep hasn't synced yet, so there's no readiness score, but resting heart rate is above your usual.")
+    }
+
+    // MARK: Agreement with Vitals Status (review #220 S3)
+
+    /// A daily series ending today, oldest first.
+    private func trend(_ values: [Double], floor: Double) -> BaselineTrend.Result? {
+        BaselineTrend.evaluate(values.enumerated().map { i, v in
+            BaselineTrend.Point(date: now.addingTimeInterval(Double(i - values.count + 1) * 86_400), value: v)
+        }, minAbsoluteDelta: floor)
+    }
+
+    /// The reviewer's probe, asserting the fix. +0.35 °C and +3 bpm put BOTH tiles above their usual
+    /// (floors 0.3 °C and 2 bpm), but Vitals Status's fever rule (+1.0 °C AND +8 bpm over 7+ days)
+    /// doesn't fire, so the synthesis must not say "take today gently" under a Vitals Status card that
+    /// shows no fever. Vitals Status firing is what brings the pairing back.
+    func testTheFeverPairingFollowsVitalsStatusNotTheTiles() {
+        let temp = trend([33.5, 33.5, 33.5, 33.5, 33.5, 33.85], floor: 0.3)
+        let rhrPrior: [Double] = [58, 58, 58, 58, 58, 58, 58]
+        let rhr = trend(rhrPrior + [61], floor: 2)
+        XCTAssertEqual(temp?.direction, .above)
+        XCTAssertEqual(rhr?.direction, .above)
+        let noFever = VitalsBaseline.suspectedFever(restingHRToday: 61, restingHRPrior: rhrPrior, skinTempOffsetC: 0.35)
+        XCTAssertFalse(noFever)
+        let s = say(.scored(score: 80, tier: .good, factorCount: 3), rhr: rhr?.direction, temp: temp?.direction,
+                    fever: noFever)
+        XCTAssertEqual(s, "Readiness is good at 80, though resting heart rate is above your usual.")
+
+        let fever = VitalsBaseline.suspectedFever(restingHRToday: 67, restingHRPrior: rhrPrior, skinTempOffsetC: 1.2)
+        XCTAssertTrue(fever)
+        XCTAssertEqual(say(.scored(score: 80, tier: .good, factorCount: 3), rhr: .above, temp: .above, fever: fever),
+                       "Readiness is good at 80, but skin temperature and resting heart rate are both above your usual, so take today gently.")
+    }
+
+    /// The reviewer's second probe. Resting HR 58 → 61 reads "above your usual" on the tile (allowed:
+    /// the tile's band is its own) while Vitals Status calls it normal. Whatever the skin-temperature
+    /// tile says, the synthesis must not escalate that to fever signs or "take today gently".
+    func testARestingHRTileAboveWhileVitalsStatusIsNormalIsNeverEscalated() {
+        let prior: [Double] = [58, 58, 59, 58, 57, 58, 58]
+        XCTAssertEqual(trend(prior + [61], floor: 2)?.direction, .above)
+        XCTAssertEqual(VitalsBaseline.classify(today: 61, prior: prior, vital: .restingHR).severity, .normal)
+        let readinesses: [TodaySynthesis.Readiness] = [.pending, .noNight, .noScore,
+                                                       .scored(score: 80, tier: .good, factorCount: 3),
+                                                       .scored(score: 40, tier: .needsImprovement, factorCount: 2)]
+        for r in readinesses {
+            for t: BaselineTrend.Direction? in [nil, .within, .above] {
+                let s = say(r, rhr: .above, temp: t)
+                XCTAssertFalse(s.contains("gently"), s)
+                XCTAssertFalse(s.contains("both above"), s)
+            }
+        }
     }
 
     // MARK: No readiness
@@ -123,11 +185,11 @@ final class TodaySynthesisTests: XCTestCase {
             .scored(score: 40, tier: .needsImprovement, factorCount: 2),
         ]
         let dirs: [BaselineTrend.Direction?] = [nil, .above, .within, .below]
-        for r in readinesses { for h in dirs { for rh in dirs { for t in dirs {
-            let s = say(r, hrv: h, rhr: rh, temp: t, sleep: 300)
+        for r in readinesses { for h in dirs { for rh in dirs { for t in dirs { for f in [false, true] {
+            let s = say(r, hrv: h, rhr: rh, temp: t, fever: f, sleep: 300)
             XCTAssertTrue(s.hasSuffix("."), s)
             XCTAssertEqual(s.filter { $0 == "." }.count, 1, s)
             XCTAssertEqual(s.first.map { String($0) }, s.first.map { String($0).uppercased() }, s)
-        } } } }
+        } } } } }
     }
 }

@@ -95,7 +95,7 @@ becomes a real one-liner in the PR that retypes its view (follow-ups §4).
 | `model` | `model` | Generation label ("Gen 2", "Gen 2 Air", "Gen 3"), or nil while unknown. Never "Unknown" |
 | `hardwareVersion` | `hardwareVersion` | DIS 0x2A27 |
 | `firmwareVersion` | `firmwareVersion` | DIS 0x2A26, e.g. "FR02.018" |
-| `localIdentifier` | `id` | CoreBluetooth peripheral UUID: per-install, never the MAC. Already the per-ring key for EpochArchiveStore and RingMetadataStore |
+| `localIdentifier` | the family's sync timeline, `SyncDeviceID.timeline(for: kind, identityID: id)` | `"ringconn"` for every RingConn ring (Juan's decision: all rings are one device, as they are one store timeline, §3). A Zepp OS device gets `zeppos:<id>` by the same rule. Never the MAC |
 | `softwareVersion`, `udiDeviceIdentifier` | none | nil |
 
 Empty strings map to nil, so no field is ever written as "".
@@ -109,7 +109,14 @@ fields over the persisted ones with `WearableIdentity.merging(previous:)`: a kno
 downgraded to unknown for the same id, and a different id never inherits another ring's fields
 (the rule `RingMetadataStore.record` already uses). When no session exists, the persisted identity
 of the active ring (`RingScanner.activeRingID`) is used, falling back to the last-connected ring's
-id in `RingMetadataStore`.
+id in `RingMetadataStore`. The store stays keyed per peripheral even though every ring shares the
+`localIdentifier` "ringconn": one ring must never report another's firmware.
+
+**Before the ring has identified itself, a write names no device.** With nothing persisted for a
+ring and no firmware version read yet (the DIS read is still in flight on its first connection),
+`identityForHealthWrite()` returns nil and records nothing. The sample is written device-less,
+exactly as before the seam, instead of naming the ring with its name only. Without this, Health
+would list one ring twice: once as that sparse first identity and once in full.
 
 **Which samples carry the device.** Everything the wearable measured or that is derived from its
 data: HR, HRV, SpO₂, RR, temperature, steps, distance, resting HR, active and basal energy,
@@ -139,7 +146,7 @@ watermark had the same shape, so even a stored backfill would never have reached
 | `StoredSample` | no device | `deviceID: String = "ringconn"` |
 | `StoredCursor` | `@Attribute(.unique) kindRaw` = the cursor name | same unique column, now the **(device, name) key**, plus `deviceID: String = "ringconn"` |
 | Cursor key | `heartRate`, `hk:heartRate`, `export:…` | ring: **unchanged**. Another device: `<name>@<device>` (`SyncCursorKey`), so `hk:`/`export:` prefixes still filter |
-| Migration | | `.lightweight(V7 → V8)`: two defaulted columns, **no row read, rewritten or re-keyed** |
+| Migration | | `.lightweight(V7 → V8)`: two defaulted columns. **No key or value changes**; Core Data back-fills the default into every existing row in place (O(rows), measured 0.7 s per 1M rows on the simulator) |
 
 `#Unique` is iOS 18 and the deployment target is 17. Uniqueness therefore stays the one
 `@Attribute(.unique)` string the table already had, and that string now carries the device.
@@ -160,15 +167,18 @@ persisted active-ring id.** Why:
    disconnect, and a lightweight stage can only apply a static column default. Using it would mean
    a custom stage that reads outside the store mid-migration.
 3. It is a literal default, so the migration is a pure schema diff. The value is pinned by
-   `SyncDeviceTests.testTheRingTimelineIdIsPinned` and by the migration test asserting every
-   migrated row reads `SyncDeviceID.ringConn.rawValue`.
+   `SyncDeviceTests.testTheRingTimelineIdIsPinned` and by the migration tests asserting every
+   migrated row reads `SyncDeviceID.ringConn.rawValue`, through the getter and in the SQL column
+   itself (`testABuild56StoresDeviceColumnIsRingconnInSQLOnEveryMigratedRow`; the b33, b43 and b45
+   arms walk the whole chain to V8 and check the same).
 
 **Every cursor read/write, per device, defaulting to the ring.**
 - `ingest`, `previewIngest`, `loadCursor`: only that device's rows, via `SyncCursor.forDevice`.
 - `cumulativeState`: a step delta is never taken against another device's raw counter.
 - `pendingHealthSamples`, `markHealthWritten`, `loadHealthCursor`: the `hk:` watermark is per device.
 - `repairFutureSyncCursors`: resets a row to its own device's latest sample.
-- `upsertCursor`: labels new rows with their device.
+- `upsertCursor(name:last:device:)`: takes the cursor NAME and builds the unique key from the same
+  device it labels the row with, so a key and a device can never disagree.
 
 `SyncCursor.selectNew` itself is unchanged; what changed is that the cursor it runs on belongs to
 one device. **Every existing caller passes no device**, so the ring reads and writes exactly the
@@ -186,6 +196,16 @@ timeline only, because its call sites are unchanged. The Helio PR adds its devic
 - Gate A is `-only-testing:OpenCircuitTests/ShippedStoreMigrationTests` with the executed count
   checked. It now also opens a genuine b56 (V7) store.
 - Gate B is an on-device upgrade from a pre-45 build, and it is Juan's.
+
+**V8 is forward-only.** Once a build carrying SchemaV8 has shipped, recovery is forward-only. Any
+later build, including a revert of #218, must keep `SchemaV8` and the V7→V8 stage in
+`MigrationPlan`. To drop `deviceID`, add a V9 and never remove V8. Never tell testers to reinstall
+a build ≤ 56. Why: a build that doesn't know V8 can't open a V8 store. Its staged migration throws
+`NSCocoaErrorDomain 134504` ("Cannot use staged migration with an unknown model version"), the app
+catches that in `resolveContainer` and goes to `wipeAndRecoverForeground`, and every
+`StoredSample`, `StoredCursor`, `StoredStepSample` and `StoredDaytimeTemp` row is deleted on every
+phone that ever launched a V8 build. `ShippedStoreMigrationTests.testABuild56PlanCannotOpenAMigratedStore`
+pins the throw.
 
 ## 4. Follow-ups (not in this PR)
 
@@ -211,10 +231,10 @@ timeline only, because its call sites are unchanged. The Helio PR adds its devic
    instead of reading `RingScanner.shared.session`.
 4. **Static keys on `RingSession`.** `lastNotifiedNightKey` is device-agnostic and belongs somewhere
    else (e.g. `HealthNotificationCenter`), but moving it changes nothing today, so it is left alone.
-5. **Samples flushed after a ring swap** are attributed to the ring active at flush time, because
-   the store has no device column in Part A. Part B adds `StoredSample.deviceID`; resolving each
-   row's `HKDevice` from its own device id is a follow-up once a registry holds more than one
-   identity.
+5. **Samples flushed after a ring swap** are attributed to the ring active at flush time. They
+   share its `localIdentifier` ("ringconn"), so Health still lists one device; only the name and
+   versions on those samples can be the newer ring's. Resolving each row's `HKDevice` from its own
+   device is a follow-up once a registry holds more than one identity.
 
 ## 5. Open questions for Juan
 

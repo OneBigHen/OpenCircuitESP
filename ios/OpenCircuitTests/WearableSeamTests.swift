@@ -122,11 +122,76 @@ final class WearableSeamTests: XCTestCase {
 
         let ringB = FakeWearable(identity: ring(firmware: FirmwareInfo(modelName: "RingConn Gen2-11FF"),
                                                 id: "OTHER-RING"))
-        let identity = ActiveWearable(session: { ringB }, fallbackDeviceID: { nil }, identityStore: store)
-            .identityForHealthWrite()
+        let active = ActiveWearable(session: { ringB }, fallbackDeviceID: { nil }, identityStore: store)
+        XCTAssertNil(active.identityForHealthWrite(), "ring B hasn't identified itself and must not borrow A's fields")
+        XCTAssertNil(store.load(id: "OTHER-RING"))
+
+        ringB.identity = ring(firmware: FirmwareInfo(version: "FR02.020", modelName: "RingConn Gen2-11FF"),
+                              id: "OTHER-RING")
+        let identity = active.identityForHealthWrite()
         XCTAssertEqual(identity?.id, "OTHER-RING")
-        XCTAssertNil(identity?.firmwareVersion)
-        XCTAssertNil(identity?.hardwareVersion)
+        XCTAssertEqual(identity?.firmwareVersion, "FR02.020")
+        XCTAssertNil(identity?.hardwareVersion, "never ring A's hardware version")
+    }
+
+    /// Review #217 N1 (the reviewer's probe, now asserting the fix). On a ring's first connection
+    /// nothing is persisted, and a flush can land before the DIS firmware read. That write must name
+    /// NO device — exactly as before the seam — rather than a sparser one than every later write,
+    /// which Apple Health would list as a second device.
+    func testAWriteBeforeTheRingHasIdentifiedItselfNamesNoDevice() throws {
+        let store = WearableIdentityStore(defaults)
+        let fake = FakeWearable(identity: ring(firmware: FirmwareInfo(modelName: "RingConn Gen2-03AD")))
+        let active = ActiveWearable(session: { fake }, fallbackDeviceID: { nil }, identityStore: store)
+        XCTAssertNil(active.identityForHealthWrite())
+        XCTAssertNil(store.load(id: ringID), "a sparse identity is never recorded")
+        XCTAssertNil(HealthKitWriter.hkDevice(HealthDeviceAttribution.fields(for: active.identityForHealthWrite(),
+                                                                             origin: .device)))
+        XCTAssertNil(ActiveWearable(session: { nil }, fallbackDeviceID: { self.ringID }, identityStore: store)
+            .identityForHealthWrite(), "nor does a disconnected flush find one")
+
+        fake.identity = ring(firmware: fullFirmware)   // the DIS reads landed
+        let identified = try XCTUnwrap(HealthDeviceAttribution.fields(for: active.identityForHealthWrite(),
+                                                                      origin: .device))
+        XCTAssertEqual(identified.model, "Gen 2")
+        XCTAssertEqual(identified.hardwareVersion, "00010001")
+        XCTAssertEqual(identified.firmwareVersion, "FR02.018")
+
+        // From here on every write names that same device, even one before a reconnect's DIS reads.
+        fake.identity = ring(firmware: FirmwareInfo(modelName: "RingConn Gen2-03AD"))
+        XCTAssertEqual(HealthDeviceAttribution.fields(for: active.identityForHealthWrite(), origin: .device),
+                       identified)
+        XCTAssertEqual(HealthDeviceAttribution.fields(
+            for: ActiveWearable(session: { nil }, fallbackDeviceID: { self.ringID }, identityStore: store)
+                .identityForHealthWrite(), origin: .device), identified)
+    }
+
+    /// Review #217 S1 (Juan's decision): two RingConn rings are ONE device in Apple Health — the
+    /// same `localIdentifier`, "ringconn" — while the identity store stays keyed per peripheral, so
+    /// each ring keeps reporting its own firmware and neither inherits the other's.
+    func testTwoRingsAreOneHealthDeviceButEachKeepsItsOwnFirmware() throws {
+        let store = WearableIdentityStore(defaults)
+        let ringA = FakeWearable(identity: ring(firmware: fullFirmware))
+        let a = try XCTUnwrap(ActiveWearable(session: { ringA }, fallbackDeviceID: { nil }, identityStore: store)
+            .identityForHealthWrite())
+        let gen3 = FirmwareInfo(version: "FR05.011", modelName: "RingConn Gen3-11FF", hardwareRevision: "00030002")
+        let ringB = FakeWearable(identity: ring(firmware: gen3, id: "OTHER-RING"))
+        let b = try XCTUnwrap(ActiveWearable(session: { ringB }, fallbackDeviceID: { nil }, identityStore: store)
+            .identityForHealthWrite())
+
+        let deviceA = try XCTUnwrap(HealthKitWriter.hkDevice(HealthDeviceAttribution.fields(for: a, origin: .device)))
+        let deviceB = try XCTUnwrap(HealthKitWriter.hkDevice(HealthDeviceAttribution.fields(for: b, origin: .device)))
+        XCTAssertEqual(deviceA.localIdentifier, "ringconn")
+        XCTAssertEqual(deviceB.localIdentifier, deviceA.localIdentifier)
+        XCTAssertEqual(deviceA.firmwareVersion, "FR02.018")
+        XCTAssertEqual(deviceB.firmwareVersion, "FR05.011")
+        XCTAssertEqual(deviceB.hardwareVersion, "00030002")
+
+        // Still two records, one per peripheral.
+        XCTAssertEqual(store.load(id: ringID)?.firmwareVersion, "FR02.018")
+        XCTAssertEqual(store.load(id: "OTHER-RING")?.firmwareVersion, "FR05.011")
+        // A disconnected flush attributed to ring A names ring A's firmware, not B's.
+        XCTAssertEqual(ActiveWearable(session: { nil }, fallbackDeviceID: { self.ringID }, identityStore: store)
+            .identityForHealthWrite()?.firmwareVersion, "FR02.018")
     }
 
     // MARK: HKDevice
@@ -141,7 +206,7 @@ final class WearableSeamTests: XCTestCase {
         XCTAssertEqual(device.hardwareVersion, "00010001")
         XCTAssertEqual(device.firmwareVersion, "FR02.018")
         XCTAssertNil(device.softwareVersion)
-        XCTAssertEqual(device.localIdentifier, ringID)
+        XCTAssertEqual(device.localIdentifier, "ringconn", "every RingConn ring is one Health device")
         XCTAssertNil(device.udiDeviceIdentifier)
         XCTAssertNil(HealthKitWriter.hkDevice(nil))
     }
@@ -152,7 +217,7 @@ final class WearableSeamTests: XCTestCase {
         let start = Date(timeIntervalSince1970: 1_790_000_000)
         let sample = try XCTUnwrap(HealthKitWriter.activeEnergySample(
             kcal: 12, start: start, end: start.addingTimeInterval(900), device: device))
-        XCTAssertEqual(sample.device?.localIdentifier, ringID)
+        XCTAssertEqual(sample.device?.localIdentifier, "ringconn")
         XCTAssertEqual(sample.device?.firmwareVersion, "FR02.018")
     }
 
@@ -171,7 +236,7 @@ final class WearableSeamTests: XCTestCase {
         XCTAssertEqual(samples.count, 2)
         let measured = try XCTUnwrap(samples.first { $0.startDate == t0 })
         let asserted = try XCTUnwrap(samples.first { $0.startDate != t0 })
-        XCTAssertEqual(measured.device?.localIdentifier, ringID)
+        XCTAssertEqual(measured.device?.localIdentifier, "ringconn")
         XCTAssertNil(measured.metadata?[HKMetadataKeyWasUserEntered])
         XCTAssertNil(asserted.device)
         XCTAssertEqual(asserted.metadata?[HKMetadataKeyWasUserEntered] as? Bool, true)

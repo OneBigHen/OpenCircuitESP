@@ -67,7 +67,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 // and behavior is exactly as before. `setLocalStore` is a reference assign that also
                 // propagates to an existing session (no second drain), so one-writer is preserved.
                 if let container = OpenCircuitApp.sharedContainer ?? (try? OpenCircuitApp.makeContainerOrThrow()) {
-                    RingScanner.shared.setLocalStore(LocalStore(container.mainContext))
+                    // `container:` keeps a fallback-built container alive as long as the scanner's store.
+                    RingScanner.shared.setLocalStore(LocalStore(container: container))
                 }
                 RingScanner.shared.reconnectKnownPeripheral()
             }

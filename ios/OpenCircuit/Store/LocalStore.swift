@@ -72,7 +72,8 @@ final class StoredSample {
 /// A named watermark. Since SchemaV8 (#214) a row belongs to one device's timeline: `kindRaw` is
 /// the unique (device, name) KEY — `SyncCursorKey.key(name, device:)` — and `deviceID` names the
 /// device. The ring's keys are the pre-V8 keys unchanged (the bare kind, `hk:<kind>`, `export:…`),
-/// so no migrated row was rewritten; another device's key carries its id as a suffix.
+/// so no migrated row was re-keyed (the migration only back-fills `deviceID`); another device's key
+/// carries its id as a suffix.
 @Model
 final class StoredCursor {
     @Attribute(.unique) var kindRaw: String
@@ -787,8 +788,24 @@ final class StoredDaytimeTemp {
 @MainActor
 struct LocalStore {
     let context: ModelContext
+    /// The container this store was built from, when nothing else keeps it alive. A `ModelContext`
+    /// does NOT retain its `ModelContainer`, and a fetch through a context whose container has been
+    /// released traps inside SwiftData. The App's container and `OpenCircuitApp.sharedContainer`
+    /// live for the whole process, so `init(_:)` needs none; a container built on the spot by
+    /// `makeContainerOrThrow()` (an intent, a restoration relaunch) goes through `init(container:)`.
+    private let ownedContainer: ModelContainer?
 
-    init(_ context: ModelContext) { self.context = context }
+    init(_ context: ModelContext) {
+        self.context = context
+        self.ownedContainer = nil
+    }
+
+    /// A store over `container`'s main context that keeps `container` alive for as long as this
+    /// store, or any copy of it, exists.
+    init(container: ModelContainer) {
+        self.context = container.mainContext
+        self.ownedContainer = container
+    }
 
     // MARK: Shared fetch descriptors
     //
@@ -1315,7 +1332,7 @@ struct LocalStore {
         guard cursor.isNew(.sleep, date) else { return }
         cursor.advance(.sleep, to: date)
         if let last = cursor.last(.sleep) {
-            upsertCursor(kind: MetricKind.sleep.rawValue, last: last)
+            upsertCursor(name: MetricKind.sleep.rawValue, last: last)
         }
         try context.save()
     }
@@ -1404,8 +1421,7 @@ struct LocalStore {
         _ = cursor.selectNew(samples)   // advances per kind to the newest start
         for kind in Self.healthMirroredKinds {
             guard let last = cursor.last(kind) else { continue }
-            upsertCursor(kind: SyncCursorKey.key(Self.healthCursorPrefix + kind.rawValue, device: device),
-                         last: last, device: device)
+            upsertCursor(name: Self.healthCursorPrefix + kind.rawValue, last: last, device: device)
         }
         try context.save()
     }
@@ -1479,7 +1495,7 @@ struct LocalStore {
         let descriptor = FetchDescriptor<StoredCursor>(predicate: #Predicate { $0.kindRaw == key })
         let existing = (try? context.fetch(descriptor).first?.last) ?? nil
         guard (existing ?? .distantPast) < date else { return false }
-        upsertCursor(kind: key, last: date)
+        upsertCursor(name: key, last: date)
         return true
     }
 
@@ -2869,7 +2885,7 @@ struct LocalStore {
         // later re-edit can offer the same successful tail through `pendingHealthSleep` again.
         let cursor = try loadCursor()
         if cursor.isNew(.sleep, last) {
-            upsertCursor(kind: MetricKind.sleep.rawValue, last: last)
+            upsertCursor(name: MetricKind.sleep.rawValue, last: last)
             changed = true
         }
         if changed { try context.save() }
@@ -3169,15 +3185,18 @@ struct LocalStore {
         return try context.fetch(descriptor)
     }
 
-    /// Upsert the cursor row whose KEY is `kind`. `device` only labels a newly inserted row; the key
-    /// already names the device (`SyncCursorKey`), and it is the unique column.
-    private func upsertCursor(kind: String, last: Date, device: SyncDeviceID = .ringConn) {
+    /// Upsert `device`'s cursor row for the cursor NAME `name` (`heartRate`, `hk:heartRate`, …).
+    /// The unique key is built here, from the same `device` the row is labelled with, so a caller
+    /// can't pair one device's key with another's label and move the wrong watermark. For the ring
+    /// the key is `name` itself, byte-for-byte the pre-V8 key.
+    private func upsertCursor(name: String, last: Date, device: SyncDeviceID = .ringConn) {
+        let key = SyncCursorKey.key(name, device: device)
         let descriptor = FetchDescriptor<StoredCursor>(
-            predicate: #Predicate { $0.kindRaw == kind })
+            predicate: #Predicate { $0.kindRaw == key })
         if let existing = try? context.fetch(descriptor).first {
             existing.last = last
         } else {
-            context.insert(StoredCursor(kindRaw: kind, last: last, deviceID: device.rawValue))
+            context.insert(StoredCursor(kindRaw: key, last: last, deviceID: device.rawValue))
         }
     }
 

@@ -17,9 +17,11 @@ extension TodaySynthesis {
     ///
     /// - `trends`: the shared two-week load (tiles are built from the same data).
     /// - `readiness`: what the readiness card reported; nil until it has.
+    /// - `feverSuspected`: the Vitals Status card's own fever verdict; false until it has reported.
+    ///   The only thing that lets this line pair skin temperature with resting HR as fever signs.
     /// - `lastSyncAt`: only used to tell "never had data" from "nothing in the last two weeks".
     static func input(trends: TrendsData, tiles: [TodayTile], readiness: ReadinessReport?,
-                      lastSyncAt: Date?, now: Date = Date()) -> Input {
+                      feverSuspected: Bool = false, lastSyncAt: Date?, now: Date = Date()) -> Input {
         func direction(_ m: TodayTile.Metric) -> BaselineTrend.Direction? {
             guard let t = tiles.first(where: { $0.metric == m }), !t.isStale(now: now) else { return nil }
             return t.trend?.direction
@@ -34,6 +36,7 @@ extension TodaySynthesis {
             ?? lastSyncAt.flatMap { _ in Calendar.current.date(byAdding: .day, value: -TrendsData.lookbackDays, to: now) }
         return Input(readiness: readiness?.readiness ?? .pending,
                      hrv: direction(.hrv), restingHR: direction(.restingHR), skinTemp: direction(.skinTemp),
+                     feverSuspected: feverSuspected,
                      lastNightSleepMinutes: readiness?.lastNightAsleepMin, usualSleepMinutes: usualSleep,
                      newestDataAt: newest, now: now)
     }

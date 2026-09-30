@@ -14,7 +14,8 @@
 //   Skin temp — the nightly value stored on the sleep summary (the Vitals Status source).
 //   Resting HR — `RestingHR.dailyValues` over the window's HR (the Vitals Status derivation).
 //   Steps — today's running total as the headline; the TREND compares the last COMPLETE day, since
-//     a partial day would always read "below usual" before evening.
+//     a partial day would always read "below usual" before evening. Its verdict is stated only when
+//     that day is yesterday (`statedTrend`).
 //
 // The "usual range" is `BaselineTrend.usualRange` — the same band that decides above / near / below —
 // so the shaded band, its label and the arrow always agree.
@@ -83,9 +84,18 @@ struct TodayTile: Identifiable {
         return calendar.startOfDay(for: valueDate) < (isNightly ? today : yesterday)
     }
 
-    /// "+6 ms vs usual" / "yesterday −1,240 vs usual" — nil while there's no judged baseline.
+    /// The trend whose verdict the tile may state: the delta, its arrow, and VoiceOver's "above /
+    /// within / below". nil while there's no judged baseline. Steps headline today's partial total
+    /// but judge the last COMPLETE day, so they state a verdict only when that day is yesterday; an
+    /// older day's verdict printed under today's number would read as a verdict on today.
+    var statedTrend: BaselineTrend.Result? {
+        guard let trend, trend.direction != nil else { return nil }
+        return metric == .steps && !trendIsYesterday ? nil : trend
+    }
+
+    /// "+6 ms vs usual" / "yesterday −1,240 vs usual" — nil when there's no verdict to state.
     var deltaText: String? {
-        guard let trend, trend.direction != nil, let d = trend.delta else { return nil }
+        guard let trend = statedTrend, let d = trend.delta else { return nil }
         let unitPart = unit.isEmpty ? "" : " \(unit)"
         return (trendIsYesterday ? "Yesterday " : "") + formatDelta(d) + unitPart + " vs usual"
     }
@@ -108,7 +118,7 @@ struct TodayTile: Identifiable {
         } else {
             parts.append("no data yet")
         }
-        if let trend, let direction = trend.direction, let d = trend.delta, let r = trend.usualRange {
+        if let trend = statedTrend, let direction = trend.direction, let d = trend.delta, let r = trend.usualRange {
             let who = trendIsYesterday ? "Yesterday was" : "That's"
             let where_: String
             switch direction {
@@ -117,6 +127,9 @@ struct TodayTile: Identifiable {
             case .below:  where_ = "below"
             }
             parts.append("\(who) \(where_) your usual range of \(format(r.lowerBound)) to \(format(r.upperBound)) \(spokenUnit), \(formatDelta(d)) versus your average")
+        } else if let r = trend?.usualRange {
+            // A usual range, but no verdict to state about the headline (steps, yesterday missing).
+            parts.append("Your usual range is \(format(r.lowerBound)) to \(format(r.upperBound)) \(spokenUnit)")
         } else if valueText != nil {
             parts.append("still learning your usual range")
         }
