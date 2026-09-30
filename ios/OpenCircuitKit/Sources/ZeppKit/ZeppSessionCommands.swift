@@ -281,6 +281,9 @@ public enum ZeppConfig {
 
     public enum HealthArgument {
         public static let heartRateMonitoring: UInt8 = 0x01
+        /// "Active HR monitoring": raises the HR sampling rate during detected activity. It does NOT
+        /// gate recording: on the Helio it read off while every minute of a 12 h activity fetch
+        /// carried a heart rate (§5.5). Informational only.
         public static let heartRateDuringActivity: UInt8 = 0x04
         public static let heartRateSharing: UInt8 = 0x05
         public static let highAccuracySleep: UInt8 = 0x11
@@ -291,6 +294,18 @@ public enum ZeppConfig {
 
     /// The HEALTH arguments whose off state means a fetch type comes back empty.
     public static let recordingArguments: [UInt8] = [
+        HealthArgument.heartRateMonitoring, HealthArgument.heartRateSharing,
+        HealthArgument.highAccuracySleep, HealthArgument.sleepBreathingQuality,
+        HealthArgument.stressMonitoring, HealthArgument.allDaySpO2,
+    ]
+
+    /// HEALTH arguments read for information only: they change how the strap samples, not whether
+    /// it records.
+    public static let informationalArguments: [UInt8] = [HealthArgument.heartRateDuringActivity]
+
+    /// What to read from HEALTH after auth: the recording switches plus the informational settings,
+    /// in the order of the request already run on hardware (§10.1).
+    public static let healthReadArguments: [UInt8] = [
         HealthArgument.heartRateMonitoring, HealthArgument.heartRateDuringActivity,
         HealthArgument.heartRateSharing, HealthArgument.highAccuracySleep,
         HealthArgument.sleepBreathingQuality, HealthArgument.stressMonitoring,
@@ -437,10 +452,13 @@ public enum ZeppConfig {
 }
 
 /// The HEALTH switches that decide what the strap RECORDS (§5.5), read after auth so the user can
-/// be warned instead of silently fetching nothing.
+/// be warned instead of silently fetching nothing, plus the settings that only change how it
+/// samples (`informational`).
 public struct ZeppHealthSettings: Equatable {
     /// `00` off, `ff` automatic, `N` every N minutes; nil when not reported.
     public let heartRateMonitoring: UInt8?
+    /// Arg `0x04`, "Active HR monitoring": a sampling boost during activity, not a recording switch
+    /// (§5.5). Never warned about; see `informational`.
     public let heartRateDuringActivity: Bool?
     public let heartRateSharing: Bool?
     public let highAccuracySleep: Bool?
@@ -468,17 +486,26 @@ public struct ZeppHealthSettings: Equatable {
         allDaySpO2 = bool(ZeppConfig.HealthArgument.allDaySpO2)
     }
 
-    /// One line per switch that is OFF, naming what will come back empty. Settings the strap did
-    /// not report are not warned about (unknown is not off).
+    /// One line per recording switch that is OFF, naming what will come back empty. Settings the
+    /// strap did not report are not warned about (unknown is not off).
     public var warnings: [String] {
         var out = [String]()
         if heartRateMonitoring == 0x00 { out.append("all-day heart-rate monitoring is off: activity HR, resting/max HR and HRV may be empty") }
-        if heartRateDuringActivity == false { out.append("heart rate during activity is off") }
         if heartRateSharing == false { out.append("heart-rate sharing (probably Zepp's \"Heart Rate Push\") is off: standard live HR may not broadcast") }
         if highAccuracySleep == false { out.append("high-accuracy sleep monitoring is off: sleep staging may be missing") }
         if sleepBreathingQuality == false { out.append("sleep breathing-quality monitoring is off: sleep SpO2 / respiratory rate may be empty") }
         if stressMonitoring == false { out.append("stress monitoring is off: stress (auto) will be empty") }
         if allDaySpO2 == false { out.append("all-day SpO2 monitoring is off: automatic SpO2 will be empty") }
+        return out
+    }
+
+    /// One line per reported setting that changes how the strap samples but not what it records.
+    /// Not warnings: either value is fine.
+    public var informational: [String] {
+        var out = [String]()
+        if let on = heartRateDuringActivity {
+            out.append("Active HR monitoring (sampling boost during activity): \(on ? "on" : "off")")
+        }
         return out
     }
 }

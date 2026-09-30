@@ -170,7 +170,7 @@ final class SimulatedHandshakeTests: XCTestCase {
 
             got = pump(&link, device, try link.send(endpoint: ZeppEndpoint.config,
                                                     payload: ZeppConfig.readRequest(group: ZeppConfig.healthGroup,
-                                                                                    arguments: ZeppConfig.recordingArguments)))
+                                                                                    arguments: ZeppConfig.healthReadArguments)))
             guard case .message(let config)? = got.first,
                   let reply = ZeppConfig.parseReadReply(config.payload) else { return XCTFail("\(got)") }
             XCTAssertEqual(ZeppHealthSettings(reply).stressMonitoring, false)

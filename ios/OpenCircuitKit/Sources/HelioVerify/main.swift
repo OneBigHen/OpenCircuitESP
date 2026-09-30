@@ -337,6 +337,7 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
                 log("HEALTH settings (group version \(reply.groupVersion))\(reply.isPartial ? ", partial" : "")")
                 for warning in settings.warnings { log("  WARNING: \(warning)") }
                 if settings.warnings.isEmpty { log("  no recording switch reported off") }
+                for line in settings.informational { log("  \(line)") }
             } else {
                 log("HEALTH settings: unreadable reply")
             }
@@ -422,7 +423,7 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         }
         step = .config
         send(ZeppEndpoint.config, ZeppConfig.readRequest(group: ZeppConfig.healthGroup,
-                                                          arguments: ZeppConfig.recordingArguments))
+                                                          arguments: ZeppConfig.healthReadArguments))
     }
 
     /// Controls replace live HR and the history fetch when any control flag is given.

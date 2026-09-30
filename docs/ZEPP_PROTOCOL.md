@@ -510,7 +510,8 @@ UTF-8 then `00`. Reply `02 <status>`.
 
 The strap only records a metric if its monitoring setting is on. The Zepp app sets them;
 **read them after auth** and warn the user when one is off, rather than silently fetching
-nothing.
+nothing. Not every HEALTH switch is a recording switch: `0x04` only changes the sampling rate
+(table below).
 
 **Commands** 🟡 `SVC/Config:104-111,283-388,938-960`
 
@@ -552,7 +553,7 @@ written).
 | Arg | Type | Meaning | Relevant fetch type(s) |
 |---|---|---|---|
 | `0x01` | byte | all-day HR monitoring: `00` off, `ff` "smart"/auto, `N` = every N minutes (Gadgetbridge caps at 120) | activity HR, resting/max HR, HRV 🔴 | 
-| `0x04` | bool | HR monitoring during activity | activity HR 🔴 |
+| `0x04` | bool | the vendor's **"Active heart rate monitoring"** switch: it only raises the HR sampling rate during detected activity. It does **not** gate recording: it read `false` in a complete (non-partial) config read, and every one of the 720 minutes of the same session's 12 h activity fetch carried a heart rate. Read it for information; never warn about it. | none: 🟢 does not gate recording `HW:2026-09-30 13:35` (§10.1); the sampling-boost meaning is the vendor's switch description, not measured 🟡 |
 | `0x05` | bool | share HR with third parties. 🔴 Probably the Zepp app's **"Heart Rate Push"** switch (Zepp › Device › Helio Strap › Health Monitoring), which the strap needs for standard-HR broadcast (§7) | live HR |
 | `0x11` | bool | high-accuracy sleep monitoring (uses HR for sleep; needed for REM staging 🔴) | sleep session |
 | `0x12` | bool | sleep breathing-quality monitoring. Gadgetbridge notes it is required for **sleep SpO₂** (`FOP/Spo2Sleep:31-33`); 🔴 likely also for sleep respiratory rate | `0x26`, `0x38` 🔴 |
