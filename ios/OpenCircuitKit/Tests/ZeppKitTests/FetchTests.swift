@@ -185,8 +185,9 @@ final class FetchTests: XCTestCase {
 
     // MARK: Rounds and cursors (§6.4)
 
+    /// Activity announces its length in records (minutes), not bytes (§6.2, seen on hardware).
     private func activityStart(_ minutes: Int, at local: [UInt8]) -> [UInt8] {
-        [0x10, 0x01, 0x01] + le32(UInt32(minutes * 8)) + local
+        [0x10, 0x01, 0x01] + le32(UInt32(minutes)) + local
     }
 
     func testContinuesFromLastRecordPlusOneMinuteUntilEmpty() throws {
