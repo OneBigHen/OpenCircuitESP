@@ -545,3 +545,57 @@ final class HelioKeyStoreTests: XCTestCase {
         withExtendedLifetime(container) {}
     }
 }
+
+// MARK: - Key states and Health attribution
+
+@MainActor
+final class HelioStatusTests: XCTestCase {
+
+    func testTheKeyStatesOfDecisionSeven() {
+        func status(_ state: HelioConnection.State, _ phase: HelioSession.Phase?, key: Bool = true,
+                    rejected: Bool = false, saved: Bool = true) -> HelioStatus.Kind {
+            HelioStatus.from(connection: state, phase: phase, hasKey: key, keyRejected: rejected, hasSavedStrap: saved).kind
+        }
+        XCTAssertEqual(status(.idle, nil, key: false, saved: false), .notSetUp)
+        XCTAssertEqual(status(.idle, nil, key: false), .keyNeeded)
+        XCTAssertEqual(status(.idle, nil, rejected: true), .keyRejected)
+        XCTAssertEqual(status(.connected, .keyless, key: false), .keyNeeded)
+        XCTAssertEqual(status(.connected, .keyRejected), .keyRejected)
+        XCTAssertEqual(status(.connected, .strapBusy), .strapBusy)
+        XCTAssertEqual(status(.connected, .syncing), .syncing)
+        XCTAssertEqual(status(.connected, .ready), .ready)
+        XCTAssertEqual(status(.searching, nil), .searching)
+        XCTAssertEqual(status(.bluetoothOff, .ready), .bluetoothOff)
+    }
+
+    func testTheZeppCoexistenceCopyIsVerbatim() {
+        XCTAssertEqual(HelioStatus.dontUnpairCopy,
+                       "Don't unpair the strap in the Zepp app; unpairing makes the key stop working.")
+        XCTAssertEqual(HelioStatus.zeppBluetoothCopy,
+                       "To let OpenCircuit connect, turn off Bluetooth for Zepp (Settings ▸ Zepp ▸ Bluetooth) or delete the Zepp app.")
+        let busy = HelioStatus.from(connection: .connected, phase: .strapBusy, hasKey: true, keyRejected: false, hasSavedStrap: true)
+        XCTAssertTrue(busy.detail?.contains(HelioStatus.zeppBluetoothCopy) == true)
+        XCTAssertTrue(HelioStatus.keyGuideURL.absoluteString.hasSuffix("docs/HELIO_KEY_EXTRACTION.md"))
+    }
+
+    func testHealthWritesNameTheStrapWhenItIsTheActiveDevice() throws {
+        let suite = "test.HelioStatusTests.identity"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let device = makeStrap()
+        let transport = FakeStrapTransport(device: device)
+        let session = HelioSession(transport: transport, identityID: "5B1E4C2A-0000-4000-8000-0000000000B2",
+                                   key: HelioKeyText.parse(keyHex), keyStore: MemoryKeyStore(keyHex), sink: nil,
+                                   findState: HelioFindState(), clock: { testNow }, autoTick: false, autoSyncOnConnect: false)
+        transport.session = session
+        session.start()
+        transport.drain()
+        let active = ActiveWearable(session: { session }, fallbackDeviceID: { nil },
+                                    identityStore: WearableIdentityStore(defaults))
+        let fields = try XCTUnwrap(HealthDeviceAttribution.fields(for: active.identityForHealthWrite(), origin: .device))
+        XCTAssertEqual(fields.name, "Helio Strap")
+        XCTAssertEqual(fields.manufacturer, "Amazfit")
+        XCTAssertEqual(fields.hardwareVersion, "9.9.9.9")
+        XCTAssertTrue(active.capabilities.contains(.historySync))
+    }
+}
