@@ -510,6 +510,21 @@ final class HelioSessionTests: XCTestCase {
 
     // MARK: review follow-ups
 
+    /// Review-224 S1: the HEALTH read is the hardware-validated seven-argument request. The fake
+    /// answers each exact payload differently, so the warnings reveal which bytes were sent.
+    func testTheHealthReadIsTheHardwareValidatedRequest() throws {
+        let seven: [UInt8] = [0x03, 0x00, 0x08, 0x07, 0x01, 0x04, 0x05, 0x11, 0x12, 0x13, 0x31]
+        let six: [UInt8] = [0x03, 0x00, 0x08, 0x06, 0x01, 0x05, 0x11, 0x12, 0x13, 0x31]
+        XCTAssertEqual(ZeppConfig.readRequest(group: ZeppConfig.healthGroup, arguments: ZeppConfig.healthReadArguments), seven)
+        let device = makeStrap()
+        device.configReply = [0x04, 0x01, 0x08, 0x03, 0x00, 0x01, 0x01, 0x10, 0xff]                      // any other read: all on
+        device.configReplies[seven] = [0x04, 0x01, 0x08, 0x03, 0x00, 0x02, 0x01, 0x10, 0xff, 0x13, 0x0b, 0x00]  // stress off
+        device.configReplies[six] = [0x04, 0x01, 0x08, 0x03, 0x00, 0x02, 0x01, 0x10, 0xff, 0x31, 0x0b, 0x00]    // SpO₂ off
+        let rig = connect(device, store: nil, autoSync: false)
+        XCTAssertEqual(rig.session.recordingWarnings, ["Stress monitoring is off, so stress will be empty."],
+                       "the app sends healthReadArguments, the request proven on hardware")
+    }
+
     func testActiveHRMonitoringIsNeverARecordingWarning() throws {
         // HEALTH read reply: all-day HR 00 (off), 0x04 (Active HR monitoring) off, stress off.
         let reply = try XCTUnwrap(ZeppConfig.parseReadReply(

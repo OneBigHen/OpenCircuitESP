@@ -570,8 +570,11 @@ final class HelioSession: WearableSession {
             return false
         case .healthConfig:
             guard listed(ZeppEndpoint.config) else { return false }
+            // The hardware-validated read (#223): byte-identical to what HelioVerify sent on a real
+            // strap (§10.1 item 8), `03 00 08 07 01 04 05 11 12 13 31`. It includes `0x04`, which is
+            // read but never shown as a warning (`recordingWarnings`).
             send(ZeppEndpoint.config, ZeppConfig.readRequest(group: ZeppConfig.healthGroup,
-                                                             arguments: ZeppConfig.recordingArguments))
+                                                             arguments: ZeppConfig.healthReadArguments))
             return true
         case .findCapabilities:
             // Sends a stop owed since a link loss first (decision 18), then the read-only `01`.
