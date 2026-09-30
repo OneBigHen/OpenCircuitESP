@@ -185,8 +185,9 @@ final class FetchTests: XCTestCase {
 
     // MARK: Rounds and cursors (§6.4)
 
+    /// Activity announces its length in records (minutes), not bytes (§6.2, seen on hardware).
     private func activityStart(_ minutes: Int, at local: [UInt8]) -> [UInt8] {
-        [0x10, 0x01, 0x01] + le32(UInt32(minutes * 8)) + local
+        [0x10, 0x01, 0x01] + le32(UInt32(minutes)) + local
     }
 
     func testContinuesFromLastRecordPlusOneMinuteUntilEmpty() throws {
@@ -245,6 +246,141 @@ final class FetchTests: XCTestCase {
         _ = fetch.receiveData([0x00] + [UInt8](repeating: 0, count: 8))
         let round = try XCTUnwrap(readyRound(fetch.receiveControl(hex("10 02 01"))))
         XCTAssertEqual(round.start, date(1_790_632_800))
+    }
+
+    // MARK: Hardware findings (§10.1): activity length unit, the two empty start replies
+
+    /// Three made-up activity minutes and the zlib CRC-32 of those 24 bytes.
+    private let threeMinutes = hex("01 20 0c 48 00 00 00 00 01 18 05 4a 00 00 00 00 73 00 00 ff 00 00 00 00")
+    private let threeMinutesDone = hex("10 02 01 5e 58 b9 da")
+    /// The all-zero "nothing more" start reply, in the 16-byte form.
+    private let allZeroEmpty = hex("10 01 01 00 00 00 00 00 00 00 00 00 00 00 00 00")
+    /// The far-future sentinel "nothing more" start reply (year 0x083a = 2106, at UTC−4).
+    private let sentinelEmpty = hex("10 01 01 00 00 00 00 3a 08 02 06 02 1c 10 f0 00")
+
+    func testActivityLengthCountsRecords() throws {
+        var fetch = machine([(.activity, sinceD)])
+        _ = fetch.start()
+        // Length 3 = three 8-byte records; 16-byte form with the trailing 00.
+        XCTAssertEqual(fetch.receiveControl(hex("10 01 01 03 00 00 00 ea 07 09 1d 00 00 00 08 00")),
+                       [.sendControl([0x02])])
+        XCTAssertEqual(fetch.receiveData([0x00] + threeMinutes.prefix(19)), [])
+        XCTAssertEqual(fetch.receiveData([0x01] + threeMinutes.dropFirst(19)), [])
+        let round = try XCTUnwrap(readyRound(fetch.receiveControl(threeMinutesDone)))
+        XCTAssertTrue(round.crcVerified)
+        XCTAssertEqual(round.rawData, threeMinutes)
+        guard case .activity(let minutes) = round.parsed.records else { return XCTFail() }
+        XCTAssertEqual(minutes.map(\.time), [date(1_790_632_800), date(1_790_632_860), date(1_790_632_920)])
+        XCTAssertEqual(minutes.map(\.steps), [12, 5, 0])
+        XCTAssertEqual(minutes.map(\.heartRate), [72, 74, nil])
+        XCTAssertEqual(controls(fetch.commit(roundID: round.id, durable: true)), [[0x03, 0x09]])
+    }
+
+    func testActivityThirtyMinuteWindowInOnePacket() throws {
+        // The shape seen on hardware: length 30, then one 241-byte packet (counter + 240 bytes).
+        // The bytes are made up.
+        let data = [UInt8]((0..<30).flatMap { _ in hex("01 10 02 46 00 00 00 00") })
+        var fetch = machine([(.activity, sinceD)])
+        _ = fetch.start()
+        XCTAssertEqual(fetch.receiveControl(hex("10 01 01 1e 00 00 00 ea 07 09 1d 00 00 00 08 00")),
+                       [.sendControl([0x02])])
+        XCTAssertEqual(fetch.receiveData([0x00] + data), [])
+        let round = try XCTUnwrap(readyRound(fetch.receiveControl(hex("10 02 01 05 38 5b 31"))))
+        XCTAssertEqual(round.parsed.records.count, 30)
+        XCTAssertEqual(round.nextSince, date(1_790_632_800 + 30 * 60))
+    }
+
+    func testActivityOverflowAndShortfallAreCountedInBytes() {
+        func failure(_ steps: (inout ZeppHistoryFetch) -> [ZeppHistoryFetch.Action]) -> [ZeppHistoryFetch.Action] {
+            var fetch = machine([(.activity, sinceD)], policy: .deleteAfterDurableCommit)
+            _ = fetch.start()
+            _ = fetch.receiveControl(activityStart(3, at: hex("ea 07 09 1d 00 00 00 08")))
+            return steps(&fetch)
+        }
+        XCTAssertEqual(failure { $0.receiveData([0x00] + threeMinutes + [0xAA]) }, [
+            .roundFailed(type: .activity, failure: .dataOverflow(expected: 24, received: 25)),
+            .sendControl(hex("03 09")),
+        ])
+        XCTAssertEqual(failure { f in _ = f.receiveData([0x00] + threeMinutes.prefix(16)); return f.receiveControl(hex("10 02 01")) }, [
+            .roundFailed(type: .activity, failure: .lengthMismatch(expected: 24, received: 16)),
+            .sendControl(hex("03 09")),
+        ])
+    }
+
+    func testActivityCRCMismatchKeepsAndReportsBothValues() {
+        var fetch = machine([(.activity, sinceD)], policy: .deleteAfterDurableCommit)
+        _ = fetch.start()
+        _ = fetch.receiveControl(activityStart(3, at: hex("ea 07 09 1d 00 00 00 08")))
+        _ = fetch.receiveData([0x00] + threeMinutes)
+        let failure = ZeppRoundFailure.crcMismatch(expected: 0x1122_3344, computed: 0xdab9_585e)
+        XCTAssertEqual(fetch.receiveControl(hex("10 02 01 44 33 22 11")),
+                       [.roundFailed(type: .activity, failure: failure), .sendControl(hex("03 09"))])
+        XCTAssertEqual(failure.description, "CRC mismatch, announced 0x11223344, computed 0xdab9585e")
+    }
+
+    func testAllZeroEmptyReplyIsAnEmptyRoundWithOneAckAndNoRetry() {
+        var fetch = machine([(.temperature, sinceD), (.hrv, sinceD)])
+        var sent = controls(fetch.start())
+        let empty = fetch.receiveControl(allZeroEmpty)
+        XCTAssertEqual(empty, [.noData(type: .temperature), .sendControl(hex("03 09"))])
+        sent += controls(empty)
+        let next = fetch.receiveControl(hex("10 03 01"))
+        XCTAssertEqual(next, [.sendControl(hex("01 49 ea 07 09 1d 00 00 00 08"))])   // hrv, not a retry
+        sent += controls(next)
+        XCTAssertEqual(sent.filter { $0 == [0x03, 0x09] }.count, 1)
+        XCTAssertEqual(sent.filter { $0.starts(with: [0x01, 0x2e]) }.count, 1)
+    }
+
+    func testSentinelEmptyReplyIsStillAnEmptyRound() {
+        var fetch = machine([(.manualHeartRate, sinceD), (.hrv, sinceD)])
+        _ = fetch.start()
+        XCTAssertEqual(fetch.receiveControl(sentinelEmpty), [.noData(type: .manualHeartRate), .sendControl(hex("03 09"))])
+        XCTAssertEqual(fetch.receiveControl(hex("10 03 01")), [.sendControl(hex("01 49 ea 07 09 1d 00 00 00 08"))])
+    }
+
+    func testEmptyReplyOfTheWrongLengthIsStillMalformed() {
+        for reply in [Array(allZeroEmpty.prefix(14)), allZeroEmpty + [0x00]] {
+            var fetch = machine([(.hrv, sinceD)])
+            _ = fetch.start()
+            XCTAssertEqual(fetch.receiveControl(reply),
+                           [.roundFailed(type: .hrv, failure: .malformedStartReply), .sendControl(hex("03 09"))],
+                           ZeppHex.string(reply))
+        }
+    }
+
+    func testDataRoundThenAllZeroEmptyReplyEndsTheTypeCleanly() throws {
+        var fetch = machine([(.temperature, sinceD), (.hrv, sinceD)], now: date(1_790_700_000))
+        var actions = fetch.start()
+        // Two made-up minutes of temperature from 00:00 local, with a CRC.
+        var data = [UInt8]()
+        for centi: UInt16 in [3312, 3318] {
+            data += le16(0x7fff) + le16(centi) + le16(0x5a5a) + le16(0x5a5a)
+        }
+        actions += fetch.receiveControl(hex("10 01 01 10 00 00 00 ea 07 09 1d 00 00 00 08 00"))
+        actions += fetch.receiveData([0x00] + data)
+        let done = fetch.receiveControl([0x10, 0x02, 0x01] + le32(ZeppCRC32.checksum(data)))
+        actions += done
+        let round = try XCTUnwrap(readyRound(done))
+        actions += fetch.commit(roundID: round.id, durable: false)
+        let followUp = fetch.receiveControl(hex("10 03 01"))
+        XCTAssertEqual(followUp, [.sendControl(hex("01 2e ea 07 09 1d 00 02 00 08"))])   // since 00:02 local
+        actions += followUp
+        actions += fetch.receiveControl(allZeroEmpty)
+        actions += fetch.receiveControl(hex("10 03 01"))
+        XCTAssertFalse(actions.contains { if case .roundFailed = $0 { return true } else { return false } })
+        XCTAssertEqual(actions.filter { $0 == .noData(type: .temperature) }.count, 1)
+        XCTAssertEqual(controls(actions), [
+            hex("01 2e ea 07 09 1d 00 00 00 08"), [0x02], [0x03, 0x09],
+            hex("01 2e ea 07 09 1d 00 02 00 08"), [0x03, 0x09],
+            hex("01 49 ea 07 09 1d 00 00 00 08"),
+        ])
+    }
+
+    func testFailureDescriptionsGiveBytesAndHex() {
+        XCTAssertEqual(ZeppRoundFailure.dataOverflow(expected: 240, received: 248).description,
+                       "data overflow, announced 240 B, received 248 B")
+        XCTAssertEqual(ZeppRoundFailure.startRefused(status: 0x04).description, "start refused, status 04")
+        XCTAssertEqual("\(ZeppRoundFailure.malformedStartReply)", "malformed start reply")
     }
 
     func testUnexpectedControlBytesAreIgnored() {
@@ -324,5 +460,57 @@ final class FetchTests: XCTestCase {
         XCTAssertEqual(device.fetchStarts.count, 4)
         guard case .temperature(let minutes) = rounds[1].parsed.records else { return XCTFail() }
         XCTAssertEqual(minutes.map(\.celsius), [33.12, 33.25, nil])
+    }
+
+    /// Runs a fetch against the simulated strap, committing every round as durable.
+    private func drive(_ fetch: inout ZeppHistoryFetch, _ device: FakeZeppDevice)
+        -> (rounds: [ZeppFetchRound], failures: [ZeppRoundFailure], empty: [ZeppFetchType], finished: Bool) {
+        var queue = fetch.start()
+        var rounds = [ZeppFetchRound]()
+        var failures = [ZeppRoundFailure]()
+        var empty = [ZeppFetchType]()
+        var finished = false
+        var steps = 0
+        while !queue.isEmpty, steps < 1000 {
+            steps += 1
+            switch queue.removeFirst() {
+            case .sendControl(let bytes):
+                for n in device.phoneWrote(ZeppWrite(.activityControl, bytes)) {
+                    queue += n.characteristic == .activityData ? fetch.receiveData(n.bytes) : fetch.receiveControl(n.bytes)
+                }
+            case .roundReady(let round):
+                rounds.append(round)
+                queue += fetch.commit(roundID: round.id, durable: true)
+            case .roundFailed(_, let failure):
+                failures.append(failure)
+            case .noData(let type):
+                empty.append(type)
+            case .finished:
+                finished = true
+            }
+        }
+        return (rounds, failures, empty, finished)
+    }
+
+    func testActivityAndAllZeroEmptyRepliesAgainstTheSimulatedStrap() throws {
+        let device = FakeZeppDevice(authKey: [UInt8](repeating: 0, count: 16), privateKey: SpecC.strapDrawnPrivate,
+                                    random: SpecC.strapRandom)
+        // Starts 00:00 local (22:00Z); its next *since* (22:03Z) is after `now`, so one round only.
+        device.fetchData[.activity] = (start: hex("ea 07 09 1d 00 00 00 08"), data: threeMinutes)
+        device.startReplyTrailingZero = true
+        device.emptyStartAllZero = true
+        device.dataPacketLength = 10
+
+        var fetch = machine([(.activity, sinceD), (.temperature, sinceD), (.hrv, sinceD)], now: date(1_790_632_900))
+        let run = drive(&fetch, device)
+        XCTAssertTrue(run.finished)
+        XCTAssertEqual(run.failures, [])
+        XCTAssertEqual(run.empty, [.temperature, .hrv])
+        XCTAssertEqual(device.fetchStarts.count, 3)                // no retries
+        XCTAssertEqual(device.fetchAcks, [0x09, 0x09, 0x09])
+        let round = try XCTUnwrap(run.rounds.first)
+        XCTAssertEqual(run.rounds.count, 1)
+        XCTAssertTrue(round.crcVerified)
+        XCTAssertEqual(round.parsed.records.count, 3)
     }
 }

@@ -50,6 +50,19 @@ public enum ZeppFetchType: UInt8, CaseIterable, Equatable {
         }
     }
 
+    /// Data bytes per unit of the start reply's length field (§6.2). Activity announces its 8-byte
+    /// records (minutes), seen on a real strap; every other type announces bytes.
+    /// SPEC-GAP: bytes is confirmed on hardware only for the types that delivered data there
+    /// (§10.1). Manual HR (0x02), manual stress (0x12) and max HR (0x3d) have only ever answered
+    /// "empty", so they stay bytes 🟡; if that is wrong, the length checks fail the round and the
+    /// data stays on the strap.
+    public var startReplyLengthUnit: Int {
+        switch self {
+        case .activity: return 8
+        default: return 1
+        }
+    }
+
     /// The length rule enforced before parsing (§6.5); a violation rejects the round.
     public func isValidLength(_ length: Int) -> Bool {
         switch self {

@@ -45,13 +45,14 @@ public enum ZeppFetchCommand {
 public enum ZeppRoundFailure: Equatable {
     /// `10 01 <status ≠ 01>`: type unsupported or refused. No round was opened; nothing is acked.
     case startRefused(status: UInt8)
-    /// The start reply was not 15 or 16 bytes, or its timestamp was invalid.
+    /// The start reply was not 15 or 16 bytes, or it announced data with an invalid timestamp.
     case malformedStartReply
     /// A data packet counter was skipped or repeated (§9 #9).
     case packetCounterGap(expected: UInt8, got: UInt8)
-    /// More data than the start reply announced.
+    /// More data than the start reply announced. Both counts are bytes: for activity, `expected`
+    /// is the announced record count × 8.
     case dataOverflow(expected: Int, received: Int)
-    /// Transfer done with less (or more) data than announced.
+    /// Transfer done with less (or more) data than announced, in bytes as for `dataOverflow`.
     case lengthMismatch(expected: Int, received: Int)
     /// `10 02 <status ≠ 01>`.
     case transferFailed(status: UInt8)
@@ -62,6 +63,28 @@ public enum ZeppRoundFailure: Equatable {
     case parseFailed(ZeppRecordParser.Error)
     /// The caller aborted mid-round.
     case aborted
+}
+
+extension ZeppRoundFailure: CustomStringConvertible {
+    /// For logs: lengths in bytes, CRCs in hex (the announced one first).
+    public var description: String {
+        switch self {
+        case .startRefused(let status): return String(format: "start refused, status %02x", status)
+        case .malformedStartReply: return "malformed start reply"
+        case .packetCounterGap(let expected, let got):
+            return String(format: "packet counter gap, expected %02x, got %02x", expected, got)
+        case .dataOverflow(let expected, let received):
+            return "data overflow, announced \(expected) B, received \(received) B"
+        case .lengthMismatch(let expected, let received):
+            return "length mismatch, announced \(expected) B, received \(received) B"
+        case .transferFailed(let status): return String(format: "transfer failed, status %02x", status)
+        case .malformedTransferDone: return "malformed transfer-done reply"
+        case .crcMismatch(let expected, let computed):
+            return String(format: "CRC mismatch, announced 0x%08x, computed 0x%08x", expected, computed)
+        case .parseFailed(let error): return "parse failed, \(error)"
+        case .aborted: return "aborted"
+        }
+    }
 }
 
 /// One successfully fetched and parsed round, awaiting the caller's commit decision.
@@ -91,7 +114,8 @@ public struct ZeppHistoryFetch {
         /// A parsed round. Persist it, then call `commit(roundID:durable:)`.
         case roundReady(ZeppFetchRound)
         case roundFailed(type: ZeppFetchType, failure: ZeppRoundFailure)
-        /// The strap had nothing for this type since the cursor (expected length 0).
+        /// The strap had nothing for this type since the cursor (expected length 0, whatever the
+        /// start timestamp). The type is done for this fetch.
         case noData(type: ZeppFetchType)
         /// Every type in the plan is done.
         case finished
@@ -244,21 +268,26 @@ public struct ZeppHistoryFetch {
             return [.roundFailed(type: type, failure: .startRefused(status: bytes[2]))] + beginNextType()
         }
         var reader = ZeppByteReader(bytes, offset: 3)
-        guard bytes.count == 15 || bytes.count == 16,
-              let length = reader.u32(),
-              let start = ZeppFetchTimestamp.decode(bytes[7..<15]) else {
-            // The strap did open a round; keep its data.
+        // The strap did open a round on every malformed path below; keep its data.
+        guard bytes.count == 15 || bytes.count == 16, let length = reader.u32() else {
             return failRound(type, .malformedStartReply)
         }
-        roundStart = start
-        expectedLength = Int(length)
         buffer = []
         nextCounter = 0
-        if expectedLength == 0 {
+        // Length 0 is an empty round whatever the start timestamp says (§6.2): the strap pairs it
+        // with a far-future sentinel or with all zeros, which is not a valid timestamp.
+        if length == 0 {
+            expectedLength = 0
             afterAck = .nextType
             phase = .awaitingAckReply
             return [.noData(type: type), .sendControl(ZeppFetchCommand.ack(.keep))]
         }
+        guard let start = ZeppFetchTimestamp.decode(bytes[7..<15]) else {
+            return failRound(type, .malformedStartReply)
+        }
+        roundStart = start
+        // Checked in bytes from here on: activity announces records (§6.2).
+        expectedLength = Int(length) * type.startReplyLengthUnit
         phase = .receivingData
         return [.sendControl(ZeppFetchCommand.fetchData)]
     }
@@ -269,8 +298,8 @@ public struct ZeppHistoryFetch {
         guard bytes.count >= 3 else { return failRound(type, .malformedTransferDone) }
         guard bytes[2] == 0x01 else { return failRound(type, .transferFailed(status: bytes[2])) }
         guard bytes.count == 3 || bytes.count == 7 else { return failRound(type, .malformedTransferDone) }
-        // SPEC-GAP: the spec does not say what to do when the data length differs from the
-        // announced one. ZeppKit treats it as an invalid round (keep, retry).
+        // A length other than the announced one rejects the round (§6.5, in bytes); like every
+        // invalid round it is kept on the strap and retried (retry count: see Configuration).
         guard buffer.count == expectedLength else {
             return failRound(type, .lengthMismatch(expected: expectedLength, received: buffer.count))
         }
@@ -279,8 +308,10 @@ public struct ZeppHistoryFetch {
             var reader = ZeppByteReader(bytes, offset: 3)
             let expected = reader.u32() ?? 0
             let computed = ZeppCRC32.checksum(buffer)
-            // SPEC-GAP: Gadgetbridge skips the CRC check for activity (0x01) without saying why.
-            // ZeppKit checks it for every type; a mismatch keeps the data on the strap.
+            // SPEC-GAP: Gadgetbridge skips the CRC check for activity (0x01) without saying why, and
+            // no activity round has reached this check on hardware yet (§10.1). ZeppKit checks it
+            // for every type; a mismatch keeps the data on the strap, and the failure carries the
+            // announced and the computed CRC so the next hardware run answers the question.
             guard expected == computed else {
                 return failRound(type, .crcMismatch(expected: expected, computed: computed))
             }
