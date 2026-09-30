@@ -93,8 +93,8 @@ targets:
         LSSupportsOpeningDocumentsInPlace: true
         # HealthKit auth strings (Phase 4) — required or the app crashes on request. Shown verbatim
         # in the iOS permission dialogs, so they use the user-facing name "OpenCircuit".
-        NSHealthShareUsageDescription: "OpenCircuit reads health metrics from your ring to display them."
-        NSHealthUpdateUsageDescription: "OpenCircuit writes your ring's metrics into Apple Health."
+        NSHealthShareUsageDescription: "OpenCircuit reads health metrics from your ring or strap to display them."
+        NSHealthUpdateUsageDescription: "OpenCircuit writes your ring's or strap's metrics into Apple Health."
         # Live Activities (workout modal): required for the app to start an ActivityKit Live Activity
         # showing live workout time / calories / heart rate on the Lock Screen + Dynamic Island.
         NSSupportsLiveActivities: true
@@ -109,8 +109,8 @@ targets:
             CFBundleTypeRole: Editor
             CFBundleURLSchemes:
               - opencircuit
-        # BLE (Phase 3) — required to connect to the ring.
-        NSBluetoothAlwaysUsageDescription: "OpenCircuit connects to your RingConn Gen 2 ring over Bluetooth Low Energy."
+        # BLE (Phase 3) — required to connect to the ring, or the Amazfit Helio Strap (#215).
+        NSBluetoothAlwaysUsageDescription: "OpenCircuit connects to your RingConn ring or Amazfit Helio Strap over Bluetooth Low Energy."
         # Location (Phase 3, #75) — used ONLY during an active workout: to map the GPS route
         # (outdoor; the ring has no GPS) AND, with the `location` background mode below, to keep
         # the app alive so heart-rate recording continues while the phone is locked. Not used at

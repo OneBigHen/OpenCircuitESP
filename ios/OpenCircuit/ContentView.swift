@@ -1191,6 +1191,10 @@ struct ContentView: View {
     /// evaluated with `true` only after a foreground sync lands fresh step data. Wear + bedtime run
     /// on every pass since they don't depend on fresh steps.
     private func evaluateReminders(includeSedentary: Bool) {
+        // The sedentary and wear reminders read the ring's own live signals (its descriptor stream,
+        // its saved-ring list, its last-frame stamp), so with the Helio Strap chosen they would judge
+        // a device that isn't worn. Ring only (#215).
+        guard ringActive else { return }
         let d = UserDefaults.standard
         SleepScheduleDefaults.register(d)
         let bedMinutes  = d.integer(forKey: SleepScheduleDefaults.bedMinutes)

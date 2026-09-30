@@ -179,9 +179,23 @@ final class HelioConnection: NSObject {
 
     /// Drop and re-open the link: a fresh auth with the key saved now.
     func reconnectNow() {
-        let hadSaved = Self.hasSavedStrap
+        let wasFinding = session?.isFinding == true
         disconnect()
-        if hadSaved { reconnectKnown() } else { scan() }
+        let reopen = { [weak self] in
+            guard let self else { return }
+            // A saved strap the system no longer knows falls back to a search.
+            if !(Self.hasSavedStrap && self.reconnectKnown()) { self.scan() }
+        }
+        if wasFinding {
+            // `disconnect()` gives a running find's stop half a second before cancelling the link;
+            // reopen after that, so the cancel can't land on the new connect.
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(700))
+                reopen()
+            }
+        } else {
+            reopen()
+        }
     }
 
     // MARK: RSSI (Find My Strap's distance hint)
