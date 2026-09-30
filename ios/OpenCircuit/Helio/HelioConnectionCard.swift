@@ -7,11 +7,21 @@ struct HelioConnectionCard: View {
     let connection: HelioConnection
     var onSetUp: () -> Void = {}
 
+    /// Cached like `HelioSetupView`'s (review-224 N8): `hasKey` is a Keychain query, so it is read on
+    /// appear and whenever the link or session phase moves, not on every render.
+    @State private var hasKey = HelioKeyStore.shared.hasKey
+    @State private var keyRejected = HelioKeyStore.shared.isRejected
+
     private var session: HelioSession? { connection.session }
+
+    private func refreshKeyState() {
+        hasKey = HelioKeyStore.shared.hasKey
+        keyRejected = HelioKeyStore.shared.isRejected
+    }
 
     private var status: HelioStatus {
         HelioStatus.from(connection: connection.state, phase: session?.phase,
-                         hasKey: HelioKeyStore.shared.hasKey, keyRejected: HelioKeyStore.shared.isRejected,
+                         hasKey: hasKey, keyRejected: keyRejected,
                          hasSavedStrap: HelioConnection.hasSavedStrap,
                          endedBusy: connection.endedBusy)
     }
@@ -40,6 +50,9 @@ struct HelioConnectionCard: View {
                 }
             }
         }
+        .onAppear { refreshKeyState() }
+        .onChange(of: connection.state) { _, _ in refreshKeyState() }
+        .onChange(of: session?.phase) { _, _ in refreshKeyState() }
     }
 
     @ViewBuilder

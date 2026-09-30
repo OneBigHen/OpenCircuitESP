@@ -9,12 +9,21 @@ struct HelioDeviceInfoView: View {
     let connection: HelioConnection
     @State private var confirmDisconnect = false
     @State private var buzzError: String?
+    /// Cached like `HelioSetupView`'s (review-224 N8): `hasKey` is a Keychain query, so it is read on
+    /// appear and whenever the link or session phase moves, not on every render.
+    @State private var hasKey = HelioKeyStore.shared.hasKey
+    @State private var keyRejected = HelioKeyStore.shared.isRejected
 
     private var session: HelioSession? { connection.session }
 
+    private func refreshKeyState() {
+        hasKey = HelioKeyStore.shared.hasKey
+        keyRejected = HelioKeyStore.shared.isRejected
+    }
+
     private var status: HelioStatus {
         HelioStatus.from(connection: connection.state, phase: session?.phase,
-                         hasKey: HelioKeyStore.shared.hasKey, keyRejected: HelioKeyStore.shared.isRejected,
+                         hasKey: hasKey, keyRejected: keyRejected,
                          hasSavedStrap: HelioConnection.hasSavedStrap,
                          endedBusy: connection.endedBusy)
     }
@@ -83,6 +92,9 @@ struct HelioDeviceInfoView: View {
             }
         }
         .navigationTitle("Helio Strap")
+        .onAppear { refreshKeyState() }
+        .onChange(of: connection.state) { _, _ in refreshKeyState() }
+        .onChange(of: session?.phase) { _, _ in refreshKeyState() }
         .navigationBarTitleDisplayMode(.inline)
         .confirmationDialog("Disconnect the strap?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
             Button("Disconnect", role: .destructive) { connection.disconnect() }
@@ -98,8 +110,8 @@ struct HelioDeviceInfoView: View {
     }
 
     private var keyText: String {
-        if HelioKeyStore.shared.isRejected { return "Rejected by the strap" }
-        return HelioKeyStore.shared.hasKey ? "Saved" : "Needed"
+        if keyRejected { return "Rejected by the strap" }
+        return hasKey ? "Saved" : "Needed"
     }
 
     private func controls(_ session: HelioSession) -> [String] {
