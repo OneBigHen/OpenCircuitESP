@@ -95,13 +95,17 @@ struct TrendsData {
     /// `.syncFinished` trigger fires after the commit — so nothing this reads can be stranded in an
     /// unsaved main-context change. A future caller that reloads trends mid-transaction would be
     /// the exception, and should save first rather than reach back onto the main actor.
-    static func loadAsync(container: ModelContainer, tempUnitRaw: String) async -> TrendsData {
+    /// `lookbackDays` defaults to the shared two-week window every tab uses; the Today metric
+    /// detail chart (#216) passes 30 for its longer range.
+    static func loadAsync(container: ModelContainer, tempUnitRaw: String,
+                          lookbackDays: Int = TrendsData.lookbackDays) async -> TrendsData {
         let profile = await MainActor.run { HealthKitWriter.storedUserProfile() }
         // Goals live in UserDefaults, which `@AppStorage` also binds on the main actor; snapshot
         // them here alongside the profile so the detached work touches nothing main-isolated.
         let goals = await MainActor.run { GoalHistory.Goals.fromDefaults() }
         let inputs = await Task.detached {
-            fetchInputs(container: container, profile: profile, goals: goals, tempUnitRaw: tempUnitRaw)
+            fetchInputs(container: container, profile: profile, goals: goals, tempUnitRaw: tempUnitRaw,
+                        lookbackDays: lookbackDays)
         }.value
         let points = await Task.detached { computePoints(inputs) }.value
         let goalDays = await Task.detached { computeGoalDays(inputs, points: points) }.value
@@ -130,7 +134,8 @@ struct TrendsData {
     nonisolated private static func fetchInputs(container: ModelContainer,
                                                 profile: UserProfile,
                                                 goals: GoalHistory.Goals,
-                                                tempUnitRaw: String) -> Inputs {
+                                                tempUnitRaw: String,
+                                                lookbackDays: Int) -> Inputs {
         let context = ModelContext(container)
         let cal = Calendar.current
         let now = Date()

@@ -714,7 +714,8 @@ struct ContentView: View {
     private func sectionView(_ section: DashboardSection) -> some View {
         switch section {
         case .readiness:    card { WellnessBalanceCardView(onReport: { readinessReport = $0 }) }
-        case .metrics:      MetricTilesSection(tiles: todayTiles, isLoading: !trendsHaveLoaded)
+        case .metrics:      MetricTilesSection(tiles: todayTiles, isLoading: !trendsHaveLoaded,
+                                               onSelect: { path.append(.metric($0)) })
         case .vitals:       vitalsCard
         case .vitalsStatus: vitalsStatusCard
         case .calories:     caloriesCard
@@ -733,6 +734,7 @@ struct ContentView: View {
         case .cycle:       CycleCalendarView()
         case .headache:    HeadacheSignalsView()
         case .activityLog: ActivityLogView(session: session)
+        case .metric(let m): MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw)
         }
     }
 
@@ -2302,6 +2304,8 @@ private enum DashboardSection: String, CaseIterable, Identifiable, Hashable {
 /// top of the cards' custom ones.
 private enum Route: Hashable {
     case cycle, headache, activityLog
+    /// A Today metric tile's 14/30-day trend chart (#216).
+    case metric(TodayTile.Metric)
 }
 
 /// A headache the quick-log deep link just stored, identified by its `onset` — the store key — so

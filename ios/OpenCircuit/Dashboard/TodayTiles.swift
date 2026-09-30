@@ -1,11 +1,12 @@
-// Today metric tiles (#216) — the model: turns the shared two-week trends load into six tiles
-// (HRV, resting HR, SpO₂, respiratory rate, skin temp, steps), each with its current value, a
-// 14-day series for the sparkline, and where the value sits against the user's own baseline.
+// Today metric tiles (#216) — the model: turns a trends load into six tiles (HRV, resting HR,
+// SpO₂, respiratory rate, skin temp, steps), each with its current value, a per-day series for the
+// chart, and where the value sits against the user's own baseline. The Today grid builds it over
+// the shared 14-day load; the per-metric detail chart builds it again over 14 or 30 days.
 //
-// Reads ONLY what `TrendsData` already loaded from `LocalStore` (the same per-day rollups the
-// Trends tab charts), plus the resting-HR series `TrendsData` derives with `RestingHR.dailyValues`
-// — so a tile can never disagree with the Trends tab about the same day. Nothing is interpolated:
-// a day without data is a gap in the sparkline, a metric without data says so.
+// Reads ONLY what `TrendsData` loaded from `LocalStore` (the same per-day rollups the Trends tab
+// charts), plus the resting-HR series `TrendsData` derives with `RestingHR.dailyValues` — so a tile
+// can never disagree with the Trends tab about the same day. Nothing is interpolated: a day without
+// data is a gap in the chart, a metric without data says so.
 //
 // Which daily value each tile uses, and why:
 //   HRV / SpO₂ / resp. rate — the OVERNIGHT average (`sleep*Avg`): the night is the one window the
@@ -14,12 +15,15 @@
 //   Resting HR — `RestingHR.dailyValues` over the window's HR (the Vitals Status derivation).
 //   Steps — today's running total as the headline; the TREND compares the last COMPLETE day, since
 //     a partial day would always read "below usual" before evening.
+//
+// The "usual range" is `BaselineTrend.usualRange` — the same band that decides above / near / below —
+// so the shaded band, its label and the arrow always agree.
 
 import SwiftUI
 import OpenCircuitKit
 
 struct TodayTile: Identifiable {
-    enum Metric: String, CaseIterable {
+    enum Metric: String, CaseIterable, Hashable {
         case hrv, restingHR, spo2, respiratoryRate, skinTemp, steps
     }
 
@@ -32,57 +36,86 @@ struct TodayTile: Identifiable {
     /// Formatted current value, or nil when there's no data at all.
     let valueText: String?
     let unit: String
-    /// One slot per day of the window, oldest first; nil = no data that day.
-    let sparkline: [Double?]
-    /// The baseline comparison behind the trend chip; nil when there's no data.
+    /// The window's days, oldest first — the chart's x positions.
+    let days: [Date]
+    /// One slot per entry of `days`; nil = no data that day.
+    let values: [Double?]
+    /// The baseline comparison; nil when there's no data.
     let trend: BaselineTrend.Result?
     /// For steps, the trend is about yesterday, not today's partial total.
     let trendIsYesterday: Bool
-    /// The newest value's day is older than yesterday — shown as "as of …".
-    let staleAsOf: Date?
+    /// Day of the headline value.
+    let valueDate: Date?
+    /// Nightly metrics say "last night" rather than "today"/"yesterday".
+    let isNightly: Bool
     /// Spoken form of the unit, for VoiceOver.
     let spokenUnit: String
-    /// Formats a baseline mean (in display units) for the caption / VoiceOver.
+    /// Formats a value in display units (no unit).
     let format: (Double) -> String
+    /// Formats a signed difference in display units (no unit).
+    let formatDelta: (Double) -> String
 
     var id: Metric { metric }
 
-    // MARK: Caption
+    // MARK: Display strings
 
-    var captionText: String {
+    /// "last night" / "today" / "yesterday" / "as of Mon 28".
+    func freshnessText(now: Date = Date(), calendar: Calendar = .current) -> String? {
+        guard let valueDate else { return nil }
+        let today = calendar.startOfDay(for: now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today) ?? today
+        let d = calendar.startOfDay(for: valueDate)
+        if isNightly, d >= yesterday { return "last night" }
+        if d == today { return "today" }
+        if d == yesterday { return "yesterday" }
+        return "as of \(d.formatted(.dateTime.weekday(.abbreviated).day()))"
+    }
+
+    /// True when the headline value is older than the most recent day it could be from.
+    func isStale(now: Date = Date(), calendar: Calendar = .current) -> Bool {
+        guard let valueDate else { return false }
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: now)) ?? now
+        return calendar.startOfDay(for: valueDate) < yesterday
+    }
+
+    /// "+6 ms vs usual" / "yesterday −1,240 vs usual" — nil while there's no judged baseline.
+    var deltaText: String? {
+        guard let trend, trend.direction != nil, let d = trend.delta else { return nil }
+        let unitPart = unit.isEmpty ? "" : " \(unit)"
+        return (trendIsYesterday ? "Yesterday " : "") + formatDelta(d) + unitPart + " vs usual"
+    }
+
+    /// "Usual 44–50 ms", or the learning state while the baseline is thin.
+    var rangeText: String {
         guard valueText != nil else { return "No data yet" }
+        if let r = trend?.usualRange {
+            return "Usual \(format(r.lowerBound))–\(format(r.upperBound))\(unit.isEmpty ? "" : " \(unit)")"
+        }
         let need = BaselineTrend.defaultMinBaselineDays
-        guard let trend, let direction = trend.direction else {
-            return "Learning your usual · \(min(trend?.baselineDays ?? 0, need))/\(need) days"
-        }
-        let prefix = trendIsYesterday ? "Yesterday " : ""
-        switch direction {
-        case .above:  return prefix + (trendIsYesterday ? "above usual" : "Above usual")
-        case .within: return prefix + (trendIsYesterday ? "near usual" : "Near usual")
-        case .below:  return prefix + (trendIsYesterday ? "below usual" : "Below usual")
-        }
+        return "Learning your usual · \(min(trend?.baselineDays ?? 0, need))/\(need) days"
     }
 
     var accessibilityLabel: String {
         var parts = [title]
-        if let valueText { parts.append("\(valueText) \(spokenUnit), \(qualifier)") } else { parts.append("no data yet") }
-        if let staleAsOf {
-            parts.append("as of \(staleAsOf.formatted(.dateTime.weekday(.wide).day().month(.wide)))")
+        if let valueText {
+            parts.append("\(valueText) \(spokenUnit), \(qualifier)")
+            if let f = freshnessText(), f.hasPrefix("as of") { parts.append(f) }
+        } else {
+            parts.append("no data yet")
         }
-        if let trend, let direction = trend.direction, let mean = trend.baselineMean {
+        if let trend, let direction = trend.direction, let d = trend.delta, let r = trend.usualRange {
             let who = trendIsYesterday ? "Yesterday was" : "That's"
             let where_: String
             switch direction {
             case .above:  where_ = "above"
-            case .within: where_ = "near"
+            case .within: where_ = "within"
             case .below:  where_ = "below"
             }
-            parts.append("\(who) \(where_) your usual of \(format(mean)) \(spokenUnit)")
+            parts.append("\(who) \(where_) your usual range of \(format(r.lowerBound)) to \(format(r.upperBound)) \(spokenUnit), \(formatDelta(d)) versus your average")
         } else if valueText != nil {
             parts.append("still learning your usual range")
         }
-        let days = sparkline.compactMap { $0 }.count
-        parts.append("\(days) of the last \(sparkline.count) days have data")
+        parts.append("\(values.compactMap { $0 }.count) of the last \(values.count) days have data")
         return parts.joined(separator: ". ")
     }
 }
@@ -91,16 +124,33 @@ enum TodayTiles {
 
     static let windowDays = TrendsData.lookbackDays
 
-    /// Build the six tiles. `now`/`calendar` are injectable for tests and fixtures.
+    /// Build all six tiles over the last `windowDays` days. `now`/`calendar` are injectable for
+    /// tests and fixtures.
     static func build(points: [TrendsEngine.DailyPoint],
                       restingHR: [RestingHR.DailyValue],
                       tempUnit: TemperatureUnit,
+                      windowDays: Int = windowDays,
                       now: Date = Date(),
                       calendar: Calendar = .current) -> [TodayTile] {
+        TodayTile.Metric.allCases.map {
+            build($0, points: points, restingHR: restingHR, tempUnit: tempUnit,
+                  windowDays: windowDays, now: now, calendar: calendar)
+        }
+    }
+
+    /// Build one metric's tile.
+    static func build(_ metric: TodayTile.Metric,
+                      points: [TrendsEngine.DailyPoint],
+                      restingHR: [RestingHR.DailyValue],
+                      tempUnit: TemperatureUnit,
+                      windowDays: Int = windowDays,
+                      now: Date = Date(),
+                      calendar: Calendar = .current) -> TodayTile {
         let today = calendar.startOfDay(for: now)
-        let days: [Date] = (0..<windowDays).reversed().compactMap {
+        let days: [Date] = (0..<max(windowDays, 2)).reversed().compactMap {
             calendar.date(byAdding: .day, value: -$0, to: today)
         }
+        let first = days.first ?? today
         let yesterday = calendar.date(byAdding: .day, value: -1, to: today) ?? today
 
         func series(_ pick: (TrendsEngine.DailyPoint) -> Double?) -> [BaselineTrend.Point] {
@@ -108,75 +158,81 @@ enum TodayTiles {
                 guard let v = pick(p), v > 0, v.isFinite else { return nil }
                 return BaselineTrend.Point(date: calendar.startOfDay(for: p.date), value: v)
             }
-            .filter { $0.date >= (days.first ?? today) && $0.date <= today }
+            .filter { $0.date >= first && $0.date <= today }
         }
-
         func slots(_ pts: [BaselineTrend.Point]) -> [Double?] {
             var byDay: [Date: Double] = [:]
             for p in pts { byDay[p.date] = p.value }
             return days.map { byDay[$0] }
         }
 
-        func stale(_ pts: [BaselineTrend.Point]) -> Date? {
-            guard let last = pts.max(by: { $0.date < $1.date }) else { return nil }
-            return last.date < yesterday ? last.date : nil
+        let whole: (Double) -> String = { String(Int($0.rounded())) }
+        let oneDecimal: (Double) -> String = { String(format: "%.1f", $0) }
+        let signedWhole: (Double) -> String = { d in
+            let r = Int(d.rounded()); return r > 0 ? "+\(r)" : r < 0 ? "−\(-r)" : "±0"
+        }
+        let signedOne: (Double) -> String = { d in
+            let r = (d * 10).rounded() / 10
+            return r > 0 ? String(format: "+%.1f", r) : r < 0 ? String(format: "−%.1f", -r) : "±0.0"
         }
 
-        func tile(_ metric: TodayTile.Metric, _ title: String, _ qualifier: String, _ icon: KeylineIcon,
-                  _ tint: Color, _ unit: String, spokenUnit: String, pts: [BaselineTrend.Point],
-                  floor: Double, format: @escaping (Double) -> String) -> TodayTile {
+        func nightly(_ title: String, _ qualifier: String, _ icon: KeylineIcon, _ tint: Color, _ unit: String,
+                     spokenUnit: String, pts: [BaselineTrend.Point], floor: Double,
+                     format: @escaping (Double) -> String, formatDelta: @escaping (Double) -> String,
+                     isNightly: Bool = true) -> TodayTile {
             let trend = BaselineTrend.evaluate(pts, minAbsoluteDelta: floor)
             return TodayTile(metric: metric, title: title, qualifier: qualifier, icon: icon, tint: tint,
                              valueText: trend.map { format($0.latest.value) }, unit: unit,
-                             sparkline: slots(pts), trend: trend, trendIsYesterday: false,
-                             staleAsOf: stale(pts), spokenUnit: spokenUnit, format: format)
+                             days: days, values: slots(pts), trend: trend, trendIsYesterday: false,
+                             valueDate: trend?.latest.date, isNightly: isNightly,
+                             spokenUnit: spokenUnit, format: format, formatDelta: formatDelta)
         }
 
-        let whole: (Double) -> String = { String(Int($0.rounded())) }
-        let oneDecimal: (Double) -> String = { String(format: "%.1f", $0) }
-
-        let hrv = tile(.hrv, "HRV", "overnight avg", .activity, Theme.hrv, "ms",
-                       spokenUnit: "milliseconds", pts: series(\.sleepHRVAvg), floor: 3, format: whole)
-
-        let rhrPts = restingHR
-            .map { BaselineTrend.Point(date: calendar.startOfDay(for: $0.day), value: $0.bpm) }
-            .filter { $0.value > 0 && $0.date >= (days.first ?? today) }
-        let rhr = tile(.restingHR, "Resting HR", "daily estimate", .heart, Theme.hr, "bpm",
-                       spokenUnit: "beats per minute", pts: rhrPts, floor: 2, format: whole)
-
-        let spo2 = tile(.spo2, "SpO₂", "overnight avg", .droplet, Theme.spo2, "%",
-                        spokenUnit: "percent", pts: series { $0.sleepSpO2Avg.map { $0 * 100 } },
-                        floor: 1, format: whole)
-
-        let rr = tile(.respiratoryRate, "Resp. rate", "overnight avg", .wind, Theme.rr,
-                      UnitsFormatter.respiratoryRateUnit, spokenUnit: "breaths per minute",
-                      pts: series(\.sleepRRAvg), floor: 0.5, format: oneDecimal)
-
-        // Converted to the user's unit BEFORE comparing, so the floor is expressed in that unit too.
-        let tempFloorC = 0.3
-        let tempPts = series(\.skinTempC).map {
-            BaselineTrend.Point(date: $0.date, value: tempUnit.convert(fromCelsius: $0.value))
+        switch metric {
+        case .hrv:
+            return nightly("HRV", "overnight avg", .activity, Theme.hrv, "ms", spokenUnit: "milliseconds",
+                           pts: series(\.sleepHRVAvg), floor: 3, format: whole, formatDelta: signedWhole)
+        case .restingHR:
+            let pts = restingHR
+                .map { BaselineTrend.Point(date: calendar.startOfDay(for: $0.day), value: $0.bpm) }
+                .filter { $0.value > 0 && $0.date >= first && $0.date <= today }
+            return nightly("Resting HR", "daily estimate", .heart, Theme.hr, "bpm", spokenUnit: "beats per minute",
+                           pts: pts, floor: 2, format: whole, formatDelta: signedWhole, isNightly: false)
+        case .spo2:
+            return nightly("SpO₂", "overnight avg", .droplet, Theme.spo2, "%", spokenUnit: "percent",
+                           pts: series { $0.sleepSpO2Avg.map { $0 * 100 } }, floor: 1,
+                           format: whole, formatDelta: signedWhole)
+        case .respiratoryRate:
+            return nightly("Resp. rate", "overnight avg", .wind, Theme.rr, UnitsFormatter.respiratoryRateUnit,
+                           spokenUnit: "breaths per minute", pts: series(\.sleepRRAvg), floor: 0.5,
+                           format: oneDecimal, formatDelta: signedOne)
+        case .skinTemp:
+            // Converted to the user's unit BEFORE comparing, so the floor is in that unit too.
+            let pts = series(\.skinTempC).map {
+                BaselineTrend.Point(date: $0.date, value: tempUnit.convert(fromCelsius: $0.value))
+            }
+            return nightly("Skin temp", "overnight", .thermometer, Theme.temp, tempUnit.symbol,
+                           spokenUnit: tempUnit == .fahrenheit ? "degrees Fahrenheit" : "degrees Celsius",
+                           pts: pts, floor: tempUnit.convertDelta(fromCelsius: 0.3),
+                           format: oneDecimal, formatDelta: signedOne)
+        case .steps:
+            // Headline = today's total; trend = the last complete day vs the days before it.
+            let pts = series { $0.steps.map(Double.init) }
+            let trend = BaselineTrend.evaluate(pts.filter { $0.date < today }, minAbsoluteDelta: 1_000)
+            let todaySteps = pts.first { $0.date == today }
+            let headline = todaySteps ?? pts.max { $0.date < $1.date }
+            let fmt: (Double) -> String = { Int($0.rounded()).formatted(.number) }
+            let fmtDelta: (Double) -> String = { d in
+                let r = Int(d.rounded())
+                return r > 0 ? "+" + r.formatted(.number) : r < 0 ? "−" + (-r).formatted(.number) : "±0"
+            }
+            return TodayTile(metric: .steps, title: "Steps",
+                             qualifier: todaySteps != nil ? "so far today" : "latest day",
+                             icon: .route, tint: Theme.steps, valueText: headline.map { fmt($0.value) },
+                             unit: "", days: days, values: slots(pts), trend: trend,
+                             trendIsYesterday: trend?.latest.date == yesterday,
+                             valueDate: headline?.date, isNightly: false,
+                             spokenUnit: "steps", format: fmt, formatDelta: fmtDelta)
         }
-        let tempFloor = tempUnit.convertDelta(fromCelsius: tempFloorC)
-        let temp = tile(.skinTemp, "Skin temp", "overnight", .thermometer, Theme.temp, tempUnit.symbol,
-                        spokenUnit: tempUnit == .fahrenheit ? "degrees Fahrenheit" : "degrees Celsius",
-                        pts: tempPts, floor: tempFloor, format: oneDecimal)
-
-        // Steps: headline = today's total; trend = the last complete day vs the days before it.
-        let stepPts = series { $0.steps.map(Double.init) }
-        let completeDays = stepPts.filter { $0.date < today }
-        let stepsTrend = BaselineTrend.evaluate(completeDays, minAbsoluteDelta: 1_000)
-        let todaySteps = stepPts.first { $0.date == today }?.value
-        let stepsFormat: (Double) -> String = { Int($0.rounded()).formatted(.number) }
-        let steps = TodayTile(
-            metric: .steps, title: "Steps", qualifier: todaySteps != nil ? "so far today" : "latest day",
-            icon: .route, tint: Theme.steps,
-            valueText: (todaySteps ?? stepPts.last?.value).map(stepsFormat),
-            unit: "", sparkline: slots(stepPts), trend: stepsTrend,
-            trendIsYesterday: stepsTrend?.latest.date == yesterday,
-            staleAsOf: todaySteps == nil ? stepPts.last.map(\.date) : nil,
-            spokenUnit: "steps", format: stepsFormat)
-
-        return [hrv, rhr, spo2, rr, temp, steps]
     }
 }

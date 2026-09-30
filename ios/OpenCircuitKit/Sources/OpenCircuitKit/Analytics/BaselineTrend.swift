@@ -33,6 +33,15 @@ public enum BaselineTrend {
         public let baselineDays: Int
         /// nil while the baseline is still too thin to judge (fewer than `minBaselineDays`).
         public let direction: Direction?
+        /// Half-width of the deadband around the mean; nil while the baseline is too thin. The
+        /// "usual range" drawn and labelled in the UI is exactly this band, so a value inside it is
+        /// the one the direction calls `.within` — the chart, the label and the arrow can't disagree.
+        public let bandHalfWidth: Double?
+        /// `baselineMean ± bandHalfWidth`, or nil while the baseline is too thin.
+        public var usualRange: ClosedRange<Double>? {
+            guard let m = baselineMean, let h = bandHalfWidth else { return nil }
+            return (m - h)...(m + h)
+        }
         /// `latest.value - baselineMean`, or nil without a baseline.
         public var delta: Double? { baselineMean.map { latest.value - $0 } }
     }
@@ -50,16 +59,18 @@ public enum BaselineTrend {
         guard let latest = clean.last else { return nil }
         let prior = clean.dropLast().map(\.value)
         guard !prior.isEmpty else {
-            return Result(latest: latest, baselineMean: nil, baselineDays: 0, direction: nil)
+            return Result(latest: latest, baselineMean: nil, baselineDays: 0, direction: nil, bandHalfWidth: nil)
         }
         let mean = prior.reduce(0, +) / Double(prior.count)
         guard prior.count >= max(minBaselineDays, 1) else {
-            return Result(latest: latest, baselineMean: mean, baselineDays: prior.count, direction: nil)
+            return Result(latest: latest, baselineMean: mean, baselineDays: prior.count, direction: nil,
+                          bandHalfWidth: nil)
         }
         let variance = prior.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(prior.count)
         let band = max(abs(minAbsoluteDelta), sdFraction * variance.squareRoot())
         let delta = latest.value - mean
         let direction: Direction = delta > band ? .above : (delta < -band ? .below : .within)
-        return Result(latest: latest, baselineMean: mean, baselineDays: prior.count, direction: direction)
+        return Result(latest: latest, baselineMean: mean, baselineDays: prior.count, direction: direction,
+                      bandHalfWidth: band)
     }
 }

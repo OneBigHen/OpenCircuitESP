@@ -21,7 +21,7 @@ extension TodaySynthesis {
     static func input(trends: TrendsData, tiles: [TodayTile], readiness: ReadinessReport?,
                       lastSyncAt: Date?, now: Date = Date()) -> Input {
         func direction(_ m: TodayTile.Metric) -> BaselineTrend.Direction? {
-            guard let t = tiles.first(where: { $0.metric == m }), t.staleAsOf == nil else { return nil }
+            guard let t = tiles.first(where: { $0.metric == m }), !t.isStale(now: now) else { return nil }
             return t.trend?.direction
         }
         // Usual sleep = the nights BEFORE the newest one, so last night isn't compared with itself.

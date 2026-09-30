@@ -1,7 +1,7 @@
 // DEBUG-ONLY synthetic demo data for screenshots (#216). Compiled out of Release entirely.
 //
 // Launch a Debug build with `-OCDemoData YES` (e.g. `xcrun simctl launch booted <bundle> -OCDemoData YES`)
-// and, on a store with no sleep history, this seeds two weeks of SYNTHETIC ring data — sleep
+// and, on a store with no sleep history, this seeds 30 days of SYNTHETIC ring data — sleep
 // summaries, overnight HR/HRV/SpO₂/resp. rate, daytime HR + skin temp, and steps — so the Today tab
 // can be reviewed by screenshot. Every value is generated from smooth formulas below; none of it
 // comes from, or resembles a copy of, any real wearer's data. It refuses to touch a store that
@@ -31,13 +31,13 @@ enum DemoData {
 
         let cal = Calendar.current
         let today = cal.startOfDay(for: now)
-        let nights = 14
+        let nights = 30
 
         // Deterministic wiggle in -1…1, so every run (and before/after) seeds identical data.
         func wiggle(_ i: Int, _ salt: Double) -> Double { sin(Double(i) * 1.7 + salt) * cos(Double(i) * 0.6 + salt * 2) }
 
         for n in 0..<nights {
-            // n = 0 is last night (ending this morning), n = 13 the oldest.
+            // n = 0 is last night (ending this morning), n = nights - 1 the oldest.
             let i = nights - 1 - n
             guard let wakeDay = cal.date(byAdding: .day, value: -n, to: today),
                   let bedDay = cal.date(byAdding: .day, value: -1, to: wakeDay) else { continue }

@@ -41,11 +41,22 @@ final class BaselineTrendTests: XCTestCase {
         XCTAssertEqual(BaselineTrend.evaluate(series(flat + [53]), minAbsoluteDelta: 3)?.direction, .within)
     }
 
+    func testUsualRangeIsTheDeadband() {
+        let r = BaselineTrend.evaluate(series([50, 50, 50, 50, 52]), minAbsoluteDelta: 3)
+        XCTAssertEqual(r?.bandHalfWidth, 3)
+        XCTAssertEqual(r?.usualRange, 47...53)
+        XCTAssertTrue(r?.usualRange?.contains(52) == true)
+        XCTAssertEqual(r?.direction, .within)
+        // Thin baseline: no band claimed.
+        XCTAssertNil(BaselineTrend.evaluate(series([50, 50, 52]), minAbsoluteDelta: 3)?.usualRange)
+    }
+
     func testNoisyBaselineWidensTheBand() {
         // Mean 50, population SD 10 → band = max(1, 5) = 5. A +4 move is within; +6 is above.
         let noisy: [Double] = [40, 60, 40, 60]
         XCTAssertEqual(BaselineTrend.evaluate(series(noisy + [54]), minAbsoluteDelta: 1)?.direction, .within)
         XCTAssertEqual(BaselineTrend.evaluate(series(noisy + [56]), minAbsoluteDelta: 1)?.direction, .above)
+        XCTAssertEqual(BaselineTrend.evaluate(series(noisy + [56]), minAbsoluteDelta: 1)?.bandHalfWidth ?? 0, 5, accuracy: 1e-9)
     }
 
     func testOrderIndependentAndNonFiniteDropped() {
