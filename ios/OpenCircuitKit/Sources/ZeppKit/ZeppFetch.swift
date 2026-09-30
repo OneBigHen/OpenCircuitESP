@@ -333,10 +333,11 @@ public struct ZeppHistoryFetch {
             var reader = ZeppByteReader(bytes, offset: 3)
             let expected = reader.u32() ?? 0
             let computed = ZeppCRC32.checksum(buffer)
-            // SPEC-GAP: Gadgetbridge skips the CRC check for activity (0x01) without saying why, and
-            // no activity round has reached this check on hardware yet (§10.1). ZeppKit checks it
-            // for every type; a mismatch keeps the data on the strap, and the failure carries the
-            // announced and the computed CRC so the next hardware run answers the question.
+            // Checked for every type. Gadgetbridge skips the check for activity (0x01) without saying
+            // why, but on the Helio the activity CRC matches like every other type's: 60 records
+            // (480 B) and a full 12 h round of 720 records (5760 B) (§6.5, §10.1, HW 2026-09-30
+            // 13:35). A mismatch keeps the data on the strap, and the failure carries the
+            // announced and the computed CRC.
             guard expected == computed else {
                 return failRound(type, .crcMismatch(expected: expected, computed: computed))
             }
