@@ -182,3 +182,4 @@ open a V8 store: its staged migration throws `134504` ("unknown model version"),
 sends that to `wipeAndRecoverForeground`, and raw history is deleted on every phone that ever
 launched a V8 build. The same holds for every later schema version: never ship a build whose
 `MigrationPlan` ends before the newest version that has already shipped.
+`ShippedStoreMigrationTests.testABuild56PlanCannotOpenAMigratedStore` pins the throw.

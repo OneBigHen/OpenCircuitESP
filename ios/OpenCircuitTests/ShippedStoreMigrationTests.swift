@@ -1,3 +1,4 @@
+import SQLite3
 import SwiftData
 import XCTest
 import OpenCircuitKit
@@ -950,5 +951,212 @@ private enum EleventhTypePlan {
         static var models: [any PersistentModel.Type] {
             [ShippedB43.StoredSleepSummary.self, StoredEleventhEntity.self]
         }
+    }
+}
+
+// MARK: - V8 hardening (review #218 N2 and SF1)
+//
+// Adopted from the #218 review's probes. They reuse this file's tag-verified shipped shapes, write
+// the OLD shape, then open through the real `makeContainerOrThrow`. The raw-SQLite reads look at the
+// COLUMN, not the Swift getter, because every `#Predicate { $0.deviceID == … }` path is evaluated in
+// SQL: a migrated row that missed the default would be invisible to the ring there even if the
+// getter looked right.
+
+extension ShippedStoreMigrationTests {
+    /// Run `sql` on the store file through a separate raw SQLite connection; every column as text.
+    private func rawSQL(_ sql: String, file: StaticString = #filePath, line: UInt = #line) -> [[String?]] {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(storeURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            XCTFail("sqlite open failed", file: file, line: line); return []
+        }
+        defer { sqlite3_close(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            XCTFail("prepare failed: \(String(cString: sqlite3_errmsg(db))) — \(sql)", file: file, line: line)
+            return []
+        }
+        defer { sqlite3_finalize(stmt) }
+        var rows: [[String?]] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append((0..<sqlite3_column_count(stmt)).map { i in
+                sqlite3_column_text(stmt, i).map { String(cString: $0) }
+            })
+        }
+        return rows
+    }
+
+    /// (rows, rows whose `deviceID` is NULL, rows whose `deviceID` is 'ringconn') for one table.
+    private func deviceColumn(_ table: String) -> [String?] {
+        rawSQL("SELECT COUNT(*), SUM(ZDEVICEID IS NULL), SUM(ZDEVICEID = 'ringconn') FROM \(table)").first ?? []
+    }
+
+    /// A b56 (V7) store holding exactly these raw samples and cursor rows.
+    private func writeShippedB56Store(samples: [(kind: String, at: Date, value: Double)],
+                                      cursors: [String: Date]) throws {
+        let schema = Schema(ShippedModels.b56)
+        let container = try ModelContainer(
+            for: schema, configurations: ModelConfiguration(schema: schema, url: storeURL))
+        let context = ModelContext(container)
+        for s in samples {
+            context.insert(ShippedB45.StoredSample(kindRaw: s.kind, start: s.at, end: s.at, value: s.value))
+        }
+        for (key, last) in cursors { context.insert(ShippedB45.StoredCursor(kindRaw: key, last: last)) }
+        try context.save()
+    }
+
+    /// The migrated column itself reads 'ringconn' on every row, in SQL — not just through the getter.
+    func testABuild56StoresDeviceColumnIsRingconnInSQLOnEveryMigratedRow() throws {
+        try writeShippedB56Store()
+        let container = try openExactlyAsTheAppDoes()
+        let context = ModelContext(container)
+        let ring = SyncDeviceID.ringConn.rawValue
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StoredSample>(
+            predicate: #Predicate { $0.deviceID == ring })), 16)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StoredCursor>(
+            predicate: #Predicate { $0.deviceID == ring })), 8)
+        XCTAssertEqual(deviceColumn("ZSTOREDSAMPLE"), ["16", "0", "16"])
+        XCTAssertEqual(deviceColumn("ZSTOREDCURSOR"), ["8", "0", "8"])
+        withExtendedLifetime(container) {}
+    }
+
+    /// The older shapes (b33 = V3, b43 = V5, b45 = V6) walk the whole chain to V8, and the ring still
+    /// reads its rows through every device-filtered path.
+    private func assertTheRingReadsItsMigratedRows(_ container: ModelContainer,
+                                                   file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertEqual(deviceColumn("ZSTOREDSAMPLE"), ["1", "0", "1"], file: file, line: line)
+        XCTAssertEqual(deviceColumn("ZSTOREDCURSOR"), ["1", "0", "1"], file: file, line: line)
+        let store = LocalStore(container.mainContext)
+        XCTAssertEqual(try store.loadCursor().last(.heartRate), night, file: file, line: line)
+        // These stores hold no `hk:heartRate` row, so the one HR row was pending before the upgrade too.
+        XCTAssertEqual(try store.pendingHealthSamples().map(\.start), [night], file: file, line: line)
+        XCTAssertEqual(try store.ingest([QuantitySample(kind: .heartRate, start: night, value: 60)]), [],
+                       "the ring's migrated watermark still drops a re-sent sample", file: file, line: line)
+    }
+
+    func testABuild33StoreReachesV8AndTheRingStillReadsIt() throws {
+        try writeShippedStore(ShippedModels.b33) { context in
+            let row = ShippedB34.StoredSleepSummary(); row.night = self.night; context.insert(row)
+        }
+        let container = try openExactlyAsTheAppDoes()
+        try assertTheRingReadsItsMigratedRows(container)
+        withExtendedLifetime(container) {}
+    }
+
+    func testABuild43StoreReachesV8AndTheRingStillReadsIt() throws {
+        try writeShippedStore(ShippedModels.b43) { context in
+            let row = ShippedB43.StoredSleepSummary(); row.night = self.night; context.insert(row)
+        }
+        let container = try openExactlyAsTheAppDoes()
+        try assertTheRingReadsItsMigratedRows(container)
+        withExtendedLifetime(container) {}
+    }
+
+    func testABuild45StoreReachesV8AndTheRingStillReadsIt() throws {
+        try writeShippedStore(ShippedModels.b45) { context in
+            let row = ShippedB45.StoredSleepSummary(); row.night = self.night; context.insert(row)
+        }
+        let container = try openExactlyAsTheAppDoes()
+        try assertTheRingReadsItsMigratedRows(container)
+        withExtendedLifetime(container) {}
+    }
+
+    /// No Health re-write after the upgrade, for all five mirrored kinds (not just heart rate): the
+    /// pending set is exactly what V7 computed from the same rows.
+    func testABuild56StoresPendingHealthSetIsExactlyTheSeededSetForAllFiveKinds() throws {
+        try writeShippedB56Store()
+        let container = try openExactlyAsTheAppDoes()
+        let store = LocalStore(container.mainContext)
+        // Seeded: kind i at night + n*300 - i (n = 0, 1, 2); hk:heartRate at +300, hk:spo2 at +299,
+        // no other hk: rows → HR {+600}; SpO₂ {+598}; HRV, temperature and RR all three each.
+        var expected: [MetricKind: [Date]] = [
+            .heartRate: [night.addingTimeInterval(600)],
+            .spo2: [night.addingTimeInterval(598)],
+        ]
+        for (i, kind) in [(1, MetricKind.hrvSDNN), (3, .temperature), (4, .respiratoryRate)] {
+            expected[kind] = (0..<3).map { night.addingTimeInterval(Double($0 * 300 - i)) }
+        }
+        let pending = try store.pendingHealthSamples()
+        XCTAssertEqual(pending.count, 11)
+        XCTAssertEqual(Dictionary(grouping: pending, by: \.kind).mapValues { $0.map(\.start) }, expected)
+        withExtendedLifetime(container) {}
+    }
+
+    /// A FULLY-SYNCED b56 user (every mirrored kind's hk: watermark at its newest sample) has nothing
+    /// pending after the upgrade. A new ring sample is the only thing that becomes pending, and
+    /// writing it adds no cursor row and re-keys nothing.
+    func testAFullySyncedBuild56UserHasNothingPendingAfterTheUpgrade() throws {
+        let kinds: [MetricKind] = [.heartRate, .hrvSDNN, .spo2, .respiratoryRate, .temperature]
+        var samples: [(kind: String, at: Date, value: Double)] = []
+        var cursors: [String: Date] = ["steps": night, "sleep": night, "export:sleepSessions": night]
+        for (i, kind) in kinds.enumerated() {
+            let newest = night.addingTimeInterval(Double(600 + i))
+            samples += [(kind.rawValue, night.addingTimeInterval(Double(i)), 50), (kind.rawValue, newest, 51)]
+            cursors[kind.rawValue] = newest
+            cursors["hk:" + kind.rawValue] = newest
+        }
+        try writeShippedB56Store(samples: samples, cursors: cursors)
+
+        let container = try openExactlyAsTheAppDoes()
+        let store = LocalStore(container.mainContext)
+        XCTAssertEqual(try store.pendingHealthSamples(), [], "a fully-synced user must have nothing to re-write")
+
+        let fresh = QuantitySample(kind: .heartRate, start: night.addingTimeInterval(900), value: 62)
+        XCTAssertEqual(try store.ingest([fresh]), [fresh])
+        XCTAssertEqual(try store.pendingHealthSamples(), [fresh])
+        try store.markHealthWritten([fresh])
+        XCTAssertEqual(try store.pendingHealthSamples(), [])
+
+        let keys = Set(try ModelContext(container).fetch(FetchDescriptor<StoredCursor>()).map(\.kindRaw))
+        XCTAssertEqual(keys, Set(cursors.keys), "no cursor row added or re-keyed for the ring")
+        XCTAssertEqual(deviceColumn("ZSTOREDCURSOR"), ["\(cursors.count)", "0", "\(cursors.count)"])
+        withExtendedLifetime(container) {}
+    }
+
+    /// The every-launch cursor repair filters samples by `deviceID` in SQL. If a migrated row missed
+    /// the default, a stuck `hk:` cursor would be DELETED instead of reset, and the next flush would
+    /// re-write the whole retained history to Health.
+    func testTheFutureCursorRepairStillResetsToTheMigratedLatestSample() throws {
+        let future = night.addingTimeInterval(86_400 * 400)
+        try writeShippedB56Store(samples: [("heartRate", night, 55), ("heartRate", night.addingTimeInterval(600), 56)],
+                                 cursors: ["heartRate": future, "hk:heartRate": future])
+        let container = try openExactlyAsTheAppDoes()
+        let store = LocalStore(container.mainContext)
+        XCTAssertEqual(try store.repairFutureSyncCursors(now: night.addingTimeInterval(3_600)), 2)
+        let rows = try ModelContext(container).fetch(FetchDescriptor<StoredCursor>())
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: rows.map { ($0.kindRaw, $0.last) }),
+                       ["heartRate": night.addingTimeInterval(600), "hk:heartRate": night.addingTimeInterval(600)],
+                       "reset to the ring's latest migrated sample, NOT deleted")
+        XCTAssertEqual(try store.pendingHealthSamples(), [])
+        withExtendedLifetime(container) {}
+    }
+
+    /// V8 IS FORWARD-ONLY (docs/DEVICE_SEAM.md §3, runbook §5). A build-56 binary — its plan ends at
+    /// V7 — cannot open a store this build migrated: the throw below is what production b56 would
+    /// catch and answer with `wipeAndRecoverForeground`. That is why no tester may be told to
+    /// reinstall a build ≤ 56, and why SchemaV8 and its stage may never be removed. (It logs
+    /// `134504 "Cannot use staged migration with an unknown model version"`; that is expected.)
+    func testABuild56PlanCannotOpenAMigratedStore() throws {
+        try writeShippedB56Store()
+        do { let c = try openExactlyAsTheAppDoes(); withExtendedLifetime(c) {} }   // now V8 on disk
+        let schema = Schema(OpenCircuitApp.SchemaV7.models)
+        XCTAssertThrowsError(try ModelContainer(for: schema, migrationPlan: Build56Plan.self,
+                                                configurations: ModelConfiguration(schema: schema, url: storeURL)))
+    }
+}
+
+/// Build 56's migration plan: V1…V7, the pinned V7 being hash-identical to b56's live types.
+private enum Build56Plan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] {
+        [OpenCircuitApp.SchemaV1.self, OpenCircuitApp.SchemaV2.self, OpenCircuitApp.SchemaV3.self,
+         OpenCircuitApp.SchemaV4.self, OpenCircuitApp.SchemaV5.self, OpenCircuitApp.SchemaV6.self,
+         OpenCircuitApp.SchemaV7.self]
+    }
+    static var stages: [MigrationStage] {
+        [.lightweight(fromVersion: OpenCircuitApp.SchemaV1.self, toVersion: OpenCircuitApp.SchemaV2.self),
+         .lightweight(fromVersion: OpenCircuitApp.SchemaV2.self, toVersion: OpenCircuitApp.SchemaV3.self),
+         .lightweight(fromVersion: OpenCircuitApp.SchemaV3.self, toVersion: OpenCircuitApp.SchemaV4.self),
+         .lightweight(fromVersion: OpenCircuitApp.SchemaV4.self, toVersion: OpenCircuitApp.SchemaV5.self),
+         .lightweight(fromVersion: OpenCircuitApp.SchemaV5.self, toVersion: OpenCircuitApp.SchemaV6.self),
+         .lightweight(fromVersion: OpenCircuitApp.SchemaV6.self, toVersion: OpenCircuitApp.SchemaV7.self)]
     }
 }

@@ -167,8 +167,10 @@ persisted active-ring id.** Why:
    disconnect, and a lightweight stage can only apply a static column default. Using it would mean
    a custom stage that reads outside the store mid-migration.
 3. It is a literal default, so the migration is a pure schema diff. The value is pinned by
-   `SyncDeviceTests.testTheRingTimelineIdIsPinned` and by the migration test asserting every
-   migrated row reads `SyncDeviceID.ringConn.rawValue`.
+   `SyncDeviceTests.testTheRingTimelineIdIsPinned` and by the migration tests asserting every
+   migrated row reads `SyncDeviceID.ringConn.rawValue`, through the getter and in the SQL column
+   itself (`testABuild56StoresDeviceColumnIsRingconnInSQLOnEveryMigratedRow`; the b33, b43 and b45
+   arms walk the whole chain to V8 and check the same).
 
 **Every cursor read/write, per device, defaulting to the ring.**
 - `ingest`, `previewIngest`, `loadCursor`: only that device's rows, via `SyncCursor.forDevice`.
@@ -202,7 +204,8 @@ a build ≤ 56. Why: a build that doesn't know V8 can't open a V8 store. Its sta
 `NSCocoaErrorDomain 134504` ("Cannot use staged migration with an unknown model version"), the app
 catches that in `resolveContainer` and goes to `wipeAndRecoverForeground`, and every
 `StoredSample`, `StoredCursor`, `StoredStepSample` and `StoredDaytimeTemp` row is deleted on every
-phone that ever launched a V8 build.
+phone that ever launched a V8 build. `ShippedStoreMigrationTests.testABuild56PlanCannotOpenAMigratedStore`
+pins the throw.
 
 ## 4. Follow-ups (not in this PR)
 
