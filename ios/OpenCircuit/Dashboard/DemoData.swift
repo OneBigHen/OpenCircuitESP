@@ -56,13 +56,21 @@ enum DemoData {
                 inBedStart: bed, inBedEnd: wake,
                 sleepOnset: bed.addingTimeInterval(12 * 60), sleepWake: wake.addingTimeInterval(-6 * 60),
                 updatedAt: wake,
-                skinTempC: 33.55 + 0.12 * wiggle(i, 0.9),
+                skinTempC: 33.55 + 0.22 * wiggle(i, 0.9),
                 sleepScore: Int(74 + 8 * progress + 5 * wiggle(i, 0.5)),
                 stressScore: Int(44 - 10 * progress + 4 * wiggle(i, 1.7)))
+            // A synthetic stage timeline: ~90-minute cycles, deeper early and more REM late, with a
+            // couple of brief wakes. The oldest nights get none, so the "timeline isn't stored"
+            // state is on screen too.
+            if n < 20 { summary.hypnogramData = SleepHypnogramCodec.encode(demoHypnogram(bed: bed, wake: wake, salt: Double(i))) }
             context.insert(summary)
 
             // Overnight series every 5 minutes (SpO₂ / RR every 10).
-            let hrvBase = 44 + 12 * progress, hrBase = 56 - 3 * progress
+            // Night-to-night variation on top of the trend, as real nights have.
+            let hrvBase = 44 + 12 * progress + 5 * wiggle(i, 2.6)
+            let hrBase = 56 - 3 * progress + 1.8 * wiggle(i, 3.1)
+            let spo2Base = 0.962 + 0.006 * wiggle(i, 0.8)
+            let rrBase = 14.6 + 0.5 * wiggle(i, 1.4)
             var t = bed, k = 0
             while t < wake {
                 let w = wiggle(k + i * 97, 0.2)
@@ -72,9 +80,9 @@ enum DemoData {
                                             end: t.addingTimeInterval(60), value: (hrvBase + 7 * w).rounded()))
                 if k % 2 == 0 {
                     context.insert(StoredSample(kindRaw: MetricKind.spo2.rawValue, start: t,
-                                                end: t.addingTimeInterval(60), value: 0.965 + 0.012 * w))
+                                                end: t.addingTimeInterval(60), value: spo2Base + 0.012 * w))
                     context.insert(StoredSample(kindRaw: MetricKind.respiratoryRate.rawValue, start: t,
-                                                end: t.addingTimeInterval(60), value: 14.6 + 0.6 * w))
+                                                end: t.addingTimeInterval(60), value: rrBase + 0.6 * w))
                 }
                 t = t.addingTimeInterval(300); k += 1
             }
@@ -88,7 +96,7 @@ enum DemoData {
                 context.insert(StoredSample(kindRaw: MetricKind.heartRate.rawValue, start: d,
                                             end: d.addingTimeInterval(60), value: (74 + 12 * w).rounded()))
                 if j % 4 == 0 { context.insert(StoredDaytimeTemp(time: d, celsius: 32.9 + 0.3 * w)) }
-                let delta = max(0, Int(150 + 110 * wiggle(j + i * 13, 1.9)))
+                let delta = max(0, Int(150 + 40 * wiggle(i, 0.4) + 110 * wiggle(j + i * 13, 1.9)))
                 let end = min(d.addingTimeInterval(900), dayEnd)
                 context.insert(StoredStepSample(start: d, end: end, delta: delta))
                 daySteps += delta
@@ -97,6 +105,29 @@ enum DemoData {
             context.insert(StoredDaily(day: wakeDay, steps: daySteps, updatedAt: dayEnd))
         }
         try? context.save()
+    }
+
+    private static func demoHypnogram(bed: Date, wake: Date, salt: Double) -> [SleepSegment] {
+        var out: [SleepSegment] = []
+        var t = bed
+        func add(_ minutes: Double, _ stage: SleepStage) {
+            let end = min(t.addingTimeInterval(minutes * 60), wake)
+            guard end > t else { return }
+            out.append(SleepSegment(start: t, end: end, stage: stage))
+            t = end
+        }
+        add(12, .awake)
+        var cycle = 0
+        while t < wake {
+            let late = Double(cycle) / 4
+            add(22 + 6 * sin(salt + Double(cycle)), .asleepCore)
+            add(max(4, 34 - 22 * late + 5 * cos(salt * 1.3 + Double(cycle))), .asleepDeep)
+            add(14, .asleepCore)
+            add(10 + 16 * late, .asleepREM)
+            if cycle % 2 == 1 { add(4, .awake) }
+            cycle += 1
+        }
+        return out
     }
 
     @MainActor

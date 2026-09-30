@@ -9,7 +9,10 @@ enum KeylineIcon: String, CaseIterable {
     case heart, activity, droplet, wind, thermometer, route, sparkles
     case arrowUpRight = "arrow-up-right"
     case arrowDownRight = "arrow-down-right"
-    case minus
+    case minus, calendar
+    case chevronLeft = "chevron-left"
+    case chevronRight = "chevron-right"
+    case circleAlert = "circle-alert"
 
     /// The asset-catalog name (the `Keyline` folder provides a namespace).
     var assetName: String { "Keyline/\(rawValue)" }

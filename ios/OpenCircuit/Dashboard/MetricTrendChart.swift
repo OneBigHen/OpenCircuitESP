@@ -47,7 +47,7 @@ struct MetricTrendChart: View {
         var vals = tile.values.compactMap { $0 }
         if let r = tile.trend?.usualRange { vals += [r.lowerBound, r.upperBound] }
         guard let lo = vals.min(), let hi = vals.max() else { return 0...1 }
-        let pad = max((hi - lo) * 0.15, abs(hi) * 0.01, 0.1)
+        let pad = max((hi - lo) * 0.3, abs(hi) * 0.01, 0.1)
         return (lo - pad)...(hi + pad)
     }
 

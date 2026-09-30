@@ -428,6 +428,10 @@ struct ContentView: View {
                 OCSectionHeader(isHR ? "Live Heart Rate" : "Live SpO₂",
                                 systemImage: isHR ? "heart.fill" : "lungs.fill",
                                 tint: isHR ? Theme.hr : Theme.spo2)
+                // Large live readout above the scrolling chart (#216). nil/0 = still warming up.
+                LiveVitalReadout(value: (isHR ? session.liveHR : session.liveSpO2).flatMap { $0 > 0 ? $0 : nil },
+                                 unit: isHR ? "bpm" : "%", tint: isHR ? Theme.hr : Theme.spo2,
+                                 pulses: isHR, sessionValues: liveBuffer.points.map(\.value))
                 LiveVitalsChart(buffer: liveBuffer,
                                 color: isHR ? Theme.hr : Theme.spo2,
                                 window: 90,
@@ -451,6 +455,20 @@ struct ContentView: View {
                                  metricUnit: "h", metricDecimals: 1)
                     }
                     sleepCard
+                    // Browse any of the last 30 nights with its stage chart (#216).
+                    NavigationLink { SleepNightsBrowserView() } label: {
+                        card {
+                            HStack(spacing: 8) {
+                                KeylineGlyph(.calendar, size: 16).foregroundStyle(Theme.sleep)
+                                Text("PAST NIGHTS").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                Spacer()
+                                KeylineGlyph(.chevronRight, size: 12, relativeTo: .caption).foregroundStyle(.tertiary)
+                            }
+                            Text("Browse earlier nights and their sleep stages")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
                     if !trends.points.isEmpty {
                         OCSectionHeader("Sleep Trends", systemImage: "chart.xyaxis.line", tint: Theme.sleep)
                         SleepTrendsSection(points: trends.points, tempUnitRaw: tempUnitRaw)

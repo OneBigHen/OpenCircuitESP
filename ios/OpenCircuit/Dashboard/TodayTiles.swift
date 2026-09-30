@@ -229,7 +229,8 @@ enum TodayTiles {
             return TodayTile(metric: .steps, title: "Steps",
                              qualifier: todaySteps != nil ? "so far today" : "latest day",
                              icon: .route, tint: Theme.steps, valueText: headline.map { fmt($0.value) },
-                             unit: "", days: days, values: slots(pts), trend: trend,
+                             // Complete days only: today's still-growing total would plot as a cliff.
+                             unit: "", days: days, values: slots(pts.filter { $0.date < today }), trend: trend,
                              trendIsYesterday: trend?.latest.date == yesterday,
                              valueDate: headline?.date, isNightly: false,
                              spokenUnit: "steps", format: fmt, formatDelta: fmtDelta)

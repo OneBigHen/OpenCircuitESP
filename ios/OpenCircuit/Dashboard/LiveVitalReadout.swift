@@ -1,0 +1,82 @@
+// The large live readout (#216) shown above the live chart during an on-demand HR / SpO₂
+// measurement: one big number with a small unit, a heart that beats at the measured rate, and the
+// low / high of this measurement so far. It shows only what the ring has sent — no smoothing, no
+// placeholder number while the sensor warms up.
+//
+// Reduce Motion: the heart holds still and the number changes without the rolling transition.
+
+import SwiftUI
+
+struct LiveVitalReadout: View {
+    /// The latest reading, or nil while the sensor is still warming up.
+    let value: Int?
+    let unit: String
+    let tint: Color
+    /// Beat the heart glyph at `value` bpm (HR only).
+    var pulses = false
+    /// Readings received so far in this measurement (display units), for the low / high line.
+    var sessionValues: [Double] = []
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .largeTitle) private var size: CGFloat = 72
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            if pulses {
+                BeatingHeart(bpm: value, tint: tint, still: reduceMotion)
+                    .frame(width: size * 0.42, height: size * 0.42)
+                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - size * 0.06 }
+            }
+            Text(value.map(String.init) ?? "—")
+                .font(.system(size: size, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(value == nil ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                .contentTransition(reduceMotion ? .identity : .numericText())
+                .animation(reduceMotion ? nil : .snappy, value: value)
+                .lineLimit(1).minimumScaleFactor(0.6)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(unit).font(.title3.weight(.medium)).foregroundStyle(.secondary)
+                if let lo = sessionValues.min(), let hi = sessionValues.max(), sessionValues.count > 1 {
+                    Text("\(Int(lo.rounded()))–\(Int(hi.rounded())) so far")
+                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
+        .accessibilityAddTraits(.updatesFrequently)
+    }
+
+    private var accessibilityText: String {
+        guard let value else { return "Waiting for a reading" }
+        var s = "\(value) \(unit == "%" ? "percent" : unit == "bpm" ? "beats per minute" : unit)"
+        if let lo = sessionValues.min(), let hi = sessionValues.max(), sessionValues.count > 1 {
+            s += ", \(Int(lo.rounded())) to \(Int(hi.rounded())) so far"
+        }
+        return s
+    }
+}
+
+/// A Keyline heart that scales on each beat at `bpm` (clamped to a sane 30–220), or stays still.
+private struct BeatingHeart: View {
+    let bpm: Int?
+    let tint: Color
+    let still: Bool
+
+    var body: some View {
+        if still || bpm == nil {
+            KeylineGlyph(.heart, size: 28, relativeTo: .largeTitle).foregroundStyle(tint)
+        } else {
+            TimelineView(.animation) { ctx in
+                let period = 60.0 / Double(min(max(bpm ?? 60, 30), 220))
+                let phase = ctx.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
+                // A quick "lub" in the first fifth of the beat, then rest.
+                let beat = phase < 0.2 ? sin(phase / 0.2 * .pi) : 0
+                KeylineGlyph(.heart, size: 28, relativeTo: .largeTitle)
+                    .foregroundStyle(tint)
+                    .scaleEffect(1 + 0.14 * beat)
+            }
+        }
+    }
+}
