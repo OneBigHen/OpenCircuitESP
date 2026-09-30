@@ -72,10 +72,13 @@ public enum RingEventLog {
         guard frame.count >= 3 + entryLength, frame[0] == opcode, frame[1] == 0x00 else { return nil }
         let payload = frame[3...]
         guard payload.count % entryLength == 0 else { return nil }
-        let events = stride(from: payload.startIndex, to: payload.endIndex, by: entryLength).map { o in
-            RingEvent(type: frame[o], value: frame[o + 1],
-                      cursor: UInt32(frame[o + 2]) << 24 | UInt32(frame[o + 3]) << 16
-                          | UInt32(frame[o + 4]) << 8 | UInt32(frame[o + 5]))
+        let events = stride(from: payload.startIndex, to: payload.endIndex, by: entryLength).map { (o: Int) -> RingEvent in
+            // Split into typed parts: the one-expression form times out the Xcode 26.x type-checker.
+            let b0: UInt32 = UInt32(frame[o + 2]) << 24
+            let b1: UInt32 = UInt32(frame[o + 3]) << 16
+            let b2: UInt32 = UInt32(frame[o + 4]) << 8
+            let b3: UInt32 = UInt32(frame[o + 5])
+            return RingEvent(type: frame[o], value: frame[o + 1], cursor: b0 | b1 | b2 | b3)
         }
         return Frame(hiddenCount: Int(frame[2]), events: events)
     }
