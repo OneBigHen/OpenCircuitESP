@@ -4,8 +4,8 @@
 // (`ZeppLink`, `ZeppHistoryFetch`) and prints what they decide. The auth key is never printed or
 // logged, nor are the strap's serial number and PnP ID. `--trace` prints the history fetch's
 // control bytes and each data packet's length and counter, never a data payload. The history fetch acks `03 09` (keep on strap) unless
-// `--allow-delete` AND `--out` are both given; then a round is delete-acked only after its raw
-// bytes are written and fsynced to the `--out` file.
+// `--allow-delete` AND `--out` are both given; then a round is delete-acked only if its transfer
+// done carried a matching CRC, and only after its raw bytes are written and fsynced to `--out`.
 //
 // Device controls (`--find`, `--vibrate`, `--alarms`, `--set-alarm`, `--delete-alarm`, `--alerts`)
 // live in Controls.swift. Alarm writes need `--allow-write`; nothing else writes strap state
@@ -75,8 +75,9 @@ OPTIONS
                       packet's length and counter byte (never its payload).
   --out <path>        Append each fetched round (raw hex + metadata, JSON lines) to this file and
                       fsync it. The file holds REAL HEALTH DATA: keep it out of git.
-  --allow-delete      DESTRUCTIVE. Ack 03 01 ("saved, drop it from the strap") for each round,
-                      but only after it is durably written to --out. Requires --key-file and --out.
+  --allow-delete      DESTRUCTIVE. Ack 03 01 ("saved, drop it from the strap") for each round
+                      whose CRC matched, but only after it is durably written to --out. A round
+                      without a CRC is kept (03 09). Requires --key-file and --out.
   --help              Show this help.
 
 DEVICE CONTROLS (Helio Strap only; all need --key-file)
@@ -645,7 +646,7 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         let now = Date()
         let since = Date(timeIntervalSince1970: floor((now.timeIntervalSince1970 - options.sinceHours * 3600) / 60) * 60)
         let policy: ZeppAckPolicy = options.allowDelete ? .deleteAfterDurableCommit : .keepOnDevice
-        log("fetching \(options.types.map(\.displayName).joined(separator: ", ")) since \(ZeppRoundSummary.iso(since)); ack policy: \(policy == .keepOnDevice ? "KEEP on strap (03 09)" : "delete after durable write (03 01)")")
+        log("fetching \(options.types.map(\.displayName).joined(separator: ", ")) since \(ZeppRoundSummary.iso(since)); ack policy: \(policy == .keepOnDevice ? "KEEP on strap (03 09)" : "delete CRC-verified rounds after a durable write (03 01)")")
         var machine = ZeppHistoryFetch(plan: options.types.map { ($0, since) }, now: now,
                                        configuration: .init(ackPolicy: policy))
         let actions = machine.start()
@@ -811,7 +812,7 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
 let options = parseOptions(Array(CommandLine.arguments.dropFirst()))
 let key = options.keyFile.map(loadKey)
 if options.allowDelete {
-    print("WARNING: --allow-delete: rounds durably written to --out will be DROPPED from the strap (ack 03 01).")
+    print("WARNING: --allow-delete: CRC-verified rounds durably written to --out will be DROPPED from the strap (ack 03 01).")
 }
 if options.writesAlarms {
     print("NOTE: this run WRITES the strap's alarms (--allow-write), and sets its clock first.")

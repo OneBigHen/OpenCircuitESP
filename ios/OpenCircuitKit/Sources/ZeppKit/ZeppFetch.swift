@@ -2,9 +2,10 @@
 //
 // THE ACK IS THE ONLY DESTRUCTIVE THING IN THIS PROTOCOL. `03 01` tells the strap the data is saved
 // on the phone and it stops offering it; `03 09` acknowledges but keeps it (§6.3). This machine
-// sends `03 09` on EVERY path except one: the policy is `.deleteAfterDurableCommit` AND the caller
-// has called `commit(roundID:durable: true)` for that exact round after persisting it. Failures,
-// empty rounds, aborts and the default policy all keep the data on the strap.
+// sends `03 09` on EVERY path except one: the policy is `.deleteAfterDurableCommit` AND the round's
+// transfer done carried a CRC that matched AND the caller has called `commit(roundID:durable: true)`
+// for that exact round after persisting it. Failures, rounds without a CRC, empty rounds, aborts
+// and the default policy all keep the data on the strap.
 //
 // Path-agnostic: control bytes are identical on Path A (`…0004`) and Path B (endpoint 0x004B,
 // §6.1). The caller routes `.sendControl` payloads and feeds control replies to
@@ -15,7 +16,8 @@ import Foundation
 public enum ZeppAckPolicy: Equatable {
     /// Always `03 09`: the strap keeps everything (development default, §6.3).
     case keepOnDevice
-    /// `03 01` only for a round the caller confirmed as durably committed; `03 09` otherwise.
+    /// `03 01` only for a CRC-verified round the caller confirmed as durably committed; `03 09`
+    /// otherwise.
     case deleteAfterDurableCommit
 }
 
@@ -104,6 +106,7 @@ public struct ZeppFetchRound: Equatable {
     /// parsed records if the store should be able to re-decode later.
     public let rawData: [UInt8]
     /// true when the transfer-done reply carried a CRC and it matched; false when it carried none.
+    /// Only a CRC-verified round can be delete-acked (`03 01`).
     public let crcVerified: Bool
     public let parsed: ZeppParsedRecords
     /// The *since* the next round of this type will use (last record + 1 minute); nil when the
@@ -236,12 +239,16 @@ public struct ZeppHistoryFetch {
     }
 
     /// The caller's decision for a delivered round. `durable: true` means the round's records are
-    /// persisted and will survive a crash; only then, and only under `.deleteAfterDurableCommit`,
-    /// does the strap get `03 01`. Anything else is `03 09`.
+    /// persisted and will survive a crash; only then, only under `.deleteAfterDurableCommit`, and
+    /// only for a round whose CRC was checked (`crcVerified`), does the strap get `03 01`. Anything
+    /// else is `03 09`.
     public mutating func commit(roundID: Int, durable: Bool) -> [Action] {
         guard phase == .awaitingCommit, let round = pendingRound, round.id == roundID else { return [] }
         pendingRound = nil
-        let mode: ZeppAckMode = (durable && configuration.ackPolicy == .deleteAfterDurableCommit) ? .delete : .keep
+        // A 3-byte transfer done has no CRC, so nothing proves the data arrived intact: keep it.
+        // The Helio always sent the 7-byte form (§10.1), so this costs nothing there.
+        let deletable = durable && round.crcVerified && configuration.ackPolicy == .deleteAfterDurableCommit
+        let mode: ZeppAckMode = deletable ? .delete : .keep
         if let next = round.nextSince, next.timeIntervalSince(round.since) >= 1, next <= now {
             afterAck = .nextRound(since: next)
         } else {

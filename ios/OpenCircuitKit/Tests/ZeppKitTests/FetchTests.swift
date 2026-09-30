@@ -76,6 +76,42 @@ final class FetchTests: XCTestCase {
         XCTAssertEqual(controls(notDurable.commit(roundID: round2.id, durable: false)), [[0x03, 0x09]])
     }
 
+    func testDeletePolicyKeepsARoundWithoutACRC() throws {
+        // The 3-byte transfer done carries no CRC: nothing proves the data arrived intact (#219 review N3).
+        var fetch = machine([(.hrv, sinceD)], policy: .deleteAfterDurableCommit)
+        _ = fetch.start(); _ = fetch.receiveControl(startReplyD); _ = fetch.receiveData(dataPacketD)
+        let round = try XCTUnwrap(readyRound(fetch.receiveControl(hex("10 02 01"))))
+        XCTAssertFalse(round.crcVerified)
+        XCTAssertEqual(controls(fetch.commit(roundID: round.id, durable: true)), [[0x03, 0x09]])
+
+        var activity = machine([(.activity, sinceD)], policy: .deleteAfterDurableCommit)
+        _ = activity.start()
+        _ = activity.receiveControl(activityStart(3, at: hex("ea 07 09 1d 00 00 00 08")))
+        _ = activity.receiveData([0x00] + threeMinutes)
+        let noCRC = try XCTUnwrap(readyRound(activity.receiveControl(hex("10 02 01"))))
+        XCTAssertEqual(controls(activity.commit(roundID: noCRC.id, durable: true)), [[0x03, 0x09]])
+    }
+
+    func testLengthPreservingCorruptionWithoutACRCIsDeliveredButNeverDeleted() throws {
+        // The review's fuzz case: one packet gains a byte and a later one loses a byte, so the length
+        // still matches; with no CRC the round parses, and it must still be kept on the strap.
+        let data = Array(dataPacketD.dropFirst())
+        var fetch = machine([(.hrv, sinceD)], policy: .deleteAfterDurableCommit)
+        _ = fetch.start(); _ = fetch.receiveControl(startReplyD)
+        XCTAssertEqual(fetch.receiveData([0x00] + data.prefix(6) + [0xEE]), [])
+        XCTAssertEqual(fetch.receiveData([0x01] + data.dropFirst(6).dropLast()), [])
+        let round = try XCTUnwrap(readyRound(fetch.receiveControl(hex("10 02 01"))))
+        XCTAssertNotEqual(round.rawData, data)
+        XCTAssertFalse(round.crcVerified)
+        XCTAssertEqual(controls(fetch.commit(roundID: round.id, durable: true)), [[0x03, 0x09]])
+        // With the CRC, the same corruption fails the round instead.
+        var checked = machine([(.hrv, sinceD)], policy: .deleteAfterDurableCommit)
+        _ = checked.start(); _ = checked.receiveControl(startReplyD)
+        _ = checked.receiveData([0x00] + data.prefix(6) + [0xEE])
+        _ = checked.receiveData([0x01] + data.dropFirst(6).dropLast())
+        XCTAssertEqual(controls(checked.receiveControl(transferDoneD)), [[0x03, 0x09]])
+    }
+
     func testCommitForAnotherRoundIsIgnored() throws {
         var fetch = machine([(.hrv, sinceD)], policy: .deleteAfterDurableCommit)
         _ = fetch.start(); _ = fetch.receiveControl(startReplyD); _ = fetch.receiveData(dataPacketD)

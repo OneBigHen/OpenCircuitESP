@@ -661,8 +661,10 @@ Gadgetbridge's rules on Zepp OS (🟡 `FETCH:204-209,236-258`):
 
 **OpenCircuit rule**: send `03 09` during development (so Zepp/Gadgetbridge can pull the same
 window for side-by-side validation) and, in production, send `03 01` **only after the parsed
-round is durably committed** to the local store (mirroring `HistoryCommitGate`). Any failure
-path → `03 09`.
+round is durably committed** to the local store (mirroring `HistoryCommitGate`), and **only for
+a round whose transfer done carried a CRC that matched** (the 7-byte form). A 3-byte transfer
+done has no integrity check, so that round is kept (`03 09`); the Helio always sent the 7-byte
+form (§10.1). Any failure path → `03 09`.
 
 Unknowns (🔴, §10): whether `01` frees strap storage immediately; how long the strap retains
 unsynced data when only `09` is ever sent (it may eventually overwrite the oldest).
