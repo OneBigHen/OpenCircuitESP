@@ -298,8 +298,8 @@ public struct ZeppHistoryFetch {
         guard bytes.count >= 3 else { return failRound(type, .malformedTransferDone) }
         guard bytes[2] == 0x01 else { return failRound(type, .transferFailed(status: bytes[2])) }
         guard bytes.count == 3 || bytes.count == 7 else { return failRound(type, .malformedTransferDone) }
-        // SPEC-GAP: the spec does not say what to do when the data length differs from the
-        // announced one. ZeppKit treats it as an invalid round (keep, retry).
+        // A length other than the announced one rejects the round (§6.5, in bytes); like every
+        // invalid round it is kept on the strap and retried (retry count: see Configuration).
         guard buffer.count == expectedLength else {
             return failRound(type, .lengthMismatch(expected: expectedLength, received: buffer.count))
         }
