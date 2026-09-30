@@ -1118,12 +1118,13 @@ final class HealthKitWriter {
     func write(_ samples: [QuantitySample]) async -> ScalarWriteOutcome {
         var outcome = ScalarWriteOutcome()
         let byKind = Dictionary(grouping: samples, by: \.kind)
+        let device = activeWearableDevice()
         for (kind, group) in byKind {
             let hk: [HKQuantitySample] = group.compactMap { s in
                 guard let type = Self.quantityType(for: s.kind) else { return nil }
                 let q = HKQuantity(unit: Self.unit(for: s.kind), doubleValue: s.value)
                 return HKQuantitySample(type: type, quantity: q, start: s.start, end: s.end,
-                                        metadata: Self.metadata(for: s.kind))
+                                        device: device, metadata: Self.metadata(for: s.kind))
             }
             guard !hk.isEmpty else { continue }   // no writable HK type for this kind — nothing to save
             do {
@@ -1184,6 +1185,7 @@ final class HealthKitWriter {
             quantity: quantity,
             start: date,
             end: date.addingTimeInterval(3600),
+            device: activeWearableDevice(),
             metadata: [Self.basalEnergyEstimateMetadataKey: true,
                        Self.basalEnergyRHRAdjustedMetadataKey: adjusted,
                        HKMetadataKeyWasUserEntered: false]
@@ -1200,13 +1202,15 @@ final class HealthKitWriter {
     /// `HealthKitWriter` builds a live `HKHealthStore`, so anything that saves cannot be tested.
     /// Returns nil for non-positive kcal or an inverted/empty window; HealthKit REJECTS `end < start`
     /// and a throw there would strand the flush watermarks (see `ActiveEnergyWindow`).
-    static func activeEnergySample(kcal: Double, start: Date, end: Date) -> HKQuantitySample? {
+    static func activeEnergySample(kcal: Double, start: Date, end: Date,
+                                   device: HKDevice? = nil) -> HKQuantitySample? {
         guard kcal > 0, end > start else { return nil }
         return HKQuantitySample(
             type: HKQuantityType(.activeEnergyBurned),
             quantity: HKQuantity(unit: .kilocalorie(), doubleValue: kcal),
             start: start,
             end: end,
+            device: device,
             metadata: [Self.activeEnergyEstimateMetadataKey: true,
                        HKMetadataKeyWasUserEntered: false]
         )
@@ -1223,7 +1227,8 @@ final class HealthKitWriter {
     func writeActiveCalories(kcal: Double, window: DateInterval) async throws -> Bool {
         guard let sample = Self.activeEnergySample(kcal: kcal,
                                                    start: window.start,
-                                                   end: window.end) else { return false }
+                                                   end: window.end,
+                                                   device: activeWearableDevice()) else { return false }
         try await store.save(sample)
         return true
     }
@@ -1236,8 +1241,9 @@ final class HealthKitWriter {
     /// atomic, so the marks are only ever committed against a save that fully succeeded.
     @discardableResult
     func writeActiveCalories(_ writes: [ActiveEnergyLedger.Write]) async throws -> Bool {
+        let device = activeWearableDevice()
         let samples = writes.compactMap {
-            Self.activeEnergySample(kcal: $0.kcal, start: $0.start, end: $0.end)
+            Self.activeEnergySample(kcal: $0.kcal, start: $0.start, end: $0.end, device: device)
         }
         guard !samples.isEmpty else { return false }
         try await store.save(samples)
@@ -1249,7 +1255,8 @@ final class HealthKitWriter {
     func writeRestingHR(bpm: Double, day: Date) async throws {
         let q = HKQuantity(unit: Self.unit(for: .restingHeartRate), doubleValue: bpm)
         let sample = HKQuantitySample(type: HKQuantityType(.restingHeartRate),
-                                      quantity: q, start: day, end: day)
+                                      quantity: q, start: day, end: day,
+                                      device: activeWearableDevice(), metadata: nil)
         try await store.save(sample)
     }
 
@@ -1867,7 +1874,7 @@ final class HealthKitWriter {
 
     /// Write a night as contiguous sleepAnalysis category samples (mapping notes).
     func write(sleep segments: [SleepSegment]) async throws {
-        let samples = Self.sleepSamples(segments, site: "write(sleep:)")
+        let samples = Self.sleepSamples(segments, device: activeWearableDevice(), site: "write(sleep:)")
         guard !samples.isEmpty else { return }
         try await store.save(samples)
     }
@@ -1884,6 +1891,7 @@ final class HealthKitWriter {
     func writeReturningSleepUUIDs(_ segments: [SleepSegment],
                                   userEntered: Bool = false) async throws -> [String] {
         let samples = Self.sleepSamples(segments, allUserEntered: userEntered,
+                                        device: activeWearableDevice(),
                                         site: "writeReturningSleepUUIDs")
         guard !samples.isEmpty else { return [] }
         try await store.save(samples)
@@ -1893,8 +1901,12 @@ final class HealthKitWriter {
     /// Build the category samples for one night from the publication split — the ONE place the
     /// user-entered tag is applied, for the same reason the coverage filter lived in one place: a
     /// rule applied at some of the write sites is a false sense of safety.
-    private static func sleepSamples(_ segments: [SleepSegment], allUserEntered: Bool = false,
-                                     site: String) -> [HKCategorySample] {
+    ///
+    /// `device` names the wearable on the MEASURED spans only. A user-entered span names no device
+    /// (`HealthDeviceAttribution.Origin.userEntered`): the wearable did not record it. Internal (not
+    /// private) for the app-target test of that rule, like `menstrualFlowSamples`.
+    static func sleepSamples(_ segments: [SleepSegment], allUserEntered: Bool = false,
+                             device: HKDevice?, site: String) -> [HKCategorySample] {
         let type = HKCategoryType(.sleepAnalysis)
         let split = segments.healthPublication
         let publication = allUserEntered
@@ -1902,15 +1914,17 @@ final class HealthKitWriter {
                                      withheld: split.withheld, published: split.published)
             : split
         logUserEnteredSleep(segments, publication, site: site)
-        func sample(_ seg: SleepSegment, metadata: [String: Any]?) -> HKCategorySample {
+        func sample(_ seg: SleepSegment, device: HKDevice?, metadata: [String: Any]?) -> HKCategorySample {
             HKCategorySample(type: type, value: Self.sleepValue(seg.stage).rawValue,
-                             start: seg.start, end: seg.end, metadata: metadata)
+                             start: seg.start, end: seg.end, device: device, metadata: metadata)
         }
-        return publication.measured.map { sample($0, metadata: nil) }
+        return publication.measured.map { sample($0, device: device, metadata: nil) }
             // `HKMetadataKeyWasUserEntered` is Apple's own flag for "a person typed this", which is
             // exactly what an asserted span is. It does NOT exclude the sample from any total — see
             // `SleepHealthPublication` — it only lets a reader (and us, later) tell the two apart.
-            + publication.userEntered.map { sample($0, metadata: [HKMetadataKeyWasUserEntered: true]) }
+            + publication.userEntered.map {
+                sample($0, device: nil, metadata: [HKMetadataKeyWasUserEntered: true])
+            }
     }
 
     /// Breadcrumb how much of a night reached Health as the wearer's own entry, so the effect is
@@ -2411,11 +2425,13 @@ final class HealthKitWriter {
     func writeBPEstimate(sbp: Double, dbp: Double, at date: Date) async -> Bool {
         let metadata: [String: Any] = ["OpenCircuitBPSource": "RingPPGCalibration"]
         let mmHg = HKUnit.millimeterOfMercury()
+        let device = activeWearableDevice()
         let systolic = HKQuantitySample(
             type: Self.systolicType,
             quantity: HKQuantity(unit: mmHg, doubleValue: sbp),
             start: date,
             end: date,
+            device: device,
             metadata: metadata
         )
         let diastolic = HKQuantitySample(
@@ -2423,6 +2439,7 @@ final class HealthKitWriter {
             quantity: HKQuantity(unit: mmHg, doubleValue: dbp),
             start: date,
             end: date,
+            device: device,
             metadata: metadata
         )
         let correlation = HKCorrelation(
@@ -2430,6 +2447,7 @@ final class HealthKitWriter {
             start: date,
             end: date,
             objects: [systolic, diastolic],
+            device: device,
             metadata: metadata
         )
         do {
