@@ -1040,8 +1040,9 @@ struct SleepCardView: View {
         }
     }
 
-    /// Why a staged night has no skin temperature, for the device that owned the night (decision 28:
-    /// the owner at the midpoint of its in-bed window; the ring for every ring-only install). The
+    /// Why a staged night has no skin temperature, for the device that keeps the night (decision 28a:
+    /// the device you went to bed with, `owner(ofNightFrom:to:)`; the ring for every ring-only
+    /// install). The
     /// ring's reason is its live-only temperature above; the strap's temperature is in its history,
     /// but only its worn minutes inside its own sleep window, 30–42 °C, count (decisions 12, 25).
     static func noSkinTempNote(nightOwner: DeviceOwnershipLog.Family) -> String {

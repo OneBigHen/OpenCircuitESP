@@ -984,6 +984,11 @@ final class HelioBackgroundSyncTests: XCTestCase {
             $0.source == "bgphase" && $0.detail.hasPrefix("device=helio kind=appRefresh ending=synced")
         })
         XCTAssertNotNil(ObservabilityStore(defaults).bgLastRun)
+        // One sync end: ContentView's sync-end passes (`HelioSyncEndStep`, reminders included) key on
+        // the session's `syncing` going false, so they run once; the connection's own Health hook
+        // skipped this sync because the run owned and flushed it (one flush, above).
+        XCTAssertEqual(link.session?.syncsFinished, 1)
+        XCTAssertEqual(link.hookFlushes, 0)
         // The session is handed back: a later foreground sync on it flushes by itself again.
         XCTAssertEqual(link.session?.backgroundRunOwnsSyncs, false)
         XCTAssertEqual(link.activeBackgroundRuns, 0)
@@ -1170,7 +1175,9 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertTrue(session.syncing, "the sync is still running")
         XCTAssertFalse(session.backgroundRunOwnsSyncs)
 
-        // The sync finishes in the app, and the connection's own hook flushes it exactly once.
+        // The sync finishes in the app, and the connection's own hook flushes it exactly once. It is
+        // one sync end (`syncsFinished == 1`, no restart), so ContentView's sync-end passes
+        // (`HelioSyncEndStep`, the reminder evaluation included) also run once for it.
         link.transport?.drain()
         for _ in 0..<200 where link.hookFlushes == 0 { await Task.yield() }
         XCTAssertEqual(session.syncsFinished, 1)
