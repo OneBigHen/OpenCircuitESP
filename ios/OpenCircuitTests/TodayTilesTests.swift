@@ -89,6 +89,35 @@ final class TodayTilesTests: XCTestCase {
         XCTAssertEqual(t.values[t.values.count - 2], 12_000)
     }
 
+    /// Review #220 S2 (the reviewer's probe, asserting the fix). Yesterday has no step total (the
+    /// ring was charging), so the last complete day the trend judges is the day BEFORE yesterday.
+    /// Under today's partial 1,200 the tile printed "+4,000 vs usual" with an up arrow, and VoiceOver
+    /// said 1,200 steps was "above your usual range". Now: no delta, no arrow, no verdict; the usual
+    /// range is still shown and spoken.
+    func testStepsStateNoVerdictWhenYesterdayIsMissing() {
+        var pts = (-8 ... -3).map { TrendsEngine.DailyPoint(date: day($0), steps: 8_000) }
+        pts.append(TrendsEngine.DailyPoint(date: day(-2), steps: 12_000))
+        pts.append(TrendsEngine.DailyPoint(date: day(0), steps: 1_200))
+        let t = tile(.steps, pts)
+        XCTAssertEqual(t.valueText, 1_200.formatted(.number))
+        XCTAssertEqual(t.qualifier, "so far today")
+        XCTAssertEqual(t.trend?.latest.date, day(-2))
+        XCTAssertFalse(t.trendIsYesterday)
+        XCTAssertNil(t.statedTrend)
+        XCTAssertNil(t.deltaText, "no delta, and so no arrow, under today's number")
+        XCTAssertTrue(t.rangeText.hasPrefix("Usual "), "the band and its label still show")
+        XCTAssertFalse(t.accessibilityLabel.contains("above"), t.accessibilityLabel)
+        XCTAssertFalse(t.accessibilityLabel.contains("That's"), t.accessibilityLabel)
+        XCTAssertTrue(t.accessibilityLabel.contains("Your usual range is"), t.accessibilityLabel)
+        XCTAssertFalse(t.accessibilityLabel.contains("still learning"), t.accessibilityLabel)
+
+        // The same with no step total today either: the headline is the day before yesterday's, and
+        // the rule is the same — a steps verdict is stated about yesterday or not at all.
+        let stale = tile(.steps, Array(pts.dropLast()))
+        XCTAssertEqual(stale.qualifier, "latest day")
+        XCTAssertNil(stale.deltaText)
+    }
+
     func testRestingHRUsesTheDerivedSeries() {
         let rhr = (0..<6).map { RestingHR.DailyValue(day: day($0 - 5), bpm: $0 == 5 ? 58 : 52) }
         let t = tile(.restingHR, [], restingHR: rhr)
