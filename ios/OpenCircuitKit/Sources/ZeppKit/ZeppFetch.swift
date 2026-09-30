@@ -111,6 +111,7 @@ public struct ZeppHistoryFetch {
         /// Upper bound on rounds per type (§6.4: Gadgetbridge ~11, HelioCore 20).
         public var maxRoundsPerType = 11
         /// A failed round of a type is retried this many times from the same *since* (§9 #9).
+        /// SPEC-GAP: §9 says "retry" without a count; one retry, then the type is left for next time.
         public var maxRetriesPerType = 1
         public var timeZone: TimeZone = .current
 

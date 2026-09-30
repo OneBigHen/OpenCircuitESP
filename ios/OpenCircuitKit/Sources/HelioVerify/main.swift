@@ -554,6 +554,8 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         flushWrites()
     }
 
+    // SPEC-GAP: which write types `…0016` and `…0004` accept is a §10 capture item; write without
+    // response when the characteristic offers it, else with response.
     func flushWrites() {
         guard let peripheral else { return }
         while let next = writeQueue.first, let c = characteristics[next.characteristic] {

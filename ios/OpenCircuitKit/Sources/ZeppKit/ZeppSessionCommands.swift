@@ -2,6 +2,10 @@
 // HEALTH settings that decide what the strap records, heart-rate control, and the standard
 // Heart Rate Measurement / Battery Level characteristics. Builders return message payloads;
 // the caller sends them to the named endpoint through `ZeppLink`.
+//
+// SPEC-GAP (device info, endpoint 0x0043, §5.3): flag bit 0 is "a length-prefixed blob" with no
+// prefix width, and the Helio Strap's flags (0x7f) set bit 0, so no field after it can be located.
+// Not implemented; HelioVerify reads the Device Information Service (0x2A26 / 0x2A27) instead.
 
 import Foundation
 
@@ -167,8 +171,8 @@ public enum ZeppConfig {
         HealthArgument.allDaySpO2,
     ]
 
-    /// `03`, include-constraints `00`, group, arg count, args. The explicit argument list is used
-    /// rather than count `00` ("all args", 🔴).
+    /// `03`, include-constraints `00`, group, arg count, args.
+    /// SPEC-GAP: arg count `00` "asks for all args" is 🔴; ZeppKit always names the arguments.
     public static func readRequest(group: UInt8, arguments: [UInt8]) -> [UInt8] {
         [0x03, 0x00, group, UInt8(clamping: arguments.count)] + arguments
     }

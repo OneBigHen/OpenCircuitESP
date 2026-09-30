@@ -132,6 +132,8 @@ public struct ZeppAuthenticator {
 
     /// Feed one reassembled payload from the auth endpoint. Payloads that are not a reply to the
     /// command we are waiting for are ignored (the state is unchanged, nothing to send).
+    /// SPEC-GAP: §4.3 only says to ignore replies whose byte [0] is not `10`. A `10` reply echoing a
+    /// command we are not waiting for is ignored too, rather than failing the handshake.
     public mutating func handle(_ payload: [UInt8]) -> Step {
         guard payload.count >= 3, payload[0] == Self.responseMarker else { return idleStep }
         switch (state, payload[1]) {

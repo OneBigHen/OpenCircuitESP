@@ -466,6 +466,8 @@ public enum ZeppRecordParser {
 
     /// nil for a record with no staging (n = 0: skip, §6.6) or a stage count that would overrun
     /// the totals at 0x24A.
+    /// SPEC-GAP: the 100-stage cap is a 🔴 inference from the layout; a larger count is treated as a
+    /// malformed record and skipped rather than read into the totals.
     static func sleepSession(_ r: [UInt8]) -> ZeppSleepSession? {
         guard r.count == ZeppSleepSession.recordLength else { return nil }
         func u8(_ offset: Int) -> UInt8 { r[offset] }

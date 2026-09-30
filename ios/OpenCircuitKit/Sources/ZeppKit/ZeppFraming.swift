@@ -30,6 +30,8 @@ public enum ZeppChunkCodec {
         /// The write length cannot carry an 11-byte first header plus at least one data byte.
         case writeLengthTooSmall
         /// The chunk index is a u8; more than 256 chunks cannot be addressed.
+        /// SPEC-GAP: whether the index wraps is unspecified; ZeppKit refuses such a message (no
+        /// phone → device message comes near it).
         case tooManyChunks
     }
 
