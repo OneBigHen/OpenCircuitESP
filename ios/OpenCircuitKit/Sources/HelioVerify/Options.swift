@@ -41,11 +41,12 @@ Without a key: scans, connects, reads the standard battery level (if the strap e
 and firmware/hardware revision, and listens to standard heart-rate notifications (0x2A37; needs
 Zepp's "Heart Rate Push" switch on).
 
-With --key-file: also authenticates, prints the services list, reads the hardware and firmware
-versions from the device-info endpoint (0x0043; never the serial number), reads battery over the
-battery endpoint, reads the HEALTH settings (warns about switches that stop recording), streams
-live HR, and runs a NON-DESTRUCTIVE history fetch (ack 03 09: the strap keeps everything),
-printing summaries.
+With --key-file and no control flag: also authenticates, prints the services list, sends the
+read-only device-info request (01 on endpoint 0x0043) and prints the hardware and firmware
+versions from it (never the serial number), reads battery over the battery endpoint, reads the
+HEALTH settings (warns about switches that stop recording), streams live HR, and runs a
+NON-DESTRUCTIVE history fetch (ack 03 09: the strap keeps everything), printing summaries. No
+strap setting is changed and no data is dropped unless a write flag below is given.
 
 OPTIONS
   --key-file <path>   File holding the 16-byte auth key as 32 hex digits (optional 0x prefix).
@@ -72,7 +73,8 @@ OPTIONS
 
 DEVICE CONTROLS (Helio Strap only; all need --key-file)
   Any of these runs the controls INSTEAD of live HR and the history fetch. After auth the strap's
-  services list is printed with each endpoint's encryption, then which controls it supports. A
+  services list is printed with each endpoint's encryption, then which controls it supports; the
+  read-only device-info, battery and HEALTH settings reads above still run before the controls. A
   control the strap does not list is reported as unsupported and nothing is sent for it.
   --find [n]          Find my strap: start "find device", stop it after n seconds (default 10,
                       max 60). A stop is also sent on Ctrl-C, SIGTERM or SIGHUP (a closed
@@ -86,10 +88,12 @@ DEVICE CONTROLS (Helio Strap only; all need --key-file)
                       WRITES STRAP STATE; needs --allow-write. Adds one enabled alarm in the lowest
                       free slot (never overwrites or deletes another), printing the list before and
                       after. days: once (default), daily, weekdays, weekend, or mon..sun joined by
-                      ',' or '+', e.g. 07:30,mon,wed,fri. Sets the strap's clock first: alarms fire
-                      in strap-local time.
+                      ',' or '+', e.g. 07:30,mon,wed,fri. Sets the strap's clock first (alarms fire
+                      in strap-local time), even if no alarm ends up written.
   --delete-alarm <n>  WRITES STRAP STATE; needs --allow-write. Deletes the alarm in slot n (0-9),
-                      e.g. the one --set-alarm made. Prints the list before and after.
+                      e.g. the one --set-alarm made. Prints the list before and after. Sets the
+                      strap's clock first, like --set-alarm, even if the slot is empty and nothing
+                      is deleted.
   --allow-write       Confirms the writes that change strap settings: --set-time (the clock),
                       --set-alarm and --delete-alarm (which also set the clock). Each of those
                       needs it, and it is refused on its own. Without it no setting is changed.
