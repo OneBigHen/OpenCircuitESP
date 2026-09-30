@@ -56,6 +56,9 @@ struct HelioSyncResult: Equatable {
     /// A background run owned this sync (#215 phase 4): the run flushes Apple Health and logs it, so
     /// the connection doesn't do it a second time.
     var endedInBackgroundRun = false
+    /// The strap's identity when the sync ended, so its Health flush names the strap even if the
+    /// person switched devices meanwhile (review-224 S3: attribution follows the row).
+    var identity: WearableIdentity?
 }
 
 /// Where fetched rounds go. `HelioStoreSink` is the `LocalStore` implementation.
@@ -63,6 +66,8 @@ struct HelioSyncResult: Equatable {
 protocol HelioHistorySink: AnyObject {
     /// Each type's persisted watermark on `timeline`.
     func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date]
+    /// No fetch starts before this (decision 28: the strap's current ownership start).
+    func notBefore(timeline: SyncDeviceID, now: Date) -> Date?
     func beginSync(timeline: SyncDeviceID, now: Date)
     /// Store one round and advance its type's watermark. true only when both are durably saved.
     func persist(_ round: ZeppFetchRound, timeline: SyncDeviceID, now: Date) -> Bool
@@ -597,8 +602,10 @@ final class HelioSession: WearableSession {
             // The hardware-validated read (#223): byte-identical to what HelioVerify sent on a real
             // strap (§10.1 item 8), `03 00 08 07 01 04 05 11 12 13 31`. It includes `0x04`, which is
             // read but never shown as a warning (`recordingWarnings`).
-            send(ZeppEndpoint.config, ZeppConfig.readRequest(group: ZeppConfig.healthGroup,
-                                                             arguments: ZeppConfig.healthReadArguments))
+            let request = ZeppConfig.readRequest(group: ZeppConfig.healthGroup, arguments: ZeppConfig.healthReadArguments)
+            let spaced = request.map { String(format: "%02x", $0) }.joined(separator: " ")
+            helioLog.notice("helio: HEALTH read \(spaced, privacy: .public)")   // control bytes only
+            send(ZeppEndpoint.config, request)
             return true
         case .findCapabilities:
             // Sends a stop owed since a link loss first (decision 18), then the read-only `01`.
@@ -709,6 +716,9 @@ final class HelioSession: WearableSession {
         case .healthConfig?:
             if let reply = ZeppConfig.parseReadReply(payload), reply.group == ZeppConfig.healthGroup {
                 recordingWarnings = Self.recordingWarnings(ZeppHealthSettings(reply))
+                helioLog.notice("helio: HEALTH reply read, \(self.recordingWarnings.count, privacy: .public) recording warning(s)")
+            } else {
+                helioLog.notice("helio: HEALTH reply unreadable; no recording warnings")
             }
             advance(from: .healthConfig)
         case .alertCapabilities?:
@@ -729,7 +739,8 @@ final class HelioSession: WearableSession {
     private func startFetch() {
         guard let sink else { return finishFetch(interrupted: true) }
         let now = clock()
-        let plan = HelioFetchPlan.plan(cursors: sink.fetchCursors(timeline: timeline), now: now)
+        let plan = HelioFetchPlan.plan(cursors: sink.fetchCursors(timeline: timeline), now: now,
+                                       notBefore: sink.notBefore(timeline: timeline, now: now))
         sink.beginSync(timeline: timeline, now: now)
         syncCounts = (0, 0, 0)
         var machine = ZeppHistoryFetch(plan: plan, now: now, configuration: .init(ackPolicy: Self.ackPolicy))
@@ -778,6 +789,7 @@ final class HelioSession: WearableSession {
         result.typesEmpty = syncCounts.empty
         result.interrupted = interrupted
         result.endedInBackgroundRun = backgroundRunOwnsSyncs
+        result.identity = identity
         let now = clock()
         lastSyncResult = result
         syncsFinished += 1

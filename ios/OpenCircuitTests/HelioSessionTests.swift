@@ -193,8 +193,15 @@ final class HelioSessionTests: XCTestCase {
     private var containers: [ModelContainer] = []
     private var clock = testNow
     private let strapID = "5B1E4C2A-0000-4000-8000-0000000000A1"
+    private let ownership = OwnershipOverride()
+
+    override func setUp() {
+        super.setUp()
+        ownership.install(.strapOwnsAllTime)   // a strap-only install (decision 28's first entry)
+    }
 
     override func tearDown() {
+        ownership.restore()
         containers.removeAll()
         super.tearDown()
     }
@@ -643,6 +650,17 @@ final class HelioSessionTests: XCTestCase {
 @MainActor
 final class HelioKeyStoreTests: XCTestCase {
     private let suite = "test.HelioKeyStoreTests"
+    private let ownership = OwnershipOverride()
+
+    override func setUp() {
+        super.setUp()
+        ownership.install(.strapOwnsAllTime)
+    }
+
+    override func tearDown() {
+        ownership.restore()
+        super.tearDown()
+    }
 
     func testTheKeychainRoundTripsAndForgets() throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -833,14 +851,17 @@ final class HelioBackgroundSyncTests: XCTestCase {
     private var clock = testNow
     private var defaults: UserDefaults!
     private let suite = "test.HelioBackgroundSyncTests"
+    private let ownership = OwnershipOverride()
 
     override func setUp() {
         super.setUp()
         defaults = UserDefaults(suiteName: suite)
         defaults.removePersistentDomain(forName: suite)
+        ownership.install(.strapOwnsAllTime)   // a strap-only install (decision 28's first entry)
     }
 
     override func tearDown() {
+        ownership.restore()
         defaults.removePersistentDomain(forName: suite)
         containers.removeAll()
         super.tearDown()
@@ -870,6 +891,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
     private struct FlushCall {
         let timeline: SyncDeviceID
         let nights: Int
+        let identity: WearableIdentity?
         let finalized: Bool
         let rowsAtFlush: Int
     }
@@ -880,9 +902,10 @@ final class HelioBackgroundSyncTests: XCTestCase {
                          pause: (@MainActor () -> Void)? = nil) -> HelioBackgroundSyncService {
         HelioBackgroundSyncService(
             link: link, keyStore: link.keyStore, observability: ObservabilityStore(defaults),
-            flush: { [unowned self] timeline, nights, finalized in
+            flush: { [unowned self] timeline, nights, identity, finalized in
                 let count = (try? self.rows(store).count) ?? 0
-                flushes(FlushCall(timeline: timeline, nights: nights.count, finalized: finalized, rowsAtFlush: count))
+                flushes(FlushCall(timeline: timeline, nights: nights.count, identity: identity, finalized: finalized,
+                                  rowsAtFlush: count))
                 var result = HealthKitWriter.FlushResult()
                 result.samples = count
                 return result

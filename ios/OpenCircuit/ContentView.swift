@@ -1209,14 +1209,15 @@ struct ContentView: View {
     private func evaluateReminders(includeSedentary: Bool) {
         // The sedentary and wear reminders read the ring's own live signals (its descriptor stream,
         // its saved-ring list, its last-frame stamp), so with the Helio Strap chosen they would judge
-        // a device that isn't worn. Ring only (#215).
-        guard ringActive else { return }
+        // a device that isn't worn: ring only (#215). The bedtime reminder is the wearer's own
+        // schedule and runs for either device (review-224 S4).
         let d = UserDefaults.standard
         SleepScheduleDefaults.register(d)
         let bedMinutes  = d.integer(forKey: SleepScheduleDefaults.bedMinutes)
         let wakeMinutes = d.integer(forKey: SleepScheduleDefaults.wakeMinutes)
         let sleepEnabled = d.bool(forKey: SleepScheduleDefaults.enabled)
-        let s = session
+        let s = session                     // nil with the strap chosen
+        let ringReminders = ringActive
         // The wear reminder needs the store for its worn-evidence input (newest HR device
         // timestamp). Built here on the main actor, like `evaluateHealthAlerts` does.
         let store = LocalStore(modelContext)
@@ -1227,6 +1228,7 @@ struct ContentView: View {
                 sleepWakeMinutes: wakeMinutes,
                 sleepEnabled: sleepEnabled,
                 includeSedentary: includeSedentary,
+                ringReminders: ringReminders,
                 store: store)
         }
     }
@@ -2211,9 +2213,6 @@ struct ContentView: View {
 
     // MARK: Device Info (#79)
 
-    /// Taps through to the read-only device information screen (FW version / generation /
-    /// manufacturer / MAC address). Lives on the Profile tab; pushes onto that tab's own stack via a
-    /// value-less NavigationLink (not the Today `path`).
     /// Profile ▸ Device (#215): the one-device picker, in both modes.
     private var deviceChoiceCard: some View {
         NavigationLink { DeviceChoiceView() } label: {
@@ -2247,6 +2246,9 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    /// Taps through to the read-only device information screen (FW version / generation /
+    /// manufacturer / MAC address). Lives on the Profile tab; pushes onto that tab's own stack via a
+    /// value-less NavigationLink (not the Today `path`).
     private var deviceInfoCard: some View {
         NavigationLink {
             DeviceInfoView(session: session)
@@ -2472,10 +2474,6 @@ struct ContentView: View {
     }
 }
 
-/// The reorderable Today-tab sections. `rawValue` is the persistence key written to
-/// `dashboard.sectionOrder`, so keep these stable across releases; `allCases` order is the default
-/// (first-run) layout. (Sleep / workout / trends moved to their own tabs and are no longer sections;
-/// the order decoder ignores those now-unknown saved ids, so existing saved orders still load.)
 /// ContentView's Helio Strap hooks (#215): the end of a strap sync, a device switch, and the setup sheet.
 private struct HelioDashboardHooks: ViewModifier {
     let syncing: Bool?
@@ -2493,6 +2491,10 @@ private struct HelioDashboardHooks: ViewModifier {
     }
 }
 
+/// The reorderable Today-tab sections. `rawValue` is the persistence key written to
+/// `dashboard.sectionOrder`, so keep these stable across releases; `allCases` order is the default
+/// (first-run) layout. (Sleep / workout / trends moved to their own tabs and are no longer sections;
+/// the order decoder ignores those now-unknown saved ids, so existing saved orders still load.)
 private enum DashboardSection: String, CaseIterable, Identifiable, Hashable {
     case readiness, metrics, vitals, vitalsStatus, calories, goals, cycle, headache, sync
     var id: String { rawValue }

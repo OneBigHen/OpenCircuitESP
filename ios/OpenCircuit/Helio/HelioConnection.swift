@@ -42,8 +42,9 @@ final class HelioConnection: NSObject {
     /// The link's signal strength while the find screen polls it.
     private(set) var rssi: Int?
     /// The last connection ended with the strap refusing auth in a way that looks like another
-    /// phone or app holds it. No automatic reconnect follows (no retry loop, decision 7); the next
-    /// explicit connect clears it.
+    /// phone or app holds it. Nothing retries inside that connection or on a timer (no retry loop,
+    /// decision 7). The next connect clears it: "Try again", or the one `reconnectKnown()` every
+    /// foreground activation makes, so a busy strap costs at most one re-auth per foreground.
     private(set) var endedBusy = false
 
     @ObservationIgnored let keyStore: any HelioKeyStoring
@@ -280,21 +281,41 @@ final class HelioConnection: NSObject {
         observability.recordSyncOutcome(kind: kind, success: !result.interrupted && result.roundsFailed == 0,
                                         detail: "helio: \(result.roundsStored) round(s) stored, \(result.roundsFailed) failed, \(result.nights.count) night(s)")
         guard let store else { return }
-        guard let flush = await healthFlush(timeline: timeline, store: store, nights: result.nights) else { return }
+        guard let flush = await healthFlush(timeline: timeline, store: store, nights: result.nights,
+                                            identity: result.identity) else { return }
         if flush.wroteAnything { observability.recordHealthWrite() }
     }
 
-    /// The strap's Apple Health pass: its timeline's pending samples (HRV withheld, decision 14) and
-    /// `nights`. nil when Health isn't available on this device. `nightsFinalized` skips the nights'
-    /// 20-minute quiet margin (the Sleep Focus wake, as for the ring).
+    /// The strap's Apple Health pass, shared by the post-sync hook and the background run (#215
+    /// phase 4): its timeline's pending samples (HRV withheld, decision 14) and `nights`. nil when
+    /// Health isn't available on this device, or when `mayFlush` says no. `nightsFinalized` skips
+    /// the nights' 20-minute quiet margin (the Sleep Focus wake, as for the ring).
     static func healthFlush(timeline: SyncDeviceID, store: LocalStore, nights: [HelioSleepSelection.Night],
-                            nightsFinalized: Bool = false) async -> HealthKitWriter.FlushResult? {
+                            identity: WearableIdentity?, nightsFinalized: Bool = false) async -> HealthKitWriter.FlushResult? {
         guard HealthKitWriter.isAvailable else { return nil }
+        // Decision 28 (review-224 S3): record the identity the sync ended with, so this flush — and
+        // any later one for these rows — names THIS strap even if the wearer has switched back to
+        // the ring meanwhile. A strap that never passed the first-write guard writes nothing once
+        // it's no longer chosen; its rows stay pending for its next sync.
+        if let identity { ActiveWearable.shared.recordIdentity(identity) }
+        guard mayFlush(timeline: timeline, strapChosen: ActiveDeviceChoiceStore.shared.isHelio,
+                       wearable: ActiveWearable.shared) else {
+            helioLog.notice("helio: Health flush skipped: switched away before the strap had an identity")
+            return nil
+        }
         let flush = await HealthKitWriter().flushToHealth(
             store: store, device: timeline, mirroredKinds: HelioHealthPolicy.healthMirroredKinds(),
             strapNights: nights.map(\.segments), strapNightsFinalized: nightsFinalized)
         helioLog.notice("helio: Health flush samples=\(flush.samples, privacy: .public) sleep=\(flush.sleepSegments, privacy: .public) steps=\(flush.steps, privacy: .public) rhr=\(flush.restingDays, privacy: .public)")
         return flush
+    }
+
+    /// Whether a strap sync's flush may write (decision 28, review-224 S3). Attribution follows the
+    /// row: the strap's rows name the strap. While the strap is chosen that follows the first-write
+    /// guard (#222: no identity yet → no device attached); once it isn't, a write with no identity
+    /// would be anonymous rows from a device the wearer has left, so nothing is written.
+    static func mayFlush(timeline: SyncDeviceID, strapChosen: Bool, wearable: ActiveWearable) -> Bool {
+        strapChosen || wearable.identityForHealthWrite(timeline: timeline) != nil
     }
 
     private func known(_ characteristic: CBCharacteristic) -> ZeppCharacteristic? {

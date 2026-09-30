@@ -129,9 +129,11 @@ struct HelioBackgroundSyncService {
     let link: any HelioBackgroundLink
     let keyStore: any HelioKeyStoring
     let observability: ObservabilityStore
-    /// The strap's Apple Health pass (`HelioConnection.healthFlush` in the app).
-    let flush: @MainActor (_ timeline: SyncDeviceID, _ nights: [HelioSleepSelection.Night], _ finalized: Bool) async
-        -> HealthKitWriter.FlushResult?
+    /// The strap's Apple Health pass (`HelioConnection.healthFlush` in the app, the post-sync hook's
+    /// own): the rows of `timeline`, attributed from the row and the strap's `identity`, never from
+    /// the current device choice (decision 28).
+    let flush: @MainActor (_ timeline: SyncDeviceID, _ nights: [HelioSleepSelection.Night],
+                           _ identity: WearableIdentity?, _ finalized: Bool) async -> HealthKitWriter.FlushResult?
     let now: @MainActor () -> Date
     /// One wait between checks (250 ms in the app; the tests move the simulated strap along instead).
     let pause: @MainActor () async -> Void
@@ -231,7 +233,8 @@ struct HelioBackgroundSyncService {
         // The Health flush: never after an expiry (the task is over), never for a quiet ending.
         if run.ending != .expired, let timeline = link.strapTimeline {
             let flushStart = now()
-            run.flush = await flush(timeline, run.result?.nights ?? [], nightsFinalized)
+            run.flush = await flush(timeline, run.result?.nights ?? [], run.result?.identity ?? watched?.identity,
+                                    nightsFinalized)
             run.flushMS = Self.ms(from: flushStart, to: now())
             if run.flush?.wroteAnything == true { observability.recordHealthWrite() }
         }
@@ -268,9 +271,9 @@ extension HelioBackgroundSyncService {
         connection.setLocalStore(store)
         return HelioBackgroundSyncService(
             link: connection, keyStore: connection.keyStore, observability: ObservabilityStore(),
-            flush: { timeline, nights, finalized in
+            flush: { timeline, nights, identity, finalized in
                 await HelioConnection.healthFlush(timeline: timeline, store: store, nights: nights,
-                                                  nightsFinalized: finalized)
+                                                  identity: identity, nightsFinalized: finalized)
             },
             now: { Date() },
             pause: { try? await Task.sleep(for: .milliseconds(250)) },

@@ -338,7 +338,13 @@ final class ShippedStoreMigrationTests: XCTestCase {
         XCTAssertEqual(stored.count, 18)
 
         // And Apple Health would get them too: the strap's backfill is pending under its own `hk:`
-        // watermark, while the ring's pending set is exactly what it was.
+        // watermark, while the ring's pending set is exactly what it was. Decision 28 (#215): only
+        // time a device owned reaches Health, so the log records the switches under which the strap
+        // could have synced these days (ring → strap three days before `night` → ring an hour before).
+        let ownership = OwnershipOverride()
+        defer { ownership.restore() }
+        ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: night.addingTimeInterval(-3 * 86_400)),
+                                                       .init(family: .ringConn, since: night.addingTimeInterval(-3_600))]))
         XCTAssertEqual(try store.pendingHealthSamples(device: strap).map(\.start), backfill.map(\.start))
         XCTAssertEqual(try store.pendingHealthSamples().filter { $0.kind == .heartRate }.map(\.start),
                        [night.addingTimeInterval(600)])

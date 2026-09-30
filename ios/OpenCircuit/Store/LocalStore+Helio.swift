@@ -69,8 +69,11 @@ extension LocalStore {
     func ingestHelioStepMinutes(_ minutes: [QuantitySample], device: SyncDeviceID, now: Date = Date()) throws -> Int {
         let last = helioCursor(Self.helioStepCursorName, device: device) ?? .distantPast
         let ceiling = now.addingTimeInterval(86_400)
+        let log = Self.ownershipLog()
+        // Decision 28: only minutes `device` owned count toward the day and Apple Health.
         let fresh = minutes
             .filter { $0.kind == .steps && $0.value > 0 && $0.start > last && $0.start <= ceiling }
+            .filter { log.owns(device, at: $0.start) }
             .sorted { $0.start < $1.start }
         guard let newest = fresh.last?.start else { return 0 }
         var dailies: [Date: StoredDaily] = [:]
@@ -128,7 +131,7 @@ extension LocalStore {
                                     night: SleepNightKey.night(inBedStart: window.start, inBedEnd: window.end),
                                     inBedStart: window.start, inBedEnd: window.end,
                                     sleepOnset: sleep?.onset ?? .distantPast, sleepWake: sleep?.wake ?? .distantPast,
-                                    extras: extras)
+                                    extras: extras, device: device)
     }
 
     /// `device`'s stored skin temperatures in `window` (already gated when stored).
@@ -166,6 +169,19 @@ final class HelioStoreSink: HelioHistorySink {
         store.helioFetchCursors(device: timeline)
     }
 
+    /// Decision 28: the strap's current ownership start. If it doesn't own the present (switched
+    /// away mid-sync), nothing older than now is fetched.
+    func notBefore(timeline: SyncDeviceID, now: Date) -> Date? {
+        LocalStore.ownershipLog().currentStart(of: DeviceOwnershipLog.Family(timeline: timeline)) ?? now
+    }
+
+    /// Only what the strap recorded for time it owned is stored (decision 28). Nothing is lost:
+    /// the acks stay `03 09`, so the strap keeps the rest.
+    private func owned(_ samples: [QuantitySample], _ timeline: SyncDeviceID) -> [QuantitySample] {
+        let log = LocalStore.ownershipLog()
+        return samples.filter { log.owns(timeline, at: $0.start) }
+    }
+
     func beginSync(timeline: SyncDeviceID, now: Date) {
         activity = []
         sessions = []
@@ -179,7 +195,7 @@ final class HelioStoreSink: HelioHistorySink {
             switch round.parsed.records {
             case .activity(let minutes):
                 activity += minutes
-                _ = try store.ingest(ZeppMetricMapping.storedSamples(from: round.parsed), device: timeline)
+                _ = try store.ingest(owned(ZeppMetricMapping.storedSamples(from: round.parsed), timeline), device: timeline)
                 try store.ingestHelioStepMinutes(ZeppMetricMapping.stepMinutes(from: round.parsed), device: timeline, now: now)
             case .sleepSession(let records):
                 sessions += records
@@ -187,7 +203,7 @@ final class HelioStoreSink: HelioHistorySink {
             case .temperature(let minutes):
                 let windows = HelioSleepSelection.nights(from: sessions, now: now).map(\.window)
                 let gated = HelioSkinTemperatureGate.samples(temperatures: minutes, activity: activity, sleepWindows: windows)
-                _ = try store.ingest(gated, device: timeline)
+                _ = try store.ingest(owned(gated, timeline), device: timeline)
                 // Hold the watermark where a minute may still pass the gate later (no night yet, or
                 // no wear record this sync), so it is fetched again instead of skipped for good.
                 let previous = store.helioFetchCursors(device: timeline)[.temperature]
@@ -205,7 +221,7 @@ final class HelioStoreSink: HelioHistorySink {
             case .pai(let records):
                 if let last = records.last { latestPAI = HelioReading(value: Double(last.totalPAI), at: last.time) }
             default:
-                _ = try store.ingest(ZeppMetricMapping.storedSamples(from: round.parsed), device: timeline)
+                _ = try store.ingest(owned(ZeppMetricMapping.storedSamples(from: round.parsed), timeline), device: timeline)
             }
             let previous = store.helioFetchCursors(device: timeline)[round.type]
             if let next = HelioFetchPlan.advancedCursor(previous: previous, round: round, now: now), next != previous {
@@ -223,8 +239,13 @@ final class HelioStoreSink: HelioHistorySink {
         let nights = HelioSleepSelection.nights(from: sessions, now: now)
         guard let first = nights.first?.window.start, let last = nights.last?.window.end else { return }
         let edited = store.manuallyEditedSleepWindows(from: first, to: last)
+        // Decision 28: a night belongs to the owner at its in-bed midpoint (saveSleepSummary refuses
+        // the others too; filtering here also keeps them out of the Health hand-off).
+        let log = LocalStore.ownershipLog()
+        let family = DeviceOwnershipLog.Family(timeline: timeline)
         for night in HelioSleepSelection.nightsToWrite(nights, manuallyEdited: edited)
-        where !storedNights.contains(where: { $0.window == night.window }) {
+        where log.owner(ofNightFrom: night.window.start, to: night.window.end) == family
+            && !storedNights.contains(where: { $0.window == night.window }) {
             let outcome = try store.saveHelioNight(night, device: timeline)
             if outcome == .inserted || outcome == .updated { storedNights.append(night) }
         }

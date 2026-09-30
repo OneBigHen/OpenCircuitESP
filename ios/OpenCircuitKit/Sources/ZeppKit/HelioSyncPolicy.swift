@@ -309,10 +309,14 @@ public enum HelioFetchPlan {
     ///   at the earlier of their own and temperature's minus `sleepSessionOverlap`: the temperature
     ///   gate needs each minute's wear state and night. Re-delivered minutes are deduplicated by the
     ///   store's per-kind cursors.
-    public static func plan(cursors: [ZeppFetchType: Date], now: Date) -> [(type: ZeppFetchType, since: Date)] {
+    /// - `notBefore` (decision 28: the strap's CURRENT ownership start) bounds every type's start,
+    ///   including those two re-fetch windows: the strap never fetches time the ring owned.
+    public static func plan(cursors: [ZeppFetchType: Date], now: Date,
+                            notBefore: Date? = nil) -> [(type: ZeppFetchType, since: Date)] {
         let first = floorToMinute(now.addingTimeInterval(-firstSyncLookback))
         let oldest = floorToMinute(now.addingTimeInterval(-maxLookback))
         let latest = floorToMinute(now)
+        let bound = notBefore.map { min(floorToMinute($0), latest) }
         func resolved(_ type: ZeppFetchType) -> Date {
             guard let cursor = cursors[type], cursor <= now.addingTimeInterval(futureTolerance) else { return first }
             return min(max(floorToMinute(cursor), oldest), latest)
@@ -323,7 +327,10 @@ public enum HelioFetchPlan {
         since[.activity] = min(resolved(.activity), temperature)
         since[.sleepSession] = max(oldest, min(resolved(.sleepSession),
                                                temperature.addingTimeInterval(-sleepSessionOverlap)))
-        return types.map { ($0, since[$0] ?? first) }
+        return types.map { type in
+            let start = since[type] ?? first
+            return (type, bound.map { max(start, $0) } ?? start)
+        }
     }
 
     /// The watermark to persist once `round` is durably stored: the round's next *since* (last
