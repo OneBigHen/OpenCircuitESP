@@ -136,7 +136,9 @@ kept in the iOS Keychain on this phone only, and never shown again, logged or ex
 
 If the strap refuses the key, OpenCircuit says "Key rejected" and doesn't retry it until you
 paste a new one. If another phone or app seems to hold the strap, it says "Strap busy" and
-waits for you to try again.
+waits for you to try again (opening the app counts), or until the app is next launched, which iOS
+may do in the background. That one retry per launch is how the strap comes back once Zepp lets go
+of it.
 
 **What stays in the app**
 

@@ -21,9 +21,11 @@ import ZeppKit
 // flushes only when the budget (not iOS) ended it. If the app is in front when the budget runs out,
 // nothing is torn down: the sync is handed to the app, whose post-sync hook flushes it (review-225 S1).
 //
-// Key states (decision 7): no key, a rejected key, or a strap that was busy end the run before any
-// radio work; a session that turns out keyless, rejected, busy or unsupported ends it quietly. No
-// retry, no Health write, and the log says why.
+// Key states (decision 7): no key, a rejected key (persisted), or a strap that ended busy earlier in
+// this app launch end the run before any radio work; a session that turns out keyless, rejected,
+// busy or unsupported ends it quietly. No retry, no Health write, and the log says why. "Busy" lasts
+// for the launch only: the next launch (a background relaunch too) tries once more, which is how the
+// strap comes back once Zepp lets go of it (review-225 F1).
 
 /// What the background run needs from the strap's connection: `HelioConnection` in the app, a
 /// simulated strap in the tests.
@@ -31,8 +33,9 @@ import ZeppKit
 protocol HelioBackgroundLink: AnyObject {
     /// The strap's session on the current link, if any.
     var session: HelioSession? { get }
-    /// The last connection ended with the strap busy (decision 7): nothing reconnects by itself until
-    /// the person asks, so neither does a background run.
+    /// The last connection in this app launch ended with the strap busy (decision 7): nothing
+    /// reconnects by itself until the person asks or the app is next launched, so neither does a
+    /// background run.
     var endedBusy: Bool { get }
     /// Where the strap's rows live (`zeppos:<id>`): the connected strap's, else the saved one's; nil
     /// when no strap was ever connected.

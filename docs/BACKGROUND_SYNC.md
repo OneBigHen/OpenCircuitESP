@@ -179,9 +179,11 @@ Safety invariants specific to the strap:
   expires the task: the open round is acked `03 09`, committed rows stay, the link is dropped
   (a running find gets its `06` first) and the rest stays on the strap. An expiry skips the Health
   flush; the task is completed only after that teardown (or 2 s after the expiry at the latest).
-- **Key states (decision 7).** No key, a rejected key or a strap that ended "busy" end the run
-  before any radio work; a session that turns out keyless, rejected, busy or unsupported ends it.
-  No retry, no store or Health write, and the run log says why.
+- **Key states (decision 7).** No key, a rejected key (persisted), or a strap that ended "busy"
+  earlier in this app launch end the run before any radio work; a session that turns out keyless,
+  rejected, busy or unsupported ends it. No retry, no store or Health write, and the run log says
+  why. "Busy" is remembered only for the launch: a new launch, including a background relaunch,
+  tries the strap once more (so does opening the app), which is how it comes back once Zepp lets go.
 - **The link after a finished run** stays up (idle, authenticated, standing reconnect armed):
   re-arming a fresh connect, as the ring does, would reconnect a strap in range at once and fetch
   everything a second time. A strap out of range keeps its pending connect armed for restoration.
