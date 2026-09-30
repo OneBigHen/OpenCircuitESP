@@ -60,8 +60,9 @@ final class HelioConnection: NSObject {
     @ObservationIgnored private var scanTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var rssiTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundObserver: NSObjectProtocol?
-    /// A background run owns the syncs of the sessions created meanwhile (`HelioBackgroundLink`).
-    @ObservationIgnored var backgroundRunActive = false
+    /// Background runs in progress (`HelioBackgroundLink`); a run owns the syncs of the sessions
+    /// created meanwhile.
+    @ObservationIgnored var activeBackgroundRuns = 0
 
     private enum PendingAction { case scan, reconnect, resumeRestored }
 
@@ -266,7 +267,7 @@ final class HelioConnection: NSObject {
                 guard !result.endedInBackgroundRun else { return }
                 await HelioConnection.flushToHealth(result: result, timeline: timeline, store: store)
             })
-        session.backgroundRunOwnsSyncs = backgroundRunActive
+        session.backgroundRunOwnsSyncs = activeBackgroundRuns > 0
         self.session = session
         session.start()
     }

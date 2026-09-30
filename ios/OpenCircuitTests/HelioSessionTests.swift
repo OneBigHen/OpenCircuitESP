@@ -800,7 +800,7 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
     /// The strap never answers (another phone holds it).
     var silent = false
     var endedBusy = false
-    var backgroundRunActive = false
+    var activeBackgroundRuns = 0
     private(set) var session: HelioSession?
     private(set) var transport: FakeStrapTransport?
     private(set) var connects = 0
@@ -831,7 +831,7 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
                                        if !result.endedInBackgroundRun { self?.hookFlushes += 1 }
                                    },
                                    clock: clock, autoTick: false)
-        session.backgroundRunOwnsSyncs = backgroundRunActive
+        session.backgroundRunOwnsSyncs = activeBackgroundRuns > 0
         transport.session = session
         self.transport = transport
         self.session = session
@@ -899,6 +899,8 @@ final class HelioBackgroundSyncTests: XCTestCase {
         let identity: WearableIdentity?
         let finalized: Bool
         let rowsAtFlush: Int
+        /// Syncs finished on the link's session when the flush ran: which sync it flushed.
+        let syncAtFlush: Int
     }
 
     /// The service over `link`. `pause` moves the simulated strap along (default: deliver everything
@@ -911,7 +913,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
             flush: { [unowned self] timeline, nights, identity, finalized in
                 let count = (try? self.rows(store).count) ?? 0
                 flushes(FlushCall(timeline: timeline, nights: nights.count, identity: identity, finalized: finalized,
-                                  rowsAtFlush: count))
+                                  rowsAtFlush: count, syncAtFlush: link.session?.syncsFinished ?? 0))
                 var result = HealthKitWriter.FlushResult()
                 result.samples = count
                 return result
@@ -974,7 +976,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertNotNil(ObservabilityStore(defaults).bgLastRun)
         // The session is handed back: a later foreground sync on it flushes by itself again.
         XCTAssertEqual(link.session?.backgroundRunOwnsSyncs, false)
-        XCTAssertFalse(link.backgroundRunActive)
+        XCTAssertEqual(link.activeBackgroundRuns, 0)
     }
 
     func testTheSleepFocusRunFinalizesTheStrapsNights() async throws {
@@ -1168,6 +1170,56 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertTrue(flushes.isEmpty)
         XCTAssertEqual(Set(device.fetchAcks), [0x09])
         XCTAssertEqual(device.fetchAcks.count, device.fetchStarts.count)
+    }
+
+    // MARK: review-225 S2: overlapping runs take turns
+
+    /// The reviewer's probe (`testReview225TwoConcurrentRunsOnOneLinkBothFlushTheSameSync`), turned
+    /// into a regression test: the Sleep Focus wake and a BGTask run the strap's drain at once. They
+    /// used to adopt the same sync and both flush it; now the later one waits, then runs its own
+    /// cheap sync, so every sync is flushed exactly once.
+    func testTwoOverlappingRunsOnOneLinkFlushEachSyncOnce() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        // One radio event per pause, so the second run is up while the first run's sync is in flight.
+        let focus = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        let refresh = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        // Long budgets: the simulated strap moves one event per pause, and neither run should run out.
+        async let a = focus.run(kind: .sleepFocus, timeout: 3600, nightsFinalized: true)
+        async let b = refresh.run(kind: .processing, timeout: 3600)
+        let (first, second) = await (a, b)
+        XCTAssertEqual(first.ending, .synced)
+        XCTAssertEqual(second.ending, .synced)
+        XCTAssertEqual(link.connects, 1, "one link")
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+        let syncs = try XCTUnwrap(link.session?.syncsFinished)
+        XCTAssertEqual(syncs, 2, "the second run waited, then ran its own sync")
+        XCTAssertEqual(flushes.map(\.syncAtFlush), [1, 2], "one sync, one flush of that sync")
+        XCTAssertEqual(link.activeBackgroundRuns, 0, "neither run's exit cleared the other's mark early")
+        XCTAssertEqual(ObservabilityStore(defaults).records().filter { $0.detail?.hasPrefix("helio strap: synced") == true }.count, 2)
+    }
+
+    /// Review-225 S2's side effect: when the Sleep Focus run overlaps a BGTask run, its
+    /// `nightsFinalized: true` still reaches Health with a night, whichever run goes first.
+    func testTheSleepFocusRunStillFinalizesItsNightWhenItOverlapsABGTaskRun() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let refresh = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        let focus = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        async let a = refresh.run(kind: .appRefresh, timeout: 3600)
+        async let b = focus.run(kind: .sleepFocus, timeout: 3600, nightsFinalized: true)
+        let (bgTask, sleepFocus) = await (a, b)
+        XCTAssertEqual(bgTask.ending, .synced)
+        XCTAssertEqual(sleepFocus.ending, .synced)
+        XCTAssertEqual(flushes.count, 2)
+        XCTAssertEqual(Set(flushes.map(\.finalized)), [true, false], "each run flushes with its own setting")
+        let finalized = try XCTUnwrap(flushes.first { $0.finalized })
+        XCTAssertEqual(finalized.nights, 1, "the re-delivered night is in the Focus run's finalized flush")
+        XCTAssertNotEqual(flushes[0].syncAtFlush, flushes[1].syncAtFlush, "the two flushes never share a sync")
     }
 
     func testAStrapOutOfRangeKeepsThePendingConnectArmed() async throws {

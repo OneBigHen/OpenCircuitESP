@@ -37,9 +37,11 @@ protocol HelioBackgroundLink: AnyObject {
     /// Where the strap's rows live (`zeppos:<id>`): the connected strap's, else the saved one's; nil
     /// when no strap was ever connected.
     var strapTimeline: SyncDeviceID? { get }
-    /// While true, every session this link creates leaves its finished syncs to the run
-    /// (`HelioSession.backgroundRunOwnsSyncs`): the run flushes Apple Health and logs them.
-    var backgroundRunActive: Bool { get set }
+    /// Background runs in progress on this link (0 or 1: runs take turns, review-225 S2). While it is
+    /// above 0, every session the link creates leaves its finished syncs to the run
+    /// (`HelioSession.backgroundRunOwnsSyncs`): the run flushes Apple Health and logs them. A count,
+    /// not a flag, so one run's exit can never clear another's.
+    var activeBackgroundRuns: Int { get set }
     /// Arm a connect to the saved strap by identifier (no scan). false when there is none.
     func connectForBackground() -> Bool
     /// End the link cleanly and don't reconnect by itself: stop a running find, ack an open round
@@ -67,6 +69,9 @@ struct HelioBackgroundRun: Equatable {
         /// Out of budget (or expired) while the app was in front: the sync was left running for the
         /// app, whose own post-sync hook flushes and logs it (review-225 S1). Nothing torn down.
         case handedToApp
+        /// Another background run held the strap for this run's whole window (review-225 S2). This
+        /// run touched nothing; the other one syncs and flushes.
+        case anotherRunActive
     }
 
     var ending: Ending
@@ -81,7 +86,7 @@ struct HelioBackgroundRun: Equatable {
     /// A quiet ending: nothing was fetched and nothing may be written (decision 7).
     var endedQuietly: Bool {
         switch ending {
-        case .noSavedStrap, .keyNeeded, .keyRejected, .strapBusy, .unsupported: return true
+        case .noSavedStrap, .keyNeeded, .keyRejected, .strapBusy, .unsupported, .anotherRunActive: return true
         case .synced, .outOfTime, .expired, .handedToApp: return false
         }
     }
@@ -104,6 +109,7 @@ struct HelioBackgroundRun: Equatable {
         case .outOfTime: head = "out of time; open round kept on the strap (03 09), disconnected"
         case .expired: head = "iOS ended the task; open round kept on the strap (03 09), disconnected"
         case .handedToApp: head = "handed to the app"
+        case .anotherRunActive: head = "another background run held the strap for this run's whole window; nothing done"
         }
         var parts = ["helio strap: \(head)"]
         if let result {
@@ -155,6 +161,19 @@ struct HelioBackgroundSyncService {
     func run(kind: TaskRecord.Kind, timeout: TimeInterval, nightsFinalized: Bool = false) async -> HelioBackgroundRun {
         let start = now()
         var run = HelioBackgroundRun(ending: .outOfTime)
+        let syncDeadline = start.addingTimeInterval(max(0, timeout - Self.flushReserve))
+
+        // Review-225 S2: one run at a time on a link. The Sleep Focus wake and the scheduler's morning
+        // refresh can overlap; two runs would adopt the same sync and both flush it (and a
+        // non-finalized flush could win over the Focus run's finalized one). A later run waits, inside
+        // its own budget, then runs normally: a cheap second sync with its own `nightsFinalized`.
+        while link.activeBackgroundRuns > 0 {
+            if Task.isCancelled || now() >= syncDeadline {
+                run.ending = .anotherRunActive
+                return record(run, kind: kind)
+            }
+            await pause()
+        }
 
         // Quiet endings before any radio work: nothing is connected and no central is created.
         if link.strapTimeline == nil {
@@ -168,9 +187,8 @@ struct HelioBackgroundSyncService {
         }
         if run.endedQuietly { return record(run, kind: kind) }
 
-        link.backgroundRunActive = true
-        defer { link.backgroundRunActive = false }
-        let syncDeadline = start.addingTimeInterval(max(0, timeout - Self.flushReserve))
+        link.activeBackgroundRuns += 1
+        defer { link.activeBackgroundRuns -= 1 }
 
         var watched: HelioSession?
         var baseline = 0
@@ -242,8 +260,9 @@ struct HelioBackgroundSyncService {
             // The teardown's writes get their moment on the radio before anything else runs.
             if abandon() { await grace() }
             if let watched, watched.syncsFinished > baseline, let result = watched.lastSyncResult { run.result = result }
-        case .handedToApp:
-            break
+        case .handedToApp, .anotherRunActive:
+            // Both return above; neither may touch a link another party is using.
+            return record(run, kind: kind)
         case .keyNeeded, .keyRejected, .strapBusy, .unsupported, .noSavedStrap:
             // Decision 7: end here, drop the link and leave it down; the next explicit connect retries.
             link.disconnectForBackground()
