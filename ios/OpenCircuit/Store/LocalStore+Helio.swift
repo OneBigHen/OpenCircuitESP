@@ -243,8 +243,8 @@ final class HelioStoreSink: HelioHistorySink {
         let nights = HelioSleepSelection.nights(from: sessions, now: now)
         guard let first = nights.first?.window.start, let last = nights.last?.window.end else { return }
         let edited = store.manuallyEditedSleepWindows(from: first, to: last)
-        // Decision 28: a night belongs to the owner at its in-bed midpoint (saveSleepSummary refuses
-        // the others too; filtering here also keeps them out of the Health hand-off).
+        // Decision 28a: a night belongs to the device chosen when it began (saveSleepSummary also refuses
+        // one the ring already keeps; only nights stored here reach the Health hand-off).
         let log = LocalStore.ownershipLog()
         let family = DeviceOwnershipLog.Family(timeline: timeline)
         for night in HelioSleepSelection.nightsToWrite(nights, manuallyEdited: edited)

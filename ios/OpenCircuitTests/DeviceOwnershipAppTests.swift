@@ -266,7 +266,7 @@ final class DeviceOwnershipAppTests: XCTestCase {
 
         // Sleep save outcome.
         XCTAssertEqual(try saveRingNight(store, from: at(-1), to: at(7)), .inserted)
-        XCTAssertTrue(HealthKitWriter.ringOwnsNight(ringNight(from: at(-1), to: at(7))))
+        XCTAssertTrue(HealthKitWriter.ringOwnsNight(ringNight(from: at(-1), to: at(7)), store: store))
 
         // Step totals.
         try store.addDailySteps(120, day: at(9), windowStart: at(8.75))
@@ -311,7 +311,7 @@ final class DeviceOwnershipAppTests: XCTestCase {
             .map { "\($0.asleepMin) \($0.inBedStart) \($0.inBedEnd) \($0.updatedAt)" }
         XCTAssertEqual(after, before, "the ring's stored night is untouched")
         XCTAssertEqual(session.lastSyncResult?.nights.count, 0, "no strap night is handed to the Health flush")
-        XCTAssertTrue(HealthKitWriter.ringOwnsNight(ringNight(from: at(-0.5), to: at(6.5))),
+        XCTAssertTrue(HealthKitWriter.ringOwnsNight(ringNight(from: at(-0.5), to: at(6.5)), store: store),
                       "the ring's own mirror of its night still runs")
         XCTAssertEqual(try store.pendingHealthSamples(device: strapTimeline, kinds: HelioHealthPolicy.healthMirroredKinds()), [],
                        "nothing the strap recorded before the switch is pending for Health")
@@ -361,7 +361,7 @@ final class DeviceOwnershipAppTests: XCTestCase {
 
         XCTAssertEqual(try saveRingNight(store, from: at(-1), to: at(7)), .ownedByOtherDevice)
         XCTAssertEqual(try store.context.fetch(FetchDescriptor<StoredSleepSummary>()).count, 0, "no night saved")
-        XCTAssertFalse(HealthKitWriter.ringOwnsNight(ringNight(from: at(-1), to: at(7))), "and none mirrored")
+        XCTAssertFalse(HealthKitWriter.ringOwnsNight(ringNight(from: at(-1), to: at(7)), store: store), "and none mirrored")
     }
 
     /// S3: a strap sync whose flush runs after the wearer switched back to the ring names the STRAP,
@@ -582,5 +582,89 @@ final class DeviceOwnershipAppTests: XCTestCase {
         let rows = try store.pendingStepSamples().sorted { $0.start < $1.start }
         XCTAssertEqual(rows.map(\.start), [toStrap, at(-2 + 1.0 / 60)], "the spanning minute starts at the switch")
         XCTAssertEqual(rows.map(\.delta), [10, 10])
+    }
+
+    // MARK: Review-224b S-C / decision 28a: the device you went to bed with keeps the night
+
+    private func saveNight(_ store: LocalStore, _ device: SyncDeviceID, _ from: Double, _ to: Double) throws -> SleepPersistOutcome {
+        let segments = ringNight(from: at(from), to: at(to))
+        var extras = LocalStore.SleepNightExtras()
+        extras.hypnogram = segments
+        return try store.saveSleepSummary(SleepStaging.summary(segments),
+                                          night: SleepNightKey.night(inBedStart: at(from), inBedEnd: at(to)),
+                                          inBedStart: at(from), inBedEnd: at(to), sleepOnset: at(from), sleepWake: at(to),
+                                          extras: extras, device: device)
+    }
+
+    /// Saves `ring` and `strap` nights in both orders under `log`; each order must end with exactly one
+    /// stored night, the expected one, and the device that lost must not be allowed to mirror.
+    private func assertOneKeptNight(_ log: DeviceOwnershipLog, ring: (Double, Double), strap: (Double, Double),
+                                    ringFirst keptRingFirst: SyncDeviceID, strapFirst keptStrapFirst: SyncDeviceID,
+                                    file: StaticString = #filePath, line: UInt = #line) throws {
+        ownership.install(log)
+        for ringFirst in [true, false] {
+            let store = try makeStore()
+            let order: [(SyncDeviceID, (Double, Double))] = ringFirst
+                ? [(.ringConn, ring), (strapTimeline, strap)] : [(strapTimeline, strap), (.ringConn, ring)]
+            let outcomes = try order.map { try saveNight(store, $0.0, $0.1.0, $0.1.1) }
+            let expected = ringFirst ? keptRingFirst : keptStrapFirst
+            let window = expected == .ringConn ? ring : strap
+            let rows = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
+            let label = ringFirst ? "ring first" : "strap first"
+            XCTAssertEqual(rows.count, 1, "\(label): exactly one kept night", file: file, line: line)
+            XCTAssertEqual(rows.first?.inBedStart, at(window.0), "\(label): the kept night is the \(expected.rawValue)'s", file: file, line: line)
+            XCTAssertEqual(rows.first?.inBedEnd, at(window.1), "\(label): never merged", file: file, line: line)
+            XCTAssertEqual(outcomes.filter(\.wroteRow).count, 1, "\(label): \(outcomes)", file: file, line: line)
+            // Health: only the keeper may mirror, and the loser's mirror delete never reaches the kept night.
+            let ringKeeps = HealthKitWriter.ringOwnsNight(ringNight(from: at(ring.0), to: at(ring.1)), store: store)
+            XCTAssertEqual(ringKeeps, expected == .ringConn, "\(label): ring mirror", file: file, line: line)
+            let strapFamily: DeviceOwnershipLog.Family = .zeppOS
+            let loser: DeviceOwnershipLog.Family = expected == .ringConn ? strapFamily : .ringConn
+            XCTAssertFalse(store.nightKeeping(loser, inBedStart: at(expected == .ringConn ? strap.0 : ring.0),
+                                              inBedEnd: at(expected == .ringConn ? strap.1 : ring.1)).keep,
+                           "\(label): the other device's night may not be mirrored", file: file, line: line)
+            XCTAssertEqual(store.otherDevicesNightWindows(loser, overlapping: at(-6), to: at(12)),
+                           [DateInterval(start: at(window.0), end: at(window.1))],
+                           "\(label): excluded from the loser's union delete", file: file, line: line)
+        }
+    }
+
+    func testSwitchedBeforeBedTheStrapKeepsTheNight() throws {
+        try assertOneKeptNight(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: at(-2))]),
+                               ring: (-1, 7), strap: (-0.5, 6.5), ringFirst: strapTimeline, strapFirst: strapTimeline)
+    }
+
+    /// The review's "neither" probe: switch at 03:00; each device's own midpoint pointed at the other.
+    func testASwitchMidSleepLeavesTheNightWithTheDeviceYouWentToBedWith() throws {
+        try assertOneKeptNight(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: at(3))]),
+                               ring: (-1, 7.5), strap: (-0.5, 6), ringFirst: .ringConn, strapFirst: .ringConn)
+    }
+
+    /// The review's "both" probe: the strap's fuller night must never replace the ring's.
+    func testAStrapNightNeverReplacesTheRingsNightAfterAMidSleepSwitch() throws {
+        try assertOneKeptNight(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: at(3))]),
+                               ring: (-0.5, 6), strap: (-1, 7.5), ringFirst: .ringConn, strapFirst: .ringConn)
+    }
+
+    /// A switch between the two devices' in-bed starts: each window says "mine", so the first stored
+    /// wins and the other never replaces it.
+    func testASwitchBetweenTheTwoBedtimesKeepsWhicheverSyncedFirst() throws {
+        try assertOneKeptNight(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: at(-0.75))]),
+                               ring: (-1, 7), strap: (-0.5, 7), ringFirst: .ringConn, strapFirst: strapTimeline)
+    }
+
+    func testTwoSwitchesInOneNightStillKeepOneNight() throws {
+        try assertOneKeptNight(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: at(1)),
+                                                            .init(family: .ringConn, since: at(4))]),
+                               ring: (-1, 7), strap: (1.2, 3.8), ringFirst: .ringConn, strapFirst: strapTimeline)
+    }
+
+    /// Ring-only: the verdict never refuses and never queries.
+    func testNightKeepingIsANoOpWithAnEmptyLog() throws {
+        ownership.install(DeviceOwnershipLog())
+        let store = try makeStore()
+        XCTAssertEqual(try saveNight(store, .ringConn, -1, 7), .inserted)
+        XCTAssertTrue(store.nightKeeping(.ringConn, inBedStart: at(-1), inBedEnd: at(7)).keep)
+        XCTAssertEqual(store.otherDevicesNightWindows(.ringConn, overlapping: at(-6), to: at(12)), [])
     }
 }

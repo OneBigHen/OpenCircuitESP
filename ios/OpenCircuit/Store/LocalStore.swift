@@ -1631,6 +1631,63 @@ struct LocalStore {
         }
     }
 
+    /// Decision 28a's verdict for one device's night.
+    struct NightKeeping: Equatable {
+        /// `family` may store (and mirror) this night.
+        var keep: Bool
+        /// A stored night the save would resolve to belongs to the other device.
+        var otherDeviceRowExists: Bool
+    }
+
+    /// May `family` keep the night `[inBedStart, inBedEnd]` (decision 28a, review-224b S-C)?
+    /// - The device you went to bed with keeps it: `owner(ofNightFrom:to:)` must be `family`.
+    /// - A stored night is never replaced or merged by the other device's, whichever syncs first:
+    ///   every stored row this save could resolve to (in-bed overlap, or the same night key) must be
+    ///   `family`'s own. A row's device is the owner at ITS in-bed start, the rule it was stored under
+    ///   (the log only ever appends switches at the present, so that answer never changes).
+    /// Always kept with an empty log (a ring-only install): no query runs.
+    func nightKeeping(_ family: DeviceOwnershipLog.Family, inBedStart: Date, inBedEnd: Date,
+                      night: Date? = nil) -> NightKeeping {
+        let log = Self.ownershipLog()
+        guard !log.isEmpty else { return NightKeeping(keep: true, otherDeviceRowExists: false) }
+        let others = contendingSleepRows(inBedStart: inBedStart, inBedEnd: inBedEnd, night: night)
+            .filter { log.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd) != family }
+        let wentToBedWith = log.owner(ofNightFrom: inBedStart, to: inBedEnd) == family
+        return NightKeeping(keep: wentToBedWith && others.isEmpty, otherDeviceRowExists: !others.isEmpty)
+    }
+
+    /// Every stored night a save of `[inBedStart, inBedEnd]` could resolve to (`resolveSleepRow`): the
+    /// rows its in-bed window overlaps, and the row on its night key.
+    private func contendingSleepRows(inBedStart: Date, inBedEnd: Date, night: Date?) -> [StoredSleepSummary] {
+        var rows: [StoredSleepSummary] = []
+        if inBedEnd > inBedStart {
+            let overlapping = FetchDescriptor<StoredSleepSummary>(
+                predicate: #Predicate { $0.inBedStart < inBedEnd && $0.inBedEnd > inBedStart })
+            rows += ((try? context.fetch(overlapping)) ?? []).filter { $0.inBedEnd > $0.inBedStart }
+        }
+        let dayStart = Calendar.current.startOfDay(for: night ?? SleepNightKey.night(inBedStart: inBedStart, inBedEnd: inBedEnd))
+        let keyed = FetchDescriptor<StoredSleepSummary>(predicate: #Predicate { $0.night == dayStart })
+        for row in (try? context.fetch(keyed)) ?? [] where !rows.contains(where: { $0 === row }) { rows.append(row) }
+        return rows
+    }
+
+    /// The Health spans of stored nights the OTHER device keeps (recorded ∪ edited window) that touch
+    /// `[start, end]`: `mirrorSettledNight` excludes them from its union delete, so it can never remove
+    /// the other device's kept night (decision 28a). Empty with an empty log.
+    func otherDevicesNightWindows(_ family: DeviceOwnershipLog.Family, overlapping start: Date, to end: Date) -> [DateInterval] {
+        let log = Self.ownershipLog()
+        guard !log.isEmpty, end > start else { return [] }
+        let rows = (try? context.fetch(FetchDescriptor<StoredSleepSummary>())) ?? []
+        return rows.compactMap { row in
+            guard row.inBedEnd > row.inBedStart,
+                  log.owner(ofNightFrom: row.inBedStart, to: row.inBedEnd) != family else { return nil }
+            let lo = min(row.inBedStart, row.sleepEditCurrentInBedStart)
+            let hi = max(row.inBedEnd, row.sleepEditCurrentInBedEnd)
+            guard hi > lo, lo < end, hi > start else { return nil }
+            return DateInterval(start: lo, end: hi)
+        }
+    }
+
     /// The stored row this staging belongs to: by in-bed OVERLAP first (identity), then by calendar
     /// bucket (index). See the call site for why the order matters.
     private func resolveSleepRow(dayStart: Date, inBedStart: Date, inBedEnd: Date) -> StoredSleepSummary? {
@@ -1679,14 +1736,15 @@ struct LocalStore {
         // migration DEFERS the write rather than filing it under a scheme the rest of the table has
         // not adopted; the epochs survive in the archive and the next drain re-stages them.
         guard ensureNightKeyMigrated() else { throw StoreError.nightKeyMigrationPending }
-        // Decision 28 (#215): a night belongs to the device that owned the midpoint of its in-bed
-        // window. Another device's staging of it is not stored (no-op for a ring-only install).
-        let ownership = Self.ownershipLog()
-        if !ownership.isEmpty,
-           ownership.owner(ofNightFrom: inBedStart, to: inBedEnd) != DeviceOwnershipLog.Family(timeline: device) {
+        // Decision 28a (#215, review-224b S-C): the device you went to bed with keeps the night, and a
+        // stored night is never replaced or merged by the other device's (`nightKeeping`). Another
+        // device's staging of it is not stored. No-op for a ring-only install (empty log).
+        let family = DeviceOwnershipLog.Family(timeline: device)
+        let keeping = nightKeeping(family, inBedStart: inBedStart, inBedEnd: inBedEnd, night: night)
+        if !keeping.keep {
             ObservabilityStore().recordMetricEvent(
                 source: "sleep-drop",
-                detail: "night=\(Self.stamp(Calendar.current.startOfDay(for: night))) device=\(DeviceOwnershipLog.Family(timeline: device).rawValue) "
+                detail: "night=\(Self.stamp(Calendar.current.startOfDay(for: night))) device=\(family.rawValue) "
                     + "reason=owned-by-other-device")
             return .ownedByOtherDevice
         }
