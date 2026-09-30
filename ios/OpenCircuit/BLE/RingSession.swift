@@ -799,6 +799,9 @@ final class RingSession: NSObject {
     /// tell the user to "put your ring back on" while the ring is demonstrably connected — a quiet
     /// notify pipe on a live link is our problem, not a ring the user took off.
     var isLinkConnected: Bool { peripheral.state == .connected }
+    /// This ring's per-install CoreBluetooth id (NOT the MAC). For the `WearableSession` conformance in
+    /// `RingSession+Wearable.swift`, which can't see the file-private `peripheral`.
+    var peripheralIdentifier: String { peripheral.identifier.uuidString }
 
     /// `writeChar` can outlive an actual usable link during reconnect churn, so connection state
     /// is part of the write gate too.
