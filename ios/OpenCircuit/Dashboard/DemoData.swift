@@ -134,12 +134,16 @@ enum DemoData {
     private static func scheduleScrollIfRequested() {
         let y = UserDefaults.standard.double(forKey: scrollKey)
         guard y > 0 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-            let windows = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
-            guard let list = windows.lazy.compactMap({ firstVerticalScrollView(in: $0) }).first else { return }
-            let maxY = max(list.contentSize.height - list.bounds.height + list.adjustedContentInset.bottom, 0)
-            list.setContentOffset(CGPoint(x: 0, y: min(y, maxY) - list.adjustedContentInset.top), animated: false)
+        // A lazy List only knows its full height once rows below the fold have loaded, so step
+        // toward the target a few times, re-clamping to the (growing) content height each time.
+        for attempt in 0..<6 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3 + Double(attempt) * 0.6) {
+                let windows = UIApplication.shared.connectedScenes
+                    .compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+                guard let list = windows.lazy.compactMap({ firstVerticalScrollView(in: $0) }).first else { return }
+                let maxY = max(list.contentSize.height - list.bounds.height + list.adjustedContentInset.bottom, 0)
+                list.setContentOffset(CGPoint(x: 0, y: min(y, maxY) - list.adjustedContentInset.top), animated: false)
+            }
         }
     }
 
