@@ -2,10 +2,9 @@
 // usual range as a band, the headline value and its delta, min / average / max, and plain notes on
 // what the number is and how "usual" is worked out.
 //
-// From the Today tab, the 14-day view is built from that tab's own trends load, handed in, so it IS
-// the data the tile was built from and costs no second read; only the 30-day range then loads its own
-// window. Any range not handed in loads through the same off-main `TrendsData.loadAsync(lookbackDays:)`
-// the tabs use.
+// Loads its own window through `TrendsData.loadAsync(lookbackDays:)` (the same off-main loader the
+// tabs use) when it opens, and each range the first time it is picked, so it shows the store as of
+// that moment. That can be newer than the Today tile behind it, if data arrived after the tab's last load.
 
 import SwiftUI
 import SwiftData
@@ -17,15 +16,7 @@ struct MetricDetailView: View {
 
     @Environment(\.modelContext) private var modelContext
     @State private var range = 14
-    @State private var loaded: [Int: TrendsData]
-
-    /// - Parameter todayTrends: the Today tab's shared load (`TrendsData.lookbackDays` long), reused
-    ///   for that range instead of reading the same ~25 k rows again; nil to load it here.
-    init(metric: TodayTile.Metric, tempUnitRaw: String, todayTrends: TrendsData? = nil) {
-        self.metric = metric
-        self.tempUnitRaw = tempUnitRaw
-        _loaded = State(initialValue: todayTrends.map { [TrendsData.lookbackDays: $0] } ?? [:])
-    }
+    @State private var loaded: [Int: TrendsData] = [:]
 
     @ScaledMetric(relativeTo: .largeTitle) private var valueSize: CGFloat = 52
 

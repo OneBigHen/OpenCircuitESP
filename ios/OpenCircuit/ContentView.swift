@@ -771,8 +771,7 @@ struct ContentView: View {
         case .cycle:       CycleCalendarView()
         case .headache:    HeadacheSignalsView()
         case .activityLog: ActivityLogView(session: session)
-        case .metric(let m): MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw,
-                                              todayTrends: trendsHaveLoaded ? trends : nil)
+        case .metric(let m): MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw)
         }
     }
 
