@@ -118,6 +118,7 @@ struct HelioDeviceInfoView: View {
 struct FindMyStrapView: View {
     let connection: HelioConnection
     @State private var error: String?
+    @Environment(\.scenePhase) private var scenePhase
 
     private var session: HelioSession? { connection.session }
     private var rssi: Int? { connection.rssi }
@@ -156,6 +157,8 @@ struct FindMyStrapView: View {
         .navigationTitle("Find My Strap")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { connection.startRSSIUpdates() }
+        // Backgrounding stopped the find and the signal polling; resume the polling on return.
+        .onChange(of: scenePhase) { _, phase in if phase == .active { connection.startRSSIUpdates() } }
         .onDisappear {
             // Decision 18: leaving the screen always stops the find.
             session?.stopFind()

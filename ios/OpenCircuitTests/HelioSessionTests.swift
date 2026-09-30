@@ -73,13 +73,20 @@ private func spo2Data() -> [UInt8] {
 
 /// The endpoints a Helio lists, with the controls (§3.5): find encrypted, alarms plaintext.
 private let helioServices: [(endpoint: UInt16, flag: UInt8)] = [
-    (0x0000, 0), (0x000A, 1), (0x000F, 0), (0x001A, 1), (0x001D, 0), (0x0029, 0), (0x0047, 0), (0x004B, 0), (0x0082, 0),
+    (0x0000, 0), (0x000A, 1), (0x000F, 0), (0x001A, 1), (0x001D, 0), (0x0029, 0), (0x0043, 0), (0x0047, 0), (0x004B, 0),
+    (0x0082, 0),
 ]
+
+/// A device-info reply (§5.3): `02 01`, flags 0x0C (hardware + firmware, no bit-0 blob), then the two
+/// NUL-terminated versions. Made-up versions; the hardware one matches the fake DIS read.
+private let deviceInfoReply: [UInt8] = [0x02, 0x01, 0x0c, 0, 0, 0, 0, 0, 0, 0]
+    + Array("9.9.9.9".utf8) + [0] + Array("1.2.3.4".utf8) + [0]
 
 private func makeStrap(authKey: String = keyHex) -> FakeZeppDevice {
     let device = FakeZeppDevice(authKey: ZeppHex.bytes(authKey)!, privateKey: strapPrivateKey, random: strapRandom,
                                 writeLength: 244)
     device.services = helioServices
+    device.deviceInfoReply = deviceInfoReply
     device.dataPacketLength = 200
     let night = midnight - 3600
     device.fetchData = [
@@ -135,6 +142,18 @@ private final class FakeStrapTransport: HelioTransport {
     /// A strap-originated message (e.g. find device `07`).
     func push(_ notifications: [FakeZeppDevice.Notification]) {
         for n in notifications { inbox.append((n.characteristic, n.bytes, false)) }
+    }
+
+    /// Deliver only the next `count` queued events.
+    func drainSteps(_ count: Int) {
+        for _ in 0..<count where !inbox.isEmpty {
+            let (characteristic, bytes, enabled) = inbox.removeFirst()
+            if let bytes {
+                session?.received(characteristic, bytes)
+            } else {
+                session?.notificationStateChanged(characteristic, enabled: enabled, failed: false)
+            }
+        }
     }
 
     func drain() {
@@ -480,9 +499,53 @@ final class HelioSessionTests: XCTestCase {
         XCTAssertEqual(fields.manufacturer, "Amazfit")
         XCTAssertEqual(fields.model, "Helio Strap")
         XCTAssertEqual(fields.hardwareVersion, "9.9.9.9")
+        XCTAssertEqual(fields.firmwareVersion, "1.2.3.4", "from the device-info read (§5.3): the Helio has no DIS firmware")
+        // The family rule (#222): a device's localIdentifier is its timeline, the strap's own zeppos:<id>.
+        XCTAssertEqual(fields.localIdentifier, "zeppos:\(strapID)")
+        XCTAssertNotEqual(fields.localIdentifier, SyncDeviceID.ringConn.rawValue)
         XCTAssertNil(HealthDeviceAttribution.fields(for: rig.session.identity, origin: .userEntered),
                      "manual entries carry no device (decision 11)")
         XCTAssertEqual(rig.session.deviceKind, .zeppOS(model: "Helio Strap"))
+    }
+
+    // MARK: review follow-ups
+
+    func testActiveHRMonitoringIsNeverARecordingWarning() throws {
+        // HEALTH read reply: all-day HR 00 (off), 0x04 (Active HR monitoring) off, stress off.
+        let reply = try XCTUnwrap(ZeppConfig.parseReadReply(
+            [0x04, 0x01, 0x08, 0x03, 0x00, 0x03, 0x01, 0x10, 0x00, 0x04, 0x0b, 0x00, 0x13, 0x0b, 0x00]))
+        let warnings = HelioSession.recordingWarnings(ZeppHealthSettings(reply))
+        XCTAssertEqual(warnings.count, 2, "all-day HR and stress; never 0x04")
+        XCTAssertFalse(warnings.contains { $0.localizedCaseInsensitiveContains("activity") })
+        XCTAssertTrue(HelioSession.recordingWarnings(ZeppHealthSettings(
+            try XCTUnwrap(ZeppConfig.parseReadReply([0x04, 0x01, 0x08, 0x03, 0x00, 0x01, 0x04, 0x0b, 0x00])))).isEmpty)
+    }
+
+    func testADisconnectMidSyncAcksTheOpenRoundKeep() throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let rig = connect(device, store: store, autoSync: false)
+        rig.session.syncHistory(manual: true)
+        // Enable notify, send the first start, and let its reply open a round, then stop draining.
+        rig.transport.drainSteps(3)
+        let acksBefore = rig.session.fetchAcksSent.count
+        rig.session.abortSync()
+        XCTAssertEqual(rig.session.fetchAcksSent.count, acksBefore + 1)
+        XCTAssertEqual(rig.session.fetchAcksSent.last, 0x09)
+    }
+
+    func testALateNotifyOffDoesNotStartTheNextFetch() throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let rig = connect(device, store: store, autoSync: false)
+        rig.session.syncHistory(manual: true)
+        let startsBefore = device.fetchStarts.count
+        // The previous sync's teardown lands after the new sync asked for notify-on.
+        rig.session.notificationStateChanged(.activityControl, enabled: false, failed: false)
+        rig.session.notificationStateChanged(.activityData, enabled: false, failed: false)
+        XCTAssertEqual(device.fetchStarts.count, startsBefore, "no start before notify is back on")
+        rig.transport.drain()
+        XCTAssertGreaterThan(device.fetchStarts.count, startsBefore)
     }
 }
 
@@ -596,6 +659,9 @@ final class HelioStatusTests: XCTestCase {
         XCTAssertEqual(fields.name, "Helio Strap")
         XCTAssertEqual(fields.manufacturer, "Amazfit")
         XCTAssertEqual(fields.hardwareVersion, "9.9.9.9")
+        XCTAssertEqual(fields.firmwareVersion, "1.2.3.4",
+                       "the first-write guard needs a firmware version: it is read before the first sync")
+        XCTAssertEqual(fields.localIdentifier, "zeppos:5B1E4C2A-0000-4000-8000-0000000000B2")
         XCTAssertTrue(active.capabilities.contains(.historySync))
     }
 }

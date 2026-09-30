@@ -61,7 +61,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         if helioActive, HelioConnection.hasSavedStrap {
             MainActor.assumeIsolated {
                 if let container = OpenCircuitApp.sharedContainer ?? (try? OpenCircuitApp.makeContainerOrThrow()) {
-                    HelioConnection.shared.setLocalStore(LocalStore(container.mainContext))
+                    // `container:` keeps a fallback-built container alive as long as the strap's store.
+                    HelioConnection.shared.setLocalStore(LocalStore(container: container))
                 }
                 HelioConnection.shared.reconnectKnown()
             }

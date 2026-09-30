@@ -681,7 +681,7 @@ final class HelioSession: WearableSession {
         switch currentStep {
         case .healthConfig?:
             if let reply = ZeppConfig.parseReadReply(payload), reply.group == ZeppConfig.healthGroup {
-                recordingWarnings = ZeppHealthSettings(reply).warnings
+                recordingWarnings = Self.recordingWarnings(ZeppHealthSettings(reply))
             }
             advance(from: .healthConfig)
         case .alertCapabilities?:
@@ -762,6 +762,26 @@ final class HelioSession: WearableSession {
         }
         let timeline = self.timeline
         Task { @MainActor in await self.onSyncFinished(result, timeline) }
+    }
+
+    /// Plain-language warnings for the HEALTH switches that stop the strap RECORDING something
+    /// (§5.5), off only when the strap reported them off (unknown is not off). HEALTH `0x04` ("Active
+    /// HR monitoring") is a sampling boost during activity, not a recording switch, so it is never a
+    /// warning; neither is heart-rate sharing, which only affects live broadcast without a key.
+    static func recordingWarnings(_ settings: ZeppHealthSettings) -> [String] {
+        var out: [String] = []
+        if settings.heartRateMonitoring == 0x00 {
+            out.append("All-day heart rate is off, so heart rate, resting heart rate and HRV history may be missing.")
+        }
+        if settings.highAccuracySleep == false {
+            out.append("High-accuracy sleep monitoring is off, so sleep stages may be missing.")
+        }
+        if settings.sleepBreathingQuality == false {
+            out.append("Sleep breathing quality is off, so sleep respiratory rate may be missing.")
+        }
+        if settings.stressMonitoring == false { out.append("Stress monitoring is off, so stress will be empty.") }
+        if settings.allDaySpO2 == false { out.append("All-day SpO₂ is off, so automatic SpO₂ readings will be empty.") }
+        return out
     }
 
     static func status(for result: HelioSyncResult) -> String {

@@ -51,6 +51,8 @@ public final class FakeZeppDevice {
     /// Send `0f` (alarms changed) after each accepted alarm write.
     public var announcesAlarmChanges = false
     public var configCapabilitiesReply = hex("02 03 01 08")
+    /// The device-info reply (§5.3) to a `01` on 0x0043; nil = the strap never answers it.
+    public var deviceInfoReply: [UInt8]?
     /// Config read replies by exact request payload; any other read gets `configReply`.
     public var configReplies: [[UInt8]: [UInt8]] = [:]
 
@@ -170,6 +172,9 @@ public final class FakeZeppDevice {
             guard p.count == 12 else { failures.append("bad time set"); return [] }
             timeSetCount += 1
             return send(endpoint: 0x0047, [0x06, 0x01])
+        case 0x0043 where p == [0x01]:
+            guard let reply = deviceInfoReply else { failures.append("unhandled message on 67"); return [] }
+            return send(endpoint: 0x0043, reply)
         case 0x001A:
             return findDevice(p)
         case 0x000F:

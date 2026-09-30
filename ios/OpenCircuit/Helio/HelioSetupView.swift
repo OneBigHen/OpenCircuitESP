@@ -100,6 +100,13 @@ struct HelioSetupView: View {
             Section {
                 if hasKey && !editingKey {
                     LabeledContent("Key", value: keyRejected ? "Saved, rejected by the strap" : "Saved")
+                    // Coming back from the ring: the saved key is used as is, never shown or re-pasted.
+                    if !choice.isHelio && !keyRejected {
+                        Button("Use the Helio Strap") {
+                            DeviceSwitcher.activate(.helioStrap)
+                            connection.connect()
+                        }
+                    }
                     Button("Replace key") { editingKey = true; keyText = "" }
                     Button("Forget key", role: .destructive) { confirmForget = true }
                 } else {

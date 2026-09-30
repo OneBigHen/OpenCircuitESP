@@ -2486,7 +2486,8 @@ private struct HelioDashboardHooks: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .onChange(of: syncing) { _, now in if now == false { onSyncFinished() } }
+            // true → false (finished) or true → nil (the link dropped mid-sync and the session went).
+            .onChange(of: syncing) { old, now in if old == true, now != true { onSyncFinished() } }
             .onChange(of: choice) { _, now in onChoiceChanged(now) }
             .sheet(isPresented: $showSetup) { NavigationStack { HelioSetupView() } }
     }
