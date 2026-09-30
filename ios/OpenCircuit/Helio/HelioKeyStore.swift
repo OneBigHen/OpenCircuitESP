@@ -33,7 +33,7 @@ enum HelioKeyStoreError: Error, Equatable {
 final class HelioKeyStore: HelioKeyStoring {
     static let shared = HelioKeyStore()
 
-    static let defaultService = "com.standardsoftwaresolutions.opencircuit.helio.authkey"
+    nonisolated static let defaultService = "com.standardsoftwaresolutions.opencircuit.helio.authkey"
     static let rejectedKey = "helio.keyRejected.v1"
 
     private let service: String

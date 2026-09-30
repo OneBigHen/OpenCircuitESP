@@ -411,7 +411,7 @@ final class HealthKitWriter {
     func flushToHealth(store: LocalStore, sleepSegments: [SleepSegment] = [],
                        sleepFinalized: Bool = false,
                        device: SyncDeviceID = .ringConn,
-                       mirroredKinds: [MetricKind] = LocalStore.healthMirroredKinds,
+                       mirroredKinds: [MetricKind]? = nil,
                        strapNights: [[SleepSegment]] = []) async -> FlushResult {
         var result = FlushResult()
         guard isShareAuthorized, !Self.isFlushing else { return result }

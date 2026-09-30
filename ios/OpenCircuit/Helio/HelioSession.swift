@@ -77,8 +77,8 @@ final class HelioFindState {
     /// Decision 18: the app stops a find after 60 s. Decision 19: a buzz is 2 s.
     static let configuration = ZeppFindDevice.Configuration(maxDuration: 60, buzzLength: 2)
 
-    init(configuration: ZeppFindDevice.Configuration = HelioFindState.configuration) {
-        machine = ZeppFindDevice(configuration: configuration)
+    init(configuration: ZeppFindDevice.Configuration? = nil) {
+        machine = ZeppFindDevice(configuration: configuration ?? Self.configuration)
     }
 }
 
@@ -245,7 +245,11 @@ final class HelioSession: WearableSession {
     var ready: Bool { isLinkConnected && (phase == .ready || phase == .syncing) }
     var syncing: Bool { phase == .syncing }
     var isAuthenticated: Bool { link?.isAuthenticated == true }
-    var isFinding: Bool { findState.machine.isBuzzing }
+    /// A find or buzz is running (from the observable mirror, so views re-render).
+    var isFinding: Bool {
+        if case .buzzing = findPhase { return true }
+        return false
+    }
 
     /// Authenticated heart-rate streaming is possible on this connection (§7.1).
     var canStreamHeartRate: Bool {

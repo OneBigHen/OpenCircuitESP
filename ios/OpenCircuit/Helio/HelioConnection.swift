@@ -22,7 +22,7 @@ final class HelioConnection: NSObject {
     /// Constant for the life of the app: iOS hands restored state back by this identifier.
     static let restoreIdentifier = "com.standardsoftwaresolutions.opencircuit.helio"
     /// The strap's CoreBluetooth identifier (per install, never its MAC).
-    static let savedPeripheralKey = "helio.peripheralID.v1"
+    nonisolated static let savedPeripheralKey = "helio.peripheralID.v1"
     /// How long a foreground search runs before it reports "not found".
     static let scanTimeout: TimeInterval = 20
 
@@ -57,8 +57,8 @@ final class HelioConnection: NSObject {
 
     private enum PendingAction { case scan, reconnect }
 
-    init(keyStore: any HelioKeyStoring = HelioKeyStore.shared) {
-        self.keyStore = keyStore
+    init(keyStore: (any HelioKeyStoring)? = nil) {
+        self.keyStore = keyStore ?? HelioKeyStore.shared
         super.init()
         // Decision 18: backgrounding sends the find stop. Observed here rather than in a view, so it
         // holds whichever screen is showing.
@@ -217,7 +217,9 @@ final class HelioConnection: NSObject {
     }
 
     private func makeSession(for peripheral: CBPeripheral) {
-        let store = localStore
+        // The process-wide container when no view handed a store over yet (a switch made from a
+        // screen, or a restoration launch); never `makeContainer()`, whose recovery path can wipe.
+        let store = localStore ?? OpenCircuitApp.sharedContainer.map { LocalStore($0.mainContext) }
         let session = HelioSession(
             transport: self, identityID: peripheral.identifier.uuidString, model: .helioStrap,
             key: keyStore.load(), keyStore: keyStore, sink: store.map { HelioStoreSink(store: $0) },

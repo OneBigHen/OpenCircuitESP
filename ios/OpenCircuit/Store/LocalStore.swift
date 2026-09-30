@@ -1261,7 +1261,8 @@ struct LocalStore {
     /// `kinds` narrows the mirrored set for a device whose policy withholds a kind (the Helio
     /// Strap's HRV, `HelioHealthPolicy.writesHRV`); it defaults to every mirrored kind.
     func pendingHealthSamples(device: SyncDeviceID = .ringConn,
-                              kinds: [MetricKind] = LocalStore.healthMirroredKinds) throws -> [QuantitySample] {
+                              kinds: [MetricKind]? = nil) throws -> [QuantitySample] {
+        let kinds = kinds ?? Self.healthMirroredKinds
         let cursor = try loadHealthCursor(device: device)
         let deviceID = device.rawValue
         var out: [QuantitySample] = []

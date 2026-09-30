@@ -22,7 +22,7 @@ enum ActiveDeviceChoice: String, CaseIterable, Sendable {
 @MainActor
 final class ActiveDeviceChoiceStore {
     static let shared = ActiveDeviceChoiceStore()
-    static let key = "device.activeChoice.v1"
+    nonisolated static let key = "device.activeChoice.v1"
 
     /// The choice read straight from UserDefaults, for launch paths that must decide before any
     /// observable holder exists (AppDelegate, a BGTask, a CoreBluetooth-restoration relaunch).
@@ -54,7 +54,8 @@ enum DeviceSwitcher {
     /// Stop the device being left (no scan, no link, no pending connect), persist the choice, then
     /// wake the device being chosen. The device being left keeps its saved peripheral, so switching
     /// back reconnects without a new pairing.
-    static func activate(_ choice: ActiveDeviceChoice, store: ActiveDeviceChoiceStore = .shared) {
+    static func activate(_ choice: ActiveDeviceChoice, store: ActiveDeviceChoiceStore? = nil) {
+        let store = store ?? .shared
         guard choice != store.current else { return }
         switch choice {
         case .helioStrap:

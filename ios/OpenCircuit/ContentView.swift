@@ -1,12 +1,17 @@
 import SwiftUI
 import SwiftData
 import OpenCircuitKit
+import ZeppKit
 import UIKit   // UIApplication.openSettingsURLString for the Bluetooth-off / denied deep link (#134)
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
-    @State private var scanner = RingScanner.shared
+    /// Which wearable the app drives (#215, decision 1). The ring's scanner is read only while the
+    /// ring is chosen, and the strap's connection only while the strap is, so the inactive driver is
+    /// never constructed by this view.
+    @State private var deviceChoice = ActiveDeviceChoiceStore.shared
+    @State private var showHelioSetup = false
     @State private var healthAuthorized = false
     /// Set when an explicit Authorize-Health attempt throws — the signature of a build WITHOUT the
     /// HealthKit entitlement (e.g. a free-Apple-ID sideload, which strips it). Drives the "needs the
@@ -138,8 +143,17 @@ struct ContentView: View {
 
     private let health = HealthKitWriter()
 
-    private var session: RingSession? { scanner.session }
+    private var ringActive: Bool { deviceChoice.isRing }
+    /// Touch ONLY behind `ringActive`.
+    private var scanner: RingScanner { RingScanner.shared }
+    /// Touch ONLY behind `!ringActive`.
+    private var helio: HelioConnection { HelioConnection.shared }
+    /// The ring's session; nil while the Helio Strap is the chosen device, so every ring-only
+    /// surface keyed on it stays hidden.
+    private var session: RingSession? { ringActive ? scanner.session : nil }
+    private var helioSession: HelioSession? { ringActive ? nil : helio.session }
     private var connected: Bool {
+        guard ringActive else { return false }
         if case .connected = scanner.state { return true } else { return false }
     }
 
@@ -179,6 +193,21 @@ struct ContentView: View {
             .onChange(of: session?.syncing) { _, syncing in
                 if syncing == false { Task { await loadTrends(.syncFinished) } }
             }
+            // The Helio Strap (#215): one modifier, so this chain stays within the type-checker's reach.
+            .modifier(HelioDashboardHooks(
+                syncing: helioSession?.syncing, choice: deviceChoice.current, showSetup: $showHelioSetup,
+                // Its connection already wrote the store and flushed Apple Health; refresh the dashboard.
+                onSyncFinished: {
+                    Task { await loadTrends(.syncFinished) }
+                    refreshObservability()
+                    evaluateHealthAlerts()
+                },
+                // A switch made from Profile ▸ Device: hand the store to the newly chosen driver.
+                onChoiceChanged: { choice in
+                    if choice == .helioStrap { helio.setLocalStore(LocalStore(modelContext)) }
+                    else { scanner.setLocalStore(LocalStore(modelContext)) }
+                    Task { await loadTrends(.syncFinished) }
+                }))
             // Feed / reset the liveline live-vitals buffer as on-demand readings arrive.
             .onChange(of: session?.liveHR) { _, hr in
                 if session?.monitoring == true, session?.liveMode == .hr, let hr { appendLive(Double(hr)) }
@@ -194,7 +223,11 @@ struct ContentView: View {
             .onAppear {
                 // Wire persistence into the scanner/session so the (currently gated)
                 // epoch-sync decoder can persist Layer-A records once enabled. #24
-                scanner.setLocalStore(LocalStore(modelContext))
+                if ringActive {
+                    scanner.setLocalStore(LocalStore(modelContext))
+                } else {
+                    helio.setLocalStore(LocalStore(modelContext))
+                }
 #if DEBUG
                 // Screenshot fixtures (#216): no-op unless launched with `-OCDemoData YES`.
                 DemoData.seedIfRequested(modelContext)
@@ -285,7 +318,7 @@ struct ContentView: View {
                     // Don't leave a user-initiated foreground scan/picker running once we leave the
                     // foreground — a nil-filtered scan yields nothing in the background and just keeps
                     // the radio engaged. Preserves the active ring (cancelScan, not stop).
-                    if case .scanning = scanner.state { scanner.cancelScan() }
+                    if ringActive, case .scanning = scanner.state { scanner.cancelScan() }
                 }
             }
             // Fire the armed one-shot sync the moment the (re)connected link is ready.
@@ -395,7 +428,11 @@ struct ContentView: View {
                 Group {
                     // One plain-language sentence about today (#216), above everything else.
                     TodaySynthesisHeader(sentence: synthesisSentence)
-                    connectionCard
+                    if ringActive {
+                        connectionCard
+                    } else {
+                        HelioConnectionCard(connection: helio, onSetUp: { showHelioSetup = true })
+                    }
                     // First-run Health authorization banner (#143) — right under the connection card.
                     if !healthAuthorized, HealthKitWriter.isAvailable {
                         healthAuthBanner
@@ -518,7 +555,8 @@ struct ContentView: View {
                                  points: stepPts, value: Int(last.1).formatted(), unit: "steps",
                                  metricUnit: "", metricDecimals: 0)
                     }
-                    workoutCard
+                    // Workouts record the ring's live heart rate and native sport mode: ring only (#215).
+                    if ringActive { workoutCard }
                     // The app's own workout history, read back out of Apple Health (no SwiftData
                     // model, no schema version). Before this a finished workout was visible exactly
                     // once — on the summary screen — which is the other half of the tester's "it
@@ -571,7 +609,12 @@ struct ContentView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    deviceInfoCard
+                    deviceChoiceCard
+                    if ringActive {
+                        deviceInfoCard
+                    } else {
+                        helioDeviceCard
+                    }
                     NavigationLink { ActivityLogView(session: session) } label: {
                         card {
                             HStack(spacing: 8) {
@@ -585,7 +628,8 @@ struct ContentView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    debugCard
+                    // Ring RE tools (last frame, activity-channel probe): ring only (#215).
+                    if ringActive { debugCard }
                     brandFooter
                 }
                 .padding()
@@ -927,6 +971,18 @@ struct ContentView: View {
     /// same path as a foreground activation) instead of doing nothing.
     @MainActor
     private func forceSync() async {
+        if !ringActive {
+            // The Helio Strap (#215): the same pull-to-refresh, through its own session.
+            guard let strap = helioSession, strap.ready else {
+                handleForegroundActivation()
+                return
+            }
+            strap.syncHistory(manual: true)
+            for _ in 0 ..< 1_200 where strap.syncing {   // ~120 s cap, like the ring's hold below
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            return
+        }
         guard let session, session.ready else {
             // No live/ready session — try to (re)connect to a saved ring and arm a sync for when
             // the link comes up (no-op if there's no saved ring).
@@ -959,6 +1015,12 @@ struct ContentView: View {
     /// debounced history sync for when the link is ready. Conservative: skips entirely if
     /// there's no saved ring or the user is mid-measurement, and never loops.
     private func handleForegroundActivation() {
+        if !ringActive {
+            // The Helio Strap (#215): a standing reconnect to the saved strap, which syncs on connect.
+            helio.setLocalStore(LocalStore(modelContext))
+            helio.reconnectKnown()
+            return
+        }
         guard scanner.hasSavedRing else { return }      // never connected — nothing to do
         if session?.monitoring == true { return }       // don't interrupt a live measurement
         scanner.reconnectKnownPeripheral()              // idempotent: no-op if already connected
@@ -1611,7 +1673,9 @@ struct ContentView: View {
             Text("VITALS").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             recorderStallNotice
             VitalsTableView(session: session)
-            Text("Home shows the latest recorded readings and when they were recorded. Heart-rate and SpO₂ also support on-demand reads while the ring link is ready.")
+            Text(ringActive
+                 ? "Home shows the latest recorded readings and when they were recorded. Heart-rate and SpO₂ also support on-demand reads while the ring link is ready."
+                 : "Home shows the latest readings synced from the strap and when they were recorded.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .padding(.top, 8)
@@ -1627,19 +1691,21 @@ struct ContentView: View {
     /// so the most recent night stays on screen all day — across reconnects and syncs — and
     /// reflects a just-finished sync instantly via the live staged segments. (See SleepCardView.)
     private var sleepCard: some View {
+        // Sleep edits and naps are the ring's (its epoch archive proves coverage, and naps route
+        // through its scanner): with the Helio Strap chosen they are hidden, not left broken (#215).
         SleepCardView(liveSegments: session?.stagedSegments ?? [], lastSyncAt: lastSyncAt,
                       mirrorsSleepToHealth: mirrorsSleepToHealth,
                       sleepPersistOutcome: session?.lastSleepPersistOutcome,
-                      onEditSleep: { night, times, uiCoverage in
+                      onEditSleep: !ringActive ? nil : { night, times, uiCoverage in
                           await session?.applySleepEdit(night: night, times: times,
                                                         uiCoverage: uiCoverage) ?? nil
                       },
                       // Same helper `applySleepEdit` validates against, so the picker's range and
                       // the server-side check are computed from one place (#188 fallout).
-                      sleepEditDataCoverage: { onset, wake in
+                      sleepEditDataCoverage: !ringActive ? nil : { onset, wake in
                           session?.sleepEditDataCoverage(recordedOnset: onset, recordedWake: wake)
                       },
-                      onNap: { originalStart, window in
+                      onNap: !ringActive ? nil : { originalStart, window in
                           // Through the scanner, not session — nap add/edit works offline (no ring needed).
                           await scanner.applyNapEdit(originalStart: originalStart, window: window)
                       })
@@ -1787,6 +1853,8 @@ struct ContentView: View {
             }
             freshnessRow
             Divider()
+            // Ring only: the Helio Strap's "Sync now" is on its own card (#215).
+            if ringActive {
             Button {
                 session?.syncHistory(manual: true)   // user-initiated: drains both channels (0x00 sleep + 0x03 all-day), bypasses overnight-quiet gate
             } label: {
@@ -1798,6 +1866,7 @@ struct ContentView: View {
             .disabled(session?.ready != true || session?.syncing == true
                       || session?.monitoring == true        // stop live before syncing
                       || session?.notStreaming == true)     // a not-streaming ring would sync nothing (#54)
+            }
 
             // On-demand push of everything already captured into Apple Health. "Sync from ring"
             // above pulls fresh data off the ring; this forces what's ALREADY in the store into
@@ -1825,6 +1894,8 @@ struct ContentView: View {
             // decoding, not something an end user can act on. Keep them out of Release. The legitimate
             // "Sync from ring" button + freshness above and the sync-status/Health-mirror rows below
             // stay visible. `.disabled(...)` guards preserved for the DEBUG build.
+            // Ring-only RE tools: hidden while the Helio Strap is the chosen device (#215).
+            if ringActive {
             Button {
                 session?.captureHistoricPull()
             } label: {
@@ -1853,6 +1924,7 @@ struct ContentView: View {
                       || session?.monitoring == true
                       || session?.probing == true
                       || session?.notStreaming == true)
+            }
 #endif
 
             if session?.monitoring == true {
@@ -1864,6 +1936,8 @@ struct ContentView: View {
             // is produced by that server, not on-device. Keep it out of Release so production users
             // never see a "Start calibration session" button they can't make work. (The shipping user
             // rows above — freshness, Sync from ring, Health mirror — are untouched.)
+            // Ring-only (raw ring PPG): hidden while the Helio Strap is the chosen device (#215).
+            if ringActive {
             Divider()
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
@@ -1917,6 +1991,7 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+            }
 #endif
             if let status = session?.syncStatus, session?.syncing != true {
                 Text(status).font(.caption).foregroundStyle(.secondary)
@@ -1935,19 +2010,27 @@ struct ContentView: View {
                     .font(.caption)
             }
 #endif
+            if ringActive {
             Text("Use OpenCircuit as the sole sync app for this ring. Overnight sleep and heart-rate history are written after the morning history sync rather than as a live overnight stream on the home screen.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            } else {
+                Text("History comes from the strap's own memory each time it connects and syncs. The strap keeps everything, so a missed sync catches up next time.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
 #if DEBUG
             // #152: these two captions describe the DEBUG-only RE capture tools ("raw BLE exchange" /
             // "probes the unresolved channel selectors … for Mac-side reverse engineering"). Gated with
             // the buttons they explain so Release never mentions them.
+            if ringActive {
             Text("The one-time historic pull uses the same known two-channel drain as normal sync, but also records the raw BLE exchange so you can map exactly what was present on the ring at pull time.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("Forensic sweep goes further: it drains the known history channels first, then probes the unresolved channel selectors into the same raw log for Mac-side reverse engineering.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            }
 #endif
 
             // Health mirror STATUS lives here once authorized (the first-run authorize prompt now
@@ -2109,6 +2192,39 @@ struct ContentView: View {
     /// Taps through to the read-only device information screen (FW version / generation /
     /// manufacturer / MAC address). Lives on the Profile tab; pushes onto that tab's own stack via a
     /// value-less NavigationLink (not the Today `path`).
+    /// Profile ▸ Device (#215): the one-device picker, in both modes.
+    private var deviceChoiceCard: some View {
+        NavigationLink { DeviceChoiceView() } label: {
+            card {
+                HStack(spacing: 8) {
+                    Text("DEVICE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(deviceChoice.current.displayName).font(.caption).foregroundStyle(.secondary)
+                    KeylineGlyph(.chevronRight, size: 12, relativeTo: .caption).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The Helio Strap's device screen (#215), in place of the ring's Device Info.
+    private var helioDeviceCard: some View {
+        NavigationLink { HelioDeviceInfoView(connection: helio) } label: {
+            card {
+                HStack(spacing: 8) {
+                    Text("HELIO STRAP").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    if let firmware = helioSession?.firmwareVersion {
+                        Text(firmware).font(.caption).foregroundStyle(.secondary)
+                    }
+                    KeylineGlyph(.chevronRight, size: 12, relativeTo: .caption).foregroundStyle(.tertiary)
+                }
+                Text("Battery, key, Find My Strap, alarms").font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
     private var deviceInfoCard: some View {
         NavigationLink {
             DeviceInfoView(session: session)
@@ -2230,6 +2346,29 @@ struct ContentView: View {
     private func flushHealth(finalized: Bool = false) {
         guard healthAuthorized else { return }
         let store = LocalStore(modelContext)
+        if !ringActive {
+            // The Helio Strap (#215): its timeline's pending samples (HRV withheld, decision 14) and
+            // the nights of its last sync, through the same writer. Never the ring's segments.
+            let timeline = helioSession?.timeline ?? HelioConnection.savedPeripheralID.map {
+                SyncDeviceID.timeline(for: .zeppOS(model: HelioSession.displayName), identityID: $0)
+            }
+            guard let timeline else { return }
+            let nights = helioSession?.lastSyncResult?.nights.map(\.segments) ?? []
+            Task {
+                let r = await health.flushToHealth(store: store, device: timeline,
+                                                   mirroredKinds: HelioHealthPolicy.healthMirroredKinds(),
+                                                   strapNights: nights)
+                refreshHealthShareState()
+                if r.wroteAnything {
+                    observability.recordHealthWrite()
+                    refreshObservability()
+                    lastWrite = "Synced to Health: \(r.samples) samples"
+                        + (r.sleepSegments > 0 ? ", \(r.sleepSegments) sleep segs" : "")
+                        + (r.steps > 0 ? ", \(r.steps) steps" : "")
+                }
+            }
+            return
+        }
         // `healthSleepSegments` encodes the staged-vs-coarse policy once (prefer the HR-aware,
         // onset-trimmed staging — issue #15 — and fall back to coarse only when no overnight block
         // was staged; empty on a non-worn night). The background BGTask reads the same property.
@@ -2315,6 +2454,22 @@ struct ContentView: View {
 /// `dashboard.sectionOrder`, so keep these stable across releases; `allCases` order is the default
 /// (first-run) layout. (Sleep / workout / trends moved to their own tabs and are no longer sections;
 /// the order decoder ignores those now-unknown saved ids, so existing saved orders still load.)
+/// ContentView's Helio Strap hooks (#215): the end of a strap sync, a device switch, and the setup sheet.
+private struct HelioDashboardHooks: ViewModifier {
+    let syncing: Bool?
+    let choice: ActiveDeviceChoice
+    @Binding var showSetup: Bool
+    let onSyncFinished: () -> Void
+    let onChoiceChanged: (ActiveDeviceChoice) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: syncing) { _, now in if now == false { onSyncFinished() } }
+            .onChange(of: choice) { _, now in onChoiceChanged(now) }
+            .sheet(isPresented: $showSetup) { NavigationStack { HelioSetupView() } }
+    }
+}
+
 private enum DashboardSection: String, CaseIterable, Identifiable, Hashable {
     case readiness, metrics, vitals, vitalsStatus, calories, goals, cycle, headache, sync
     var id: String { rawValue }
