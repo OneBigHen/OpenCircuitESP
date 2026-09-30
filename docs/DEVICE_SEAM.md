@@ -254,3 +254,11 @@ pins the throw.
   (`ios/OpenCircuit/Helio/`), and `ContentView` hides the ring-only surfaces while the strap is
   chosen (its `session` is nil then). Follow-up §4 item 1 still stands for the ring's views.
 
+- **Who owns which time (decision 28, review-224).** Every switch is recorded in
+  `DeviceOwnershipLog` (Kit, pure; persisted by `DeviceOwnershipStore` under
+  `device.ownershipLog.v1`, written only by `ActiveDeviceChoiceStore.set`). Health attribution now
+  follows the ROW, not the current choice: `ActiveWearable.identityForHealthWrite(timeline:)` for a
+  timeline's rows, `identityForHealthWrite(at:)` (the owner at that moment) for untagged rows. The
+  no-argument `identityForHealthWrite()` is unchanged. With an empty log (a ring-only install)
+  every one of them is the pre-decision answer (`DeviceOwnershipAppTests.testARingOnlyInstallIsUnchanged`).
+  The store and Health rules are listed in `HEALTHKIT_MAPPING.md` ("Who owns which time").
