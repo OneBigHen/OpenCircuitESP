@@ -202,11 +202,18 @@ struct ContentView: View {
             // The Helio Strap (#215): one modifier, so this chain stays within the type-checker's reach.
             .modifier(HelioDashboardHooks(
                 syncing: helioSession?.syncing, choice: deviceChoice.current, showSetup: $showHelioSetup,
-                // Its connection already wrote the store and flushed Apple Health; refresh the dashboard.
+                // Its connection already wrote the store and flushed Apple Health; refresh the dashboard
+                // and run the post-sync passes the ring's `session.syncing` hook runs (review-224b F-1).
                 onSyncFinished: {
-                    Task { await loadTrends(.syncFinished) }
-                    refreshObservability()
-                    evaluateHealthAlerts()
+                    for step in HelioSyncEndStep.allCases {
+                        switch step {
+                        case .reloadTrends: Task { await loadTrends(.syncFinished) }
+                        case .refreshObservability: refreshObservability()
+                        case .evaluateHealthAlerts: evaluateHealthAlerts()
+                        // With the strap chosen only the bedtime reminder can fire (`ringReminders`).
+                        case .evaluateReminders: evaluateReminders(includeSedentary: false)
+                        }
+                    }
                 },
                 // A switch made from Profile ▸ Device: hand the store to the newly chosen driver.
                 onChoiceChanged: { choice in
@@ -2472,6 +2479,16 @@ struct ContentView: View {
     private var lastInferredCharging: Bool {
         UserDefaults.standard.bool(forKey: "battery.inferredCharging")
     }
+}
+
+/// What ContentView runs when a strap sync ends (#215), in order. A list so a test can pin it: the
+/// bedtime reminder only fires if something evaluates it inside its window, and for the strap that is
+/// this hook or a foreground activation (review-224b F-1).
+enum HelioSyncEndStep: CaseIterable {
+    case reloadTrends
+    case refreshObservability
+    case evaluateHealthAlerts
+    case evaluateReminders
 }
 
 /// ContentView's Helio Strap hooks (#215): the end of a strap sync, a device switch, and the setup sheet.

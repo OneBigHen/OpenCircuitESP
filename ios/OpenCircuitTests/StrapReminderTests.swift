@@ -57,4 +57,14 @@ final class StrapReminderTests: XCTestCase {
         XCTAssertTrue(ring.contains(.bedtimeReminder))
         XCTAssertEqual(candidates(ring: false), [.bedtimeReminder])
     }
+
+    /// Review-224b F-1: a strap sync ends by evaluating reminders, as the ring's post-sync hook does,
+    /// and that pass (no ring signals, sedentary deferred) yields the bedtime reminder in its window.
+    func testAStrapSyncEvaluatesTheBedtimeReminder() {
+        XCTAssertTrue(HelioSyncEndStep.allCases.contains(.evaluateReminders))
+        let pass = HealthNotificationCenter.reminderCandidates(session: nil, sleepBedMinutes: bed, sleepWakeMinutes: wake,
+                                                               sleepEnabled: true, includeSedentary: false,
+                                                               ringReminders: false, store: nil, now: now, defaults: defaults)
+        XCTAssertEqual(pass, [.bedtimeReminder])
+    }
 }
