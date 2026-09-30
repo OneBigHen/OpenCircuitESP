@@ -916,7 +916,7 @@ struct HealthNotificationCenter {
     /// The medical-disclaimer line carried on EVERY health/fever notification, per the APK
     /// (pp.txt:45929 / 46204): "Note: This product is not a medical device …".
     static let disclaimer =
-        "Note: OpenCircuit is not a medical device. These reminders are based on ring sensor "
+        "Note: OpenCircuit is not a medical device. These reminders are based on your device's sensor "
         + "data only and are not a diagnosis. If you feel unwell, consult a qualified medical professional."
 
     /// When a reading was taken, worded so it can never be mistaken for "just now".
