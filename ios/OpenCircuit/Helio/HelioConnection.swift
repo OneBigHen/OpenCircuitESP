@@ -63,6 +63,8 @@ final class HelioConnection: NSObject {
     /// Background runs in progress (`HelioBackgroundLink`); a run owns the syncs of the sessions
     /// created meanwhile.
     @ObservationIgnored var activeBackgroundRuns = 0
+    /// True only while a background run's watch loop runs (review-225b S-A); read by `makeSession`.
+    @ObservationIgnored var backgroundRunAdoptsNewSessions = false
 
     private enum PendingAction { case scan, reconnect, resumeRestored }
 
@@ -267,7 +269,7 @@ final class HelioConnection: NSObject {
                 guard !result.endedInBackgroundRun else { return }
                 await HelioConnection.flushToHealth(result: result, timeline: timeline, store: store)
             })
-        session.backgroundRunOwnsSyncs = activeBackgroundRuns > 0
+        session.backgroundRunOwnsSyncs = backgroundRunAdoptsNewSessions
         self.session = session
         session.start()
     }

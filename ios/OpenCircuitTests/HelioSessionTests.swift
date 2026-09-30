@@ -811,12 +811,15 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
     var silent = false
     var endedBusy = false
     var activeBackgroundRuns = 0
+    var backgroundRunAdoptsNewSessions = false
     private(set) var session: HelioSession?
     private(set) var transport: FakeStrapTransport?
     private(set) var connects = 0
     private(set) var disconnects = 0
     /// Flushes `HelioConnection`'s own post-sync hook would run: syncs no background run owns.
     private(set) var hookFlushes = 0
+    /// What that hook's flush does, when a test needs it to write (`GuardedHealthWriter`).
+    var hookAction: (@MainActor (HelioSyncResult) async -> Void)?
 
     init(device: FakeZeppDevice, keyStore: MemoryKeyStore, store: LocalStore?, clock: @escaping () -> Date) {
         self.device = device
@@ -838,10 +841,12 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
         let session = HelioSession(transport: transport, identityID: strapID, key: keyStore.load(), keyStore: keyStore,
                                    sink: store.map { HelioStoreSink(store: $0) }, findState: findState,
                                    onSyncFinished: { [weak self] result, _ in
-                                       if !result.endedInBackgroundRun { self?.hookFlushes += 1 }
+                                       guard let self, !result.endedInBackgroundRun else { return }
+                                       self.hookFlushes += 1
+                                       await self.hookAction?(result)
                                    },
                                    clock: clock, autoTick: false)
-        session.backgroundRunOwnsSyncs = activeBackgroundRuns > 0
+        session.backgroundRunOwnsSyncs = backgroundRunAdoptsNewSessions
         transport.session = session
         self.transport = transport
         self.session = session
@@ -857,6 +862,38 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
         session?.linkLost()
         session = nil
         transport = nil
+    }
+}
+
+/// The Health writer's flush contract, over the real store (HealthKit itself is unavailable in the
+/// simulator): one flush at a time, like `HealthKitWriter.flushToHealth`'s static `isFlushing` guard,
+/// which makes an overlapping call return empty without touching anything; and the watermark is
+/// advanced (`markHealthWritten`) only for what the save wrote, after it.
+@MainActor
+private final class GuardedHealthWriter {
+    let store: LocalStore
+    private(set) var isFlushing = false
+    private(set) var written: [QuantitySample] = []
+    private(set) var emptyBecauseBusy = 0
+    /// Runs once, inside the next save's await (where another flush can start).
+    var duringNextSave: (@MainActor () async -> Void)?
+
+    init(store: LocalStore) { self.store = store }
+
+    @discardableResult
+    func flush(_ timeline: SyncDeviceID) async -> Int {
+        guard !isFlushing else { emptyBecauseBusy += 1; return 0 }
+        isFlushing = true
+        defer { isFlushing = false }
+        guard let pending = try? store.pendingHealthSamples(device: timeline, kinds: HelioHealthPolicy.healthMirroredKinds()),
+              !pending.isEmpty else { return 0 }
+        if let step = duringNextSave {
+            duringNextSave = nil
+            await step()
+        }
+        written += pending
+        try? store.markHealthWritten(pending, device: timeline)
+        return pending.count
     }
 }
 
@@ -1187,6 +1224,148 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertTrue(flushes.isEmpty)
         XCTAssertEqual(Set(device.fetchAcks), [0x09])
         XCTAssertEqual(device.fetchAcks.count, device.fetchStarts.count)
+    }
+
+    // MARK: review-225b S-A: a session made after the watch loop owns its own syncs
+
+    /// `service(_:…)` with a changeable app state and a step that runs inside the run's Health flush
+    /// (the reviewer's probe harness, review-225b).
+    private func leakService(_ link: FakeBackgroundLink, store: LocalStore, flushes: @escaping (FlushCall) -> Void,
+                             appActive: @escaping @MainActor () -> Bool, pause: @escaping @MainActor () -> Void,
+                             duringFlush: @escaping @MainActor () async -> Void = {}) -> HelioBackgroundSyncService {
+        let base = service(link, store: store, flushes: flushes, pause: pause)
+        return HelioBackgroundSyncService(
+            link: base.link, keyStore: base.keyStore, observability: base.observability,
+            flush: { timeline, nights, identity, finalized in
+                await duringFlush()
+                return await base.flush(timeline, nights, identity, finalized)
+            },
+            now: base.now, pause: base.pause, grace: base.grace, appIsActive: appActive)
+    }
+
+    /// Move the link's current session along until `done` (radio events, one second a step).
+    private func drive(_ link: FakeBackgroundLink, until done: @MainActor () -> Bool) async {
+        for _ in 0..<400 where !done() {
+            link.transport?.drain()
+            clock = clock.addingTimeInterval(1)
+            link.session?.tick(now: clock)
+            await Task.yield()
+        }
+    }
+
+    /// LEAK A (review-225b): the strap drops and the standing reconnect brings it back while a
+    /// finished run is still in its Health flush. The fake link builds the new session synchronously
+    /// on connect; in the app `makeSession` waits for connect + discovery, so the real window is the
+    /// run's grace and Health flush. That session was marked run-owned and its syncs never reached
+    /// Health; it must flush its own.
+    func testASessionCreatedDuringARunsFlushFlushesItsOwnSync() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        var bounced = false
+        let run = await leakService(link, store: store, flushes: { flushes.append($0) }, appActive: { false },
+                                    pause: { link.transport?.drain() },
+                                    duringFlush: {
+                                        guard !bounced else { return }
+                                        bounced = true
+                                        link.disconnectForBackground()
+                                        _ = link.connectForBackground()
+                                    })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(run.ending, .synced)
+        XCTAssertEqual(link.activeBackgroundRuns, 0)
+        let fresh = try XCTUnwrap(link.session)
+        let markedAfterRun = fresh.backgroundRunOwnsSyncs
+        await drive(link) { fresh.syncsFinished > 0 }
+        for _ in 0..<200 where link.hookFlushes == 0 { await Task.yield() }
+        XCTAssertEqual(fresh.syncsFinished, 1)
+        XCTAssertFalse(markedAfterRun, "made after the watch loop: the session owns its own syncs")
+        XCTAssertEqual(fresh.lastSyncResult?.endedInBackgroundRun, false)
+        XCTAssertEqual(link.hookFlushes, 1, "the reconnected session's sync-on-connect reaches Health")
+        XCTAssertEqual(flushes.count, 1, "the run flushed only its own sync")
+    }
+
+    /// LEAK B (review-225b), the S1 neighbourhood: the budget runs out while the app is not yet active
+    /// (unlocking), so the run abandons; the person opens the app during the teardown and the
+    /// foreground's `reconnectKnown()` reconnects while the run is in its grace and Health flush. The
+    /// fake link builds that session synchronously (see LEAK A).
+    func testOpeningTheAppDuringAnAbandonedRunsTeardownFlushesTheForegroundSync() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        var active = false
+        var opened = false
+        let run = await leakService(link, store: store, flushes: { flushes.append($0) }, appActive: { active },
+                                    pause: { link.transport?.drainSteps(2) },
+                                    duringFlush: {
+                                        guard !opened else { return }
+                                        opened = true
+                                        active = true                       // scenePhase → .active
+                                        _ = link.connectForBackground()     // handleForegroundActivation → reconnectKnown()
+                                    })
+            .run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: true)
+        XCTAssertEqual(run.ending, .outOfTime)
+        XCTAssertEqual(flushes.count, 1, "the abandoned run's own flush")
+        let fresh = try XCTUnwrap(link.session)
+        let markedAfterRun = fresh.backgroundRunOwnsSyncs
+        await drive(link) { fresh.syncsFinished > 0 }
+        for _ in 0..<200 where link.hookFlushes == 0 { await Task.yield() }
+        XCTAssertEqual(fresh.syncsFinished, 1)
+        XCTAssertFalse(markedAfterRun, "the foreground's session belongs to the app")
+        XCTAssertEqual(link.hookFlushes, 1, "the foreground sync reaches Health")
+    }
+
+    /// Review-225b S-A: the session made during the run's Health flush now flushes its own sync, so
+    /// the two flushes can overlap. The later one returns empty (the writer's `isFlushing` guard) and
+    /// its rows stay pending; the next flush writes them. Nothing is written twice, nothing is lost.
+    /// The fake link builds the new session synchronously (see LEAK A).
+    func testOverlappingFlushesWriteNothingTwiceAndLoseNothing() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        let timeline = try XCTUnwrap(link.strapTimeline)
+        let writer = GuardedHealthWriter(store: store)
+        link.hookAction = { _ in await writer.flush(timeline) }
+        // While the run's save is in flight, the strap drops and comes back with ten more minutes of
+        // activity (heart rate), and the new session's own sync ends and flushes.
+        writer.duringNextSave = { [unowned self] in
+            device.fetchData[.activity] = (stamp(midnight - 3600), activityData() + (0..<10).flatMap { _ in [0x01, 0x08, 5, 60, 0, 0, 0, 0] as [UInt8] })
+            link.disconnectForBackground()
+            _ = link.connectForBackground()
+            let fresh = link.session
+            await self.drive(link) { fresh?.syncsFinished ?? 0 > 0 }
+            for _ in 0..<200 where link.hookFlushes == 0 { await Task.yield() }
+        }
+        let base = service(link, store: store, pause: { link.transport?.drain() })
+        let run = await HelioBackgroundSyncService(
+            link: base.link, keyStore: base.keyStore, observability: base.observability,
+            flush: { timeline, _, _, _ in
+                var result = HealthKitWriter.FlushResult()
+                result.samples = await writer.flush(timeline)
+                return result
+            },
+            now: base.now, pause: base.pause, grace: base.grace, appIsActive: { false })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(run.ending, .synced)
+        XCTAssertEqual(link.hookFlushes, 1, "the new session flushed its own sync")
+        XCTAssertEqual(writer.emptyBecauseBusy, 1, "…while the run's flush was saving, so it returned empty")
+
+        // Its ten new heart-rate minutes are still pending; the next flush writes exactly them.
+        let firstWrite = writer.written.count
+        let stillPending = try store.pendingHealthSamples(device: timeline, kinds: HelioHealthPolicy.healthMirroredKinds())
+        XCTAssertEqual(stillPending.filter { $0.kind == .heartRate }.count, 10)
+        let secondWrite = await writer.flush(timeline)
+        XCTAssertEqual(secondWrite, stillPending.count)
+        XCTAssertTrue(try store.pendingHealthSamples(device: timeline, kinds: HelioHealthPolicy.healthMirroredKinds()).isEmpty,
+                      "nothing lost")
+        let keys = writer.written.map { "\($0.kind.rawValue) \($0.start.timeIntervalSince1970)" }
+        XCTAssertEqual(Set(keys).count, keys.count, "nothing written twice")
+        XCTAssertEqual(writer.written.count, firstWrite + stillPending.count)
+        let stored = try store.context.fetch(FetchDescriptor<StoredSample>())
+            .filter { HelioHealthPolicy.healthMirroredKinds().map(\.rawValue).contains($0.kindRaw) && $0.value > 0 }
+        XCTAssertEqual(writer.written.count, stored.count, "every mirrored row reached the writer once")
     }
 
     // MARK: review-225 S2: overlapping runs take turns

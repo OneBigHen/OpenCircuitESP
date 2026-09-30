@@ -45,6 +45,11 @@ protocol HelioBackgroundLink: AnyObject {
     /// (`HelioSession.backgroundRunOwnsSyncs`): the run flushes Apple Health and logs them. A count,
     /// not a flag, so one run's exit can never clear another's.
     var activeBackgroundRuns: Int { get set }
+    /// True only while a run's watch loop runs (review-225b S-A): a session the link creates then is
+    /// the run's (`HelioSession.backgroundRunOwnsSyncs`), and the run flushes and logs its syncs. A
+    /// session created before or after the loop (during the run's teardown or Health flush, or once
+    /// the run is over) flushes and logs its own syncs through the connection's post-sync hook.
+    var backgroundRunAdoptsNewSessions: Bool { get set }
     /// Arm a connect to the saved strap by identifier (no scan). false when there is none.
     func connectForBackground() -> Bool
     /// End the link cleanly and don't reconnect by itself: stop a running find, ack an open round
@@ -192,6 +197,11 @@ struct HelioBackgroundSyncService {
 
         link.activeBackgroundRuns += 1
         defer { link.activeBackgroundRuns -= 1 }
+        // Review-225b S-A: sessions made from here to the end of the watch loop are this run's. The
+        // mark is dropped before anything after the loop awaits (teardown grace, Health flush), so a
+        // session made then (the app opened during an abandoned run's teardown) owns its own syncs.
+        link.backgroundRunAdoptsNewSessions = true
+        defer { link.backgroundRunAdoptsNewSessions = false }
 
         var watched: HelioSession?
         var baseline = 0
@@ -241,6 +251,7 @@ struct HelioBackgroundSyncService {
             if now() >= syncDeadline { run.ending = .outOfTime; break }
             await pause()
         }
+        link.backgroundRunAdoptsNewSessions = false
         if let syncStartedAt, run.ending == .synced { run.syncMS = Self.ms(from: syncStartedAt, to: now()) }
 
         switch run.ending {
@@ -251,6 +262,7 @@ struct HelioBackgroundSyncService {
             // hook flushes and logs it once it ends (its result is no longer the run's), so there is
             // still exactly one flush, and nothing is sent to the strap here.
             watched?.backgroundRunOwnsSyncs = false
+            link.session?.backgroundRunOwnsSyncs = false   // one made during the loop's last turn, not yet watched
             run.ending = .handedToApp
             return record(run, kind: kind)
         case .synced:
