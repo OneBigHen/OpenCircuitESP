@@ -71,14 +71,22 @@ switch is recorded (`DeviceOwnershipLog`, persisted by `DeviceOwnershipStore`), 
 stores and writes what it measured for time it owned:
 
 - the ring owns everything before the first switch, so a ring-only install is unchanged;
-- a night belongs to the device you went to bed with (decision 28a): the device chosen when its
-  in-bed window began, however late a switch lands inside it. A stored night is never replaced or
-  merged by the other device's night, whichever syncs first, so every sleep period has exactly one
-  night; the other device's is skipped (`ownedByOtherDevice`, or `ownedByOtherDeviceNoRow` when the
-  owner stored none, which the Sleep card shows as unsaved). A kept night goes to Health named its
-  owner, even where it covers the other device's minutes; the mirror's delete never reaches the other
-  device's kept night. **Don't switch while asleep** anyway: the night stays with the device you went
-  to bed with, and the new device's reading of it is not kept;
+- nights (decisions 28a, 28c):
+  - only an overnight sleep is a night. A strap sleep session must pass the ring's own overnight gate
+    (`SleepWindow.isOvernightBlock`); a daytime session gets a log line and no row, so it never takes
+    a night key (strap naps as `StoredNap` are a follow-up);
+  - the device you went to bed with keeps the night: the device chosen when its in-bed window began,
+    however late a switch lands inside it. A switch at exactly the in-bed start goes to the NEW
+    device (the switch counts as made before bed);
+  - a stored night is never replaced or merged by the other device's night;
+  - when a switch falls between the two devices' bedtimes, each device's window began under itself,
+    so whichever device syncs first keeps the night;
+  - the device that doesn't keep the night is skipped (`ownedByOtherDevice`, or
+    `ownedByOtherDeviceNoRow` when the owner stored none, which the Sleep card shows as a notice
+    instead of the ring's reading). A kept night goes to Health named its owner, even where it covers
+    the other device's minutes; the mirror's delete never reaches the other device's kept night.
+    **Don't switch while asleep** anyway: the night stays with the device you went to bed with, and
+    the new device's reading of it is not kept;
 - step rows lie wholly in their device's time (decision 28b): the ring's first quarter-hour bucket
   after a switch back is clamped to the switch, its delta kept, so it is named the ring and gets
   distance. At most the pre-switch part of that one bucket can be counted by both devices;

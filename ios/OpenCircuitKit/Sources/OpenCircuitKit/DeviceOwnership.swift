@@ -79,8 +79,9 @@ public struct DeviceOwnershipLog: Codable, Equatable, Sendable {
 
     /// Decision 28a (review-224b S-C): the device you went to bed with keeps the night. A window with
     /// a switch inside belongs to the owner just before the first switch; one without belongs to its
-    /// single owner. Both are the owner at the in-bed START. A switch at exactly that instant counts as
-    /// made before bed (`owner(at:)`'s `since <= t`). One instant both devices' windows can share
+    /// single owner. Both are the owner at the in-bed START. A switch at exactly the in-bed start goes
+    /// to the NEW device: it counts as made before bed (`owner(at:)`'s `since <= t`), the opposite of a
+    /// literal "owner just before the switch". One instant both devices' windows can share
     /// would still disagree between two different windows, so the store also never lets one device's
     /// night replace the other's (`LocalStore.nightKeeping`).
     public func owner(ofNightFrom inBedStart: Date, to inBedEnd: Date) -> Family {

@@ -85,7 +85,8 @@ final class DeviceOwnershipTests: XCTestCase {
                        "a switch an hour into the night leaves it the ring's (the midpoint rule said strap)")
         XCTAssertEqual(log.owner(ofNightFrom: t0 - 7 * 3600, to: t0 + 3600), .ringConn)
         XCTAssertEqual(log.owner(ofNightFrom: t0 + 60, to: t0 + 8 * 3600), .zeppOS, "switched before bed")
-        XCTAssertEqual(log.owner(ofNightFrom: t0, to: t0 + 8 * 3600), .zeppOS, "a switch at the in-bed instant is before bed")
+        XCTAssertEqual(log.owner(ofNightFrom: t0, to: t0 + 8 * 3600), .zeppOS,
+                       "a switch at exactly the in-bed start goes to the NEW device (made before bed)")
         log.record(.ringConn, since: t0 + 3 * 3600)   // and back, mid-night
         XCTAssertEqual(log.owner(ofNightFrom: t0 - 3600, to: t0 + 7 * 3600), .ringConn,
                        "two switches inside: the owner just before the first")
