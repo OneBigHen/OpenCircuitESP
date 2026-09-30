@@ -8,9 +8,11 @@ public struct ZeppByteReader {
     public let bytes: [UInt8]
     public private(set) var offset: Int
 
+    /// An offset outside `0...bytes.count` is clamped, so a reader built past the end is simply at
+    /// the end: every read returns nil, and `take(0)` returns `[]`.
     public init(_ bytes: [UInt8], offset: Int = 0) {
         self.bytes = bytes
-        self.offset = max(0, offset)
+        self.offset = min(max(0, offset), bytes.count)
     }
 
     public init(_ bytes: ArraySlice<UInt8>) {
