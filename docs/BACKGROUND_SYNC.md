@@ -156,6 +156,47 @@ Reading it: submits ok + pending requests but no `handler INVOKED` line ⇒ iOS 
 with no matching sync outcome ⇒ the wake fired but the drain didn't finish. The Diagnostics screen
 also has a **"Reschedule & probe background tasks"** button to force a submit+probe on demand.
 
+### B.5 The Amazfit Helio Strap (#215 phase 4)
+
+With the strap chosen (`ActiveDeviceChoiceStore`), the same wakes drive the strap instead of the
+ring. **No new background modes, no new BGTask identifiers, no `Info.plist` change.**
+`BackgroundDrain` picks the chosen device's drain from UserDefaults before either driver is
+touched, so a strap wake never constructs the ring's scanner or central, and a ring wake never
+touches the strap's connection.
+
+| Wake | Strap path | Where |
+|---|---|---|
+| BGAppRefreshTask / BGProcessingTask (the two existing ids) | `HelioBackgroundSyncService.run` (28 s / 150 s budgets, as the ring) | `AppDelegate.handleStrap`; `Background/HelioBackgroundSyncService.swift` |
+| Sleep Focus ending | the same run, short window, the strap's nights finalized (skip the 20-min margin, as the ring's `sleepFinalized`) | `SleepFocusSyncRunner.runStrap` |
+| CoreBluetooth state restoration | `HelioConnection`'s own central (restore id `com.standardsoftwaresolutions.opencircuit.helio`) re-adopts the strap; a session that connects syncs on connect and flushes Health itself | `Helio/HelioConnection.swift` |
+
+One run: connect by identifier if the link isn't up (never a scan) → auth with the Keychain key
+(`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`) → clock → fetch, every round acked `03 09`
+and committed to `LocalStore` as it arrives → Health flush → one run-log line.
+
+Safety invariants specific to the strap:
+- **Budget.** The fetch gets the task's window minus an 8 s flush reserve. Out of time, or iOS
+  expires the task: the open round is acked `03 09`, committed rows stay, the link is dropped
+  (a running find gets its `06` first) and the rest stays on the strap. An expiry skips the Health
+  flush; the task is completed only after that teardown (or 2 s after the expiry at the latest).
+- **Key states (decision 7).** No key, a rejected key or a strap that ended "busy" end the run
+  before any radio work; a session that turns out keyless, rejected, busy or unsupported ends it.
+  No retry, no store or Health write, and the run log says why.
+- **The link after a finished run** stays up (idle, authenticated, standing reconnect armed):
+  re-arming a fresh connect, as the ring does, would reconnect a strap in range at once and fetch
+  everything a second time. A strap out of range keeps its pending connect armed for restoration.
+- **Find stop across processes.** "A find may be running" is persisted (`helio.findStopOwed.v1`),
+  so a process the system ends mid-find still sends the `06` on its next connection.
+- **One container.** Every background site resolves its store through
+  `OpenCircuitApp.sharedOrFallbackContainer()` (#222 review Q2 + U2).
+
+Observability (B.4): each run records `recordSyncOutcome(kind:)` with a detail starting
+`helio strap:` (e.g. `helio strap: synced; 9 round(s) stored, 0 failed, 1 night(s); Health
+samples=…`, `helio strap: key rejected; not retrying`, `helio strap: out of time; open round kept
+on the strap (03 09), disconnected`) and a `bgphase` breadcrumb starting `device=helio`. A strap
+sync that ends in the background outside a task (restoration, a reconnect while suspended) is
+logged as `backgroundSync` with a `helio:` detail.
+
 ---
 
 ## Part C — On-device validation runbook
@@ -178,6 +219,7 @@ and watch the observability log (`ObservabilityStore.recordScheduled` / `recordS
 | `bgLastScheduled` present after a wake / `recordSyncOutcome(kind:)` entry | a BGTask actually ran (the exact #119 regression: this was *absent* for weeks) |
 | `willRestoreState` re-adopts the ring | CB state-restoration relaunch fired |
 | `captureForBackground` drain → `recordHealthWrite` | the wake drove a real reconnect + drain + HealthKit write with the app never foregrounded |
+| a `helio strap:` run-log line / `bgphase device=helio …` | the strap's run (B.5) fired; the line says how it ended |
 
 For the official RingConn app, use `log stream --predicate 'process == "Runner"'` and watch for
 `[BackgroundFetch] Event received`, `willRestoreState`, `BGProcessingTask submitted`,
