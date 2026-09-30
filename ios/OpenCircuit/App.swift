@@ -46,6 +46,8 @@ struct OpenCircuitApp: App {
                 .task { WorkoutLiveActivityController.endOrphanedActivitiesAtLaunch() }
         }
         .modelContainer(container)
+        // The one active wearable (#214, docs/DEVICE_SEAM.md) — today always the ring session.
+        .environment(ActiveWearable.shared)
         // (Re)submit the BGTask requests on every backgrounding (#119). This is the scene-based
         // replacement for `applicationDidEnterBackground`, which iOS does NOT deliver to a
         // SwiftUI-lifecycle app — relying on it meant no request was EVER submitted, so no
