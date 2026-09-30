@@ -35,6 +35,11 @@ final class TodaySynthesisTests: XCTestCase {
                        "Your newest ring data is 3 days old, so sync your ring to bring today's summary up to date.")
     }
 
+    func testBeyondTheLookbackIsNotCounted() {
+        XCTAssertEqual(say(newest: now.addingTimeInterval(-14 * 86_400)),
+                       "Your newest ring data is more than two weeks old, so sync your ring to bring today's summary up to date.")
+    }
+
     func testThirtyFiveHoursIsNotStale() {
         XCTAssertEqual(say(newest: now.addingTimeInterval(-35 * 3600)), "Working out today's readiness.")
     }

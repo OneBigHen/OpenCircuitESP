@@ -23,6 +23,12 @@ struct TrendsData {
     var goalDays: [GoalHistory.Day] = []
     /// Streak / met-count roll-up over `goalDays`.
     var goalSummary: GoalHistory.Summary = GoalHistory.summarize([], now: Date())
+    /// Per-day resting HR over the same window (`RestingHR.dailyValues`, the derivation Vitals Status
+    /// uses), oldest first — the Today tab's Resting HR tile (#216). `DailyPoint` carries no resting HR.
+    var restingHR: [RestingHR.DailyValue] = []
+    /// Start time of the newest stored ring reading of any kind in the window, or nil when there is
+    /// none — what the Today synthesis line judges freshness by (#216).
+    var newestSampleAt: Date?
 
     static let lookbackDays = 14
 
@@ -100,8 +106,20 @@ struct TrendsData {
         let points = await Task.detached { computePoints(inputs) }.value
         let goalDays = await Task.detached { computeGoalDays(inputs, points: points) }.value
         let recentRows = await buildRecentMetricRows(inputs)
+        let restingHR = await Task.detached {
+            RestingHR.dailyValues(hr: inputs.hr.filter { $0.value > 0 }
+                .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) })
+        }.value
         return TrendsData(points: points, recentRows: recentRows,
-                          goalDays: goalDays, goalSummary: GoalHistory.summarize(goalDays, now: Date()))
+                          goalDays: goalDays, goalSummary: GoalHistory.summarize(goalDays, now: Date()),
+                          restingHR: restingHR, newestSampleAt: newestSample(inputs))
+    }
+
+    /// Newest reading start across every series the window fetched.
+    nonisolated private static func newestSample(_ i: Inputs) -> Date? {
+        let starts: [Date?] = [i.hr.last?.start, i.hrv.last?.start, i.spo2.last?.start, i.rr.last?.start,
+                               i.temps.map(\.time).max(), i.stepDeltas.map(\.end).max()]
+        return starts.compactMap { $0 }.max()
     }
 
     /// Off-main fetch + extraction into the `Sendable` `Inputs` snapshot.

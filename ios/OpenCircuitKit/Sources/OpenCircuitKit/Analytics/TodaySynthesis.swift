@@ -77,7 +77,8 @@ public enum TodaySynthesis {
         let age = input.now.timeIntervalSince(newest)
         if age > staleAfter {
             let days = Int(age / 86_400)
-            let howOld = days <= 1 ? "over a day old" : "\(days) days old"
+            // The app only looks back two weeks, so it can't honestly name an age past that.
+            let howOld = days <= 1 ? "over a day old" : days >= 14 ? "more than two weeks old" : "\(days) days old"
             return "Your newest ring data is \(howOld), so sync your ring to bring today's summary up to date."
         }
 
