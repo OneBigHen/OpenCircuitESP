@@ -259,6 +259,8 @@ struct HelioBackgroundSyncService {
         case .outOfTime, .expired:
             // The teardown's writes get their moment on the radio before anything else runs.
             if abandon() { await grace() }
+            // Review-225 N4: iOS may expire the task during that grace; then no flush follows.
+            if Task.isCancelled { run.ending = .expired }
             if let watched, watched.syncsFinished > baseline, let result = watched.lastSyncResult { run.result = result }
         case .handedToApp, .anotherRunActive:
             // Both return above; neither may touch a link another party is using.

@@ -1222,6 +1222,28 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertNotEqual(flushes[0].syncAtFlush, flushes[1].syncAtFlush, "the two flushes never share a sync")
     }
 
+    func testAnExpiryDuringTheTeardownGraceSkipsTheFlush() async throws {
+        // Review-225 N4: the budget ran out (abandon + grace), and iOS expires the task inside the
+        // grace. No Health flush may follow.
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let base = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(2) })
+        let expiringInGrace = HelioBackgroundSyncService(
+            link: base.link, keyStore: base.keyStore, observability: base.observability, flush: base.flush,
+            now: base.now, pause: base.pause,
+            grace: { withUnsafeCurrentTask { $0?.cancel() } },
+            appIsActive: base.appIsActive)
+        let run = await Task { @MainActor in
+            await expiringInGrace.run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        }.value
+        XCTAssertEqual(run.ending, .expired)
+        XCTAssertEqual(link.disconnects, 1)
+        XCTAssertTrue(flushes.isEmpty, "no flush after iOS ended the task")
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+    }
+
     func testAStrapOutOfRangeKeepsThePendingConnectArmed() async throws {
         let store = try makeStore()
         let link = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
