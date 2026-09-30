@@ -27,4 +27,33 @@ extension HealthKitWriter {
         Self.hkDevice(HealthDeviceAttribution.fields(for: ActiveWearable.shared.identityForHealthWrite(),
                                                      origin: .device))
     }
+
+    /// The `HKDevice` for rows on `timeline` (decision 28, #215: attribution follows the row, never
+    /// the current choice).
+    func wearableDevice(forTimeline timeline: SyncDeviceID) -> HKDevice? {
+        Self.hkDevice(HealthDeviceAttribution.fields(for: ActiveWearable.shared.identityForHealthWrite(timeline: timeline),
+                                                     origin: .device))
+    }
+
+    /// The `HKDevice` for an untagged row at `date`: the device that owned `date`. For a ring-only
+    /// install, identical to `activeWearableDevice()` with the ring chosen.
+    func wearableDevice(ownerAt date: Date) -> HKDevice? {
+        Self.hkDevice(HealthDeviceAttribution.fields(for: ActiveWearable.shared.identityForHealthWrite(at: date),
+                                                     origin: .device))
+    }
+
+    /// Resolves owners once per family for a batch of untagged rows (a flush can carry thousands).
+    @MainActor
+    struct OwnerDeviceCache {
+        private var cache: [DeviceOwnershipLog.Family: HKDevice?] = [:]
+        private let log = LocalStore.ownershipLog()
+
+        mutating func device(at date: Date, writer: HealthKitWriter) -> HKDevice? {
+            let family = log.owner(at: date)
+            if let hit = cache[family] { return hit }
+            let resolved = writer.wearableDevice(ownerAt: date)
+            cache[family] = resolved
+            return resolved
+        }
+    }
 }

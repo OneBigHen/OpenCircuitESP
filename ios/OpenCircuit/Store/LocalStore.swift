@@ -800,6 +800,10 @@ struct LocalStore {
         self.ownedContainer = nil
     }
 
+    /// Decision 28 (#215): which device owns which time. Empty for a ring-only install, and then every
+    /// ownership rule in this store is a no-op. Replaceable only by tests.
+    static var ownershipLog: @MainActor () -> DeviceOwnershipLog = { DeviceOwnershipStore.shared.log }
+
     /// A store over `container`'s main context that keeps `container` alive for as long as this
     /// store, or any copy of it, exists.
     init(container: ModelContainer) {
@@ -1230,6 +1234,17 @@ struct LocalStore {
         try context.fetch(Self.samplesDescriptor(kind: kind, from: start, to: end)).compactMap(\.sample)
     }
 
+    /// Stored samples of one kind within `[start, end)` that were recorded by the device owning their
+    /// time (decision 28), oldest→newest: the input for derived values (resting HR, energy, exercise
+    /// minutes), so a catch-up recorded for the other device's time never feeds them. Equal to
+    /// `samples(kind:from:to:)` for a ring-only install.
+    func ownedSamples(kind: MetricKind, from start: Date, to end: Date) throws -> [QuantitySample] {
+        let log = Self.ownershipLog()
+        let rows = try context.fetch(Self.samplesDescriptor(kind: kind, from: start, to: end))
+        guard !log.isEmpty else { return rows.compactMap(\.sample) }
+        return rows.filter { log.owns(SyncDeviceID(rawValue: $0.deviceID), at: $0.start) }.compactMap(\.sample)
+    }
+
     /// Stored samples of one kind newer than `since`, oldest→newest. Bounded by the predicate so
     /// it never scans all history — used by the health-alert engine (#73/#85) to evaluate recent
     /// HR/SpO2 readings against the user's thresholds.
@@ -1292,6 +1307,13 @@ struct LocalStore {
                 },
                 sortBy: [SortDescriptor(\.start, order: .forward)])
             out += try context.fetch(descriptor).compactMap(\.sample)
+        }
+        // Decision 28: only time `device` owned reaches Apple Health. What it recorded for the other
+        // device's time (the ring's catch-up after a switch back) stays in the app. A no-op for a
+        // ring-only install (empty log: the ring owns all time).
+        let log = Self.ownershipLog()
+        if !(log.isEmpty && device == .ringConn) {
+            out = out.filter { log.owns(device, at: $0.start) }
         }
         return out.sorted { $0.start < $1.start }
     }
@@ -1649,11 +1671,23 @@ struct LocalStore {
     func saveSleepSummary(_ summary: SleepStaging.Summary, night: Date,
                           inBedStart: Date, inBedEnd: Date,
                           sleepOnset: Date = .distantPast, sleepWake: Date = .distantPast,
-                          extras: SleepNightExtras = SleepNightExtras()) throws -> SleepPersistOutcome {
+                          extras: SleepNightExtras = SleepNightExtras(),
+                          device: SyncDeviceID = .ringConn) throws -> SleepPersistOutcome {
         // Before the FIRST write under the new key — see `ensureNightKeyMigrated`. A failed
         // migration DEFERS the write rather than filing it under a scheme the rest of the table has
         // not adopted; the epochs survive in the archive and the next drain re-stages them.
         guard ensureNightKeyMigrated() else { throw StoreError.nightKeyMigrationPending }
+        // Decision 28 (#215): a night belongs to the device that owned the midpoint of its in-bed
+        // window. Another device's staging of it is not stored (no-op for a ring-only install).
+        let ownership = Self.ownershipLog()
+        if !ownership.isEmpty,
+           ownership.owner(ofNightFrom: inBedStart, to: inBedEnd) != DeviceOwnershipLog.Family(timeline: device) {
+            ObservabilityStore().recordMetricEvent(
+                source: "sleep-drop",
+                detail: "night=\(Self.stamp(Calendar.current.startOfDay(for: night))) device=\(DeviceOwnershipLog.Family(timeline: device).rawValue) "
+                    + "reason=owned-by-other-device")
+            return .ownedByOtherDevice
+        }
         let dayStart = Calendar.current.startOfDay(for: night)
         let m = summary.minutes
         // ⚠️ IDENTITY IS THE SPAN; THE KEY IS ONLY AN INDEX. Resolve by in-bed OVERLAP before falling
@@ -2937,6 +2971,8 @@ struct LocalStore {
         // to be a night on its own) would otherwise re-save a "nap" the archive-union staging
         // absorbs into the night (🟢 2026-08-16 device case; review find).
         if overlapsStoredNight(start, end) { return }
+        // Decision 28: the ring detects naps; one in time the strap owned is not the ring's to store.
+        if !Self.ownershipLog().owns(.ringConn, at: DeviceOwnershipLog.midpoint(start, end)) { return }
         let descriptor = FetchDescriptor<StoredNap>(predicate: #Predicate { $0.start == start })
         if let existing = try? context.fetch(descriptor).first {
             // A manually edited/added nap is authoritative — auto re-detection must not overwrite it.
@@ -3084,7 +3120,15 @@ struct LocalStore {
         let descriptor = FetchDescriptor<StoredNap>(
             predicate: #Predicate { $0.healthWritten == false },
             sortBy: [SortDescriptor(\.start, order: .forward)])
-        return try context.fetch(descriptor)
+        let naps = try context.fetch(descriptor)
+        // Decision 28: a detected nap in time the ring didn't own never reaches Apple Health. A nap
+        // the person added or edited is theirs, whatever device was chosen. No-op for ring-only.
+        let log = Self.ownershipLog()
+        guard !log.isEmpty else { return naps }
+        return naps.filter { nap in
+            nap.isManuallyAdded || nap.isManuallyEdited
+                || log.owns(.ringConn, at: DeviceOwnershipLog.midpoint(nap.effectiveStart, nap.effectiveEnd))
+        }
     }
 
     /// Mark a nap written to Apple Health so it isn't written again, RECORDING THE SPAN so a later
@@ -3124,6 +3168,9 @@ struct LocalStore {
     /// own bucket so a delta is never smeared back over hours it cannot cover.
     func addDailySteps(_ delta: Int, day: Date = Date(), windowStart: Date? = nil) throws {
         guard delta > 0 else { return }
+        // Decision 28 (defensive): the ring's steps for time the strap owned stay out of the day's
+        // totals and Apple Health. No-op for a ring-only install.
+        guard Self.ownershipLog().owns(.ringConn, at: day) else { return }
         let dayStart = Calendar.current.startOfDay(for: day)
         let descriptor = FetchDescriptor<StoredDaily>(predicate: #Predicate { $0.day == dayStart })
         if let existing = try? context.fetch(descriptor).first {

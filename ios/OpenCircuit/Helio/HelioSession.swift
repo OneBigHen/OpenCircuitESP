@@ -53,6 +53,9 @@ struct HelioSyncResult: Equatable {
     var latestPAI: HelioReading?
     /// The sync ended early (link lost, or no progress for too long).
     var interrupted = false
+    /// The strap's identity when the sync ended, so its Health flush names the strap even if the
+    /// person switched devices meanwhile (review-224 S3: attribution follows the row).
+    var identity: WearableIdentity?
 }
 
 /// Where fetched rounds go. `HelioStoreSink` is the `LocalStore` implementation.
@@ -60,6 +63,8 @@ struct HelioSyncResult: Equatable {
 protocol HelioHistorySink: AnyObject {
     /// Each type's persisted watermark on `timeline`.
     func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date]
+    /// No fetch starts before this (decision 28: the strap's current ownership start).
+    func notBefore(timeline: SyncDeviceID, now: Date) -> Date?
     func beginSync(timeline: SyncDeviceID, now: Date)
     /// Store one round and advance its type's watermark. true only when both are durably saved.
     func persist(_ round: ZeppFetchRound, timeline: SyncDeviceID, now: Date) -> Bool
@@ -705,7 +710,8 @@ final class HelioSession: WearableSession {
     private func startFetch() {
         guard let sink else { return finishFetch(interrupted: true) }
         let now = clock()
-        let plan = HelioFetchPlan.plan(cursors: sink.fetchCursors(timeline: timeline), now: now)
+        let plan = HelioFetchPlan.plan(cursors: sink.fetchCursors(timeline: timeline), now: now,
+                                       notBefore: sink.notBefore(timeline: timeline, now: now))
         sink.beginSync(timeline: timeline, now: now)
         syncCounts = (0, 0, 0)
         var machine = ZeppHistoryFetch(plan: plan, now: now, configuration: .init(ackPolicy: Self.ackPolicy))
@@ -753,6 +759,7 @@ final class HelioSession: WearableSession {
         result.roundsFailed = syncCounts.failed
         result.typesEmpty = syncCounts.empty
         result.interrupted = interrupted
+        result.identity = identity
         let now = clock()
         lastSyncResult = result
         if let today = result.todaySteps { steps = today }

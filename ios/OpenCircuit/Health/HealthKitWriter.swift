@@ -425,7 +425,7 @@ final class HealthKitWriter {
         // write is SPLIT per metric (#132): a single denied type (e.g. SpO₂) no longer sinks the
         // whole batch — the granted metrics still land and only the denied one is left pending.
         if let pending = try? store.pendingHealthSamples(device: device, kinds: mirroredKinds), !pending.isEmpty {
-            let outcome = await write(pending)
+            let outcome = await write(pending, timeline: device)
             if !outcome.written.isEmpty {
                 try? store.markHealthWritten(outcome.written, device: device)   // advance ONLY for what actually saved
                 result.samples = outcome.written.count
@@ -441,7 +441,11 @@ final class HealthKitWriter {
         // staging. `mirrorSettledNight` fixes that: it delete-and-replaces the night whenever the
         // current staging differs from what was last mirrored (a no-op when nothing changed), so
         // Apple Health tracks the card up AND down.
-        if SleepHealthGate.isReadyToWrite(latestSegmentEnd: sleepSegments.map(\.end).max(),
+        // Decision 28 (#215): these are the RING's segments; a night whose in-bed midpoint the strap
+        // owned is the strap's, and the ring's catch-up of it must not replace it in Health.
+        // (`ringOwnsNight` is always true for a ring-only install.)
+        if Self.ringOwnsNight(sleepSegments),
+           SleepHealthGate.isReadyToWrite(latestSegmentEnd: sleepSegments.map(\.end).max(),
                                           now: Date(), finalized: sleepFinalized) {
             switch await mirrorSettledNight(local: store, segments: sleepSegments) {
             case .wrote(let count):
@@ -567,7 +571,11 @@ final class HealthKitWriter {
             // by `commitDistanceGPSCredit`, which we defer until distance actually writes.
             var distanceSamples: [QuantitySample] = []
             var gpsCommits: [(reduction: Double, day: Date)] = []
-            let byDay = Dictionary(grouping: pending) { Calendar.current.startOfDay(for: $0.end) }
+            // Decision 28 / review-224 N1: the distance estimate is the RING's per-step constant, so it
+            // is derived only from step rows the ring owned (every row, for a ring-only install).
+            let ownership = LocalStore.ownershipLog()
+            let ringRows = ownership.isEmpty ? pending : pending.filter { ownership.owner(at: $0.start) == .ringConn }
+            let byDay = Dictionary(grouping: ringRows) { Calendar.current.startOfDay(for: $0.end) }
             for (day, rows) in byDay {
                 let dayDelta = rows.reduce(0) { $0 + $1.delta }
                 let rawDistanceM = DistanceEstimate.meters(steps: dayDelta)
@@ -1137,14 +1145,20 @@ final class HealthKitWriter {
     /// no longer sinks the whole batch — the granted metrics still reach Health and only the denied
     /// kind is reported as failed and left pending (#132). Non-throwing: failures are returned, not
     /// raised, so the caller can advance watermarks per surviving kind.
-    func write(_ samples: [QuantitySample]) async -> ScalarWriteOutcome {
+    ///
+    /// Attribution follows the row (decision 28, #215): samples of a device's timeline (`timeline`)
+    /// name that device; untagged samples (steps, distance) name the device that owned their start.
+    /// For a ring-only install both are exactly the connected ring, as before.
+    func write(_ samples: [QuantitySample], timeline: SyncDeviceID? = nil) async -> ScalarWriteOutcome {
         var outcome = ScalarWriteOutcome()
         let byKind = Dictionary(grouping: samples, by: \.kind)
-        let device = activeWearableDevice()
+        let tagged: HKDevice? = timeline.flatMap { wearableDevice(forTimeline: $0) }
+        var owners = OwnerDeviceCache()
         for (kind, group) in byKind {
             let hk: [HKQuantitySample] = group.compactMap { s in
                 guard let type = Self.quantityType(for: s.kind) else { return nil }
                 let q = HKQuantity(unit: Self.unit(for: s.kind), doubleValue: s.value)
+                let device = timeline == nil ? owners.device(at: s.start, writer: self) : tagged
                 return HKQuantitySample(type: type, quantity: q, start: s.start, end: s.end,
                                         device: device, metadata: Self.metadata(for: s.kind))
             }
@@ -1207,7 +1221,7 @@ final class HealthKitWriter {
             quantity: quantity,
             start: date,
             end: date.addingTimeInterval(3600),
-            device: activeWearableDevice(),
+            device: wearableDevice(ownerAt: date),
             metadata: [Self.basalEnergyEstimateMetadataKey: true,
                        Self.basalEnergyRHRAdjustedMetadataKey: adjusted,
                        HKMetadataKeyWasUserEntered: false]
@@ -1250,7 +1264,7 @@ final class HealthKitWriter {
         guard let sample = Self.activeEnergySample(kcal: kcal,
                                                    start: window.start,
                                                    end: window.end,
-                                                   device: activeWearableDevice()) else { return false }
+                                                   device: wearableDevice(ownerAt: window.start)) else { return false }
         try await store.save(sample)
         return true
     }
@@ -1263,9 +1277,10 @@ final class HealthKitWriter {
     /// atomic, so the marks are only ever committed against a save that fully succeeded.
     @discardableResult
     func writeActiveCalories(_ writes: [ActiveEnergyLedger.Write]) async throws -> Bool {
-        let device = activeWearableDevice()
+        var owners = OwnerDeviceCache()
         let samples = writes.compactMap {
-            Self.activeEnergySample(kcal: $0.kcal, start: $0.start, end: $0.end, device: device)
+            Self.activeEnergySample(kcal: $0.kcal, start: $0.start, end: $0.end,
+                                    device: owners.device(at: $0.start, writer: self))
         }
         guard !samples.isEmpty else { return false }
         try await store.save(samples)
@@ -1278,7 +1293,7 @@ final class HealthKitWriter {
         let q = HKQuantity(unit: Self.unit(for: .restingHeartRate), doubleValue: bpm)
         let sample = HKQuantitySample(type: HKQuantityType(.restingHeartRate),
                                       quantity: q, start: day, end: day,
-                                      device: activeWearableDevice(), metadata: nil)
+                                      device: wearableDevice(ownerAt: day), metadata: nil)
         try await store.save(sample)
     }
 
@@ -1427,7 +1442,8 @@ final class HealthKitWriter {
         let cal = Calendar.current
         let from = cal.date(byAdding: .day, value: -lookbackDays, to: cal.startOfDay(for: now))
             ?? now.addingTimeInterval(-Double(lookbackDays) * 86_400)
-        guard let stored = try? local.samples(kind: .heartRate, from: from, to: now),
+        // Decision 28: only HR recorded by the device that owned its time feeds derived values.
+        guard let stored = try? local.ownedSamples(kind: .heartRate, from: from, to: now),
               !stored.isEmpty else { return [] }
         return stored.map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
     }
@@ -1578,7 +1594,7 @@ final class HealthKitWriter {
         // Use the same elevated-HR duration + Keytel energy estimate as the dashboard rings. This
         // keeps Health mirroring from reviving the old contradiction where moderate HR earned
         // exercise minutes but zero HR calories. Sleep is excluded before either value is derived.
-        let hr = (try? local.samples(kind: .heartRate, from: today, to: now)) ?? []
+        let hr = (try? local.ownedSamples(kind: .heartRate, from: today, to: now)) ?? []   // decision 28
         let hrSamples = hr.map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
         let steps = (try? local.todaySteps(day: today)) ?? 0
         let sleepWindow: DateInterval? = (try? local.latestSleepSummary()).flatMap { s in
@@ -1841,7 +1857,7 @@ final class HealthKitWriter {
         var writtenMin = defaults.double(forKey: Self.exerciseWrittenKey)
         if cal.startOfDay(for: storedDay) != today { writtenMin = 0 }
 
-        guard let rawSamples = try? local.samples(kind: .heartRate, from: today, to: now),
+        guard let rawSamples = try? local.ownedSamples(kind: .heartRate, from: today, to: now),   // decision 28
               !rawSamples.isEmpty else {
             defaults.set(today.timeIntervalSince1970, forKey: Self.exerciseDayKey)
             defaults.set(writtenMin, forKey: Self.exerciseWrittenKey)
@@ -1896,7 +1912,7 @@ final class HealthKitWriter {
 
     /// Write a night as contiguous sleepAnalysis category samples (mapping notes).
     func write(sleep segments: [SleepSegment]) async throws {
-        let samples = Self.sleepSamples(segments, device: activeWearableDevice(), site: "write(sleep:)")
+        let samples = Self.sleepSamples(segments, device: nightDevice(segments), site: "write(sleep:)")
         guard !samples.isEmpty else { return }
         try await store.save(samples)
     }
@@ -1913,11 +1929,26 @@ final class HealthKitWriter {
     func writeReturningSleepUUIDs(_ segments: [SleepSegment],
                                   userEntered: Bool = false) async throws -> [String] {
         let samples = Self.sleepSamples(segments, allUserEntered: userEntered,
-                                        device: activeWearableDevice(),
+                                        device: nightDevice(segments),
                                         site: "writeReturningSleepUUIDs")
         guard !samples.isEmpty else { return [] }
         try await store.save(samples)
         return samples.map { $0.uuid.uuidString }
+    }
+
+    /// The device a night's samples name: the owner at the midpoint of its span (decision 28). For a
+    /// ring-only install, the connected ring, as before.
+    private func nightDevice(_ segments: [SleepSegment]) -> HKDevice? {
+        guard let start = segments.map(\.start).min(), let end = segments.map(\.end).max() else {
+            return wearableDevice(ownerAt: Date())
+        }
+        return wearableDevice(ownerAt: DeviceOwnershipLog.midpoint(start, end))
+    }
+
+    /// Whether the ring owned the midpoint of these segments' span (always true for an empty log).
+    static func ringOwnsNight(_ segments: [SleepSegment]) -> Bool {
+        guard let start = segments.map(\.start).min(), let end = segments.map(\.end).max() else { return true }
+        return LocalStore.ownershipLog().owner(ofNightFrom: start, to: end) == .ringConn
     }
 
     /// Build the category samples for one night from the publication split — the ONE place the
@@ -2447,7 +2478,7 @@ final class HealthKitWriter {
     func writeBPEstimate(sbp: Double, dbp: Double, at date: Date) async -> Bool {
         let metadata: [String: Any] = ["OpenCircuitBPSource": "RingPPGCalibration"]
         let mmHg = HKUnit.millimeterOfMercury()
-        let device = activeWearableDevice()
+        let device = wearableDevice(ownerAt: date)
         let systolic = HKQuantitySample(
             type: Self.systolicType,
             quantity: HKQuantity(unit: mmHg, doubleValue: sbp),

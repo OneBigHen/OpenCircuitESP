@@ -62,6 +62,26 @@ rules are in `ZeppKit/HelioSyncPolicy.swift`, tested by `HelioSyncPolicyTests`.
 | HRV (`0x49`) | `.hrvSDNN` (local only) | **no** (`HelioHealthPolicy.writesHRV = false`): the statistic is unverified |
 | Sleep (`0x48`) | the strap's own stages → Sleep summary + hypnogram; no invented in-bed span | yes, through `mirrorSettledNight`; a manually edited night is never overwritten. No `SleepStaging` fallback yet (DECISION-GAP, see `HelioSleepSelection`) |
 | Stress (`0x13`), PAI (`0x0d`) | shown in the app only | no Health type |
+| Walking + running distance | — | **no**: the ring's distance is its own per-step estimate, so it is derived only from step rows the RING owned (decision 28). The strap sends no distance history and its steps get none |
+
+#### Who owns which time (decision 28)
+
+A wearer can switch between the ring and the strap, and both record the same sleep and steps. Each
+switch is recorded (`DeviceOwnershipLog`, persisted by `DeviceOwnershipStore`), and a device only
+stores and writes what it measured for time it owned:
+
+- the ring owns everything before the first switch, so a ring-only install is unchanged;
+- a night belongs to the device that owned the midpoint of its in-bed window;
+- the strap fetches nothing older than the start of its current ownership (`HelioFetchPlan`'s
+  `notBefore`), except on an install that never had a ring, where its first ownership starts in the
+  distant past and the first sync is the normal backfill;
+- the ring's catch-up after a switch back stores its rows for the strap's window locally, but none
+  of them is pending for Apple Health and no night is saved from them;
+- resting HR, active/basal energy and exercise minutes use only HR from the device that owned it;
+- every write names the device of its ROW: a timeline's rows name that timeline's device, untagged
+  rows (steps, sleep, naps, derived values) name the device that owned their start (a night: its
+  midpoint). A strap sync flushed after a switch back to the ring still names the strap, or writes
+  nothing when the strap never passed the first-write guard.
 
 ## User-entered logs
 

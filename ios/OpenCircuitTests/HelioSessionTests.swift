@@ -193,8 +193,15 @@ final class HelioSessionTests: XCTestCase {
     private var containers: [ModelContainer] = []
     private var clock = testNow
     private let strapID = "5B1E4C2A-0000-4000-8000-0000000000A1"
+    private let ownership = OwnershipOverride()
+
+    override func setUp() {
+        super.setUp()
+        ownership.install(.strapOwnsAllTime)   // a strap-only install (decision 28's first entry)
+    }
 
     override func tearDown() {
+        ownership.restore()
         containers.removeAll()
         super.tearDown()
     }
@@ -569,6 +576,17 @@ final class HelioSessionTests: XCTestCase {
 @MainActor
 final class HelioKeyStoreTests: XCTestCase {
     private let suite = "test.HelioKeyStoreTests"
+    private let ownership = OwnershipOverride()
+
+    override func setUp() {
+        super.setUp()
+        ownership.install(.strapOwnsAllTime)
+    }
+
+    override func tearDown() {
+        ownership.restore()
+        super.tearDown()
+    }
 
     func testTheKeychainRoundTripsAndForgets() throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

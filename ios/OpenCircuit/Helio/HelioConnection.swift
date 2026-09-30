@@ -266,11 +266,29 @@ final class HelioConnection: NSObject {
         observability.recordSyncOutcome(kind: .foreground, success: !result.interrupted && result.roundsFailed == 0,
                                         detail: "helio: \(result.roundsStored) round(s) stored, \(result.roundsFailed) failed, \(result.nights.count) night(s)")
         guard let store, HealthKitWriter.isAvailable else { return }
+        // Decision 28 (review-224 S3): record the identity the sync ended with, so this flush — and
+        // any later one for these rows — names THIS strap even if the wearer has switched back to
+        // the ring meanwhile. A strap that never passed the first-write guard writes nothing once
+        // it's no longer chosen; its rows stay pending for its next sync.
+        if let identity = result.identity { ActiveWearable.shared.recordIdentity(identity) }
+        guard mayFlush(timeline: timeline, strapChosen: ActiveDeviceChoiceStore.shared.isHelio,
+                       wearable: ActiveWearable.shared) else {
+            helioLog.notice("helio: Health flush skipped: switched away before the strap had an identity")
+            return
+        }
         let flush = await HealthKitWriter().flushToHealth(
             store: store, device: timeline, mirroredKinds: HelioHealthPolicy.healthMirroredKinds(),
             strapNights: result.nights.map(\.segments))
         if flush.wroteAnything { observability.recordHealthWrite() }
         helioLog.notice("helio: Health flush samples=\(flush.samples, privacy: .public) sleep=\(flush.sleepSegments, privacy: .public) steps=\(flush.steps, privacy: .public) rhr=\(flush.restingDays, privacy: .public)")
+    }
+
+    /// Whether a strap sync's flush may write (decision 28, review-224 S3). Attribution follows the
+    /// row: the strap's rows name the strap. While the strap is chosen that follows the first-write
+    /// guard (#222: no identity yet → no device attached); once it isn't, a write with no identity
+    /// would be anonymous rows from a device the wearer has left, so nothing is written.
+    static func mayFlush(timeline: SyncDeviceID, strapChosen: Bool, wearable: ActiveWearable) -> Bool {
+        strapChosen || wearable.identityForHealthWrite(timeline: timeline) != nil
     }
 
     private func known(_ characteristic: CBCharacteristic) -> ZeppCharacteristic? {

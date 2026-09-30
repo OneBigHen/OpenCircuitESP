@@ -1,5 +1,7 @@
 import Foundation
 import Observation
+import OpenCircuitKit
+import SwiftData
 
 /// Which wearable the app drives (#215, decision 1): ONE at a time. The inactive device is not
 /// scanned for, connected or synced. Switching keeps both devices' stored history, because every
@@ -32,9 +34,15 @@ final class ActiveDeviceChoiceStore {
 
     private(set) var current: ActiveDeviceChoice
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let ownership: DeviceOwnershipStore
+    @ObservationIgnored private let neverHadRing: @MainActor () -> Bool
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, ownership: DeviceOwnershipStore? = nil,
+         neverHadRing: (@MainActor () -> Bool)? = nil) {
         self.defaults = defaults
+        // A store over its own defaults (a test's suite) records its switches there too.
+        self.ownership = ownership ?? (defaults === UserDefaults.standard ? .shared : DeviceOwnershipStore(defaults: defaults))
+        self.neverHadRing = neverHadRing ?? { DeviceOwnershipStore.installNeverHadRing() }
         current = Self.persisted(defaults)
     }
 
@@ -42,9 +50,64 @@ final class ActiveDeviceChoiceStore {
     var isHelio: Bool { current == .helioStrap }
 
     /// Persist a choice. Only `DeviceSwitcher` calls this: switching also stops the other device.
-    func set(_ choice: ActiveDeviceChoice) {
+    ///
+    /// The ONE place a switch is recorded in the ownership log (decision 28), and only when the
+    /// choice actually changes. The strap's first entry on an install that never had a ring owns
+    /// all past time (`.distantPast`), so a strap-only user gets the normal first sync; every other
+    /// switch owns time from `now`.
+    func set(_ choice: ActiveDeviceChoice, now: Date = Date()) {
         defaults.set(choice.rawValue, forKey: Self.key)
+        if choice != current {
+            let family: DeviceOwnershipLog.Family = choice == .ringConn ? .ringConn : .zeppOS
+            let strapOnly = family == .zeppOS && ownership.log.isEmpty && neverHadRing()
+            ownership.record(family, since: strapOnly ? .distantPast : now)
+        }
         current = choice
+    }
+}
+
+/// Decision 28's ownership log, persisted in UserDefaults under a versioned key (no SwiftData
+/// schema change). Written only through `ActiveDeviceChoiceStore.set`; read by the store, the
+/// strap's fetch and the Health writer.
+@MainActor
+final class DeviceOwnershipStore {
+    static let shared = DeviceOwnershipStore()
+    nonisolated static let key = "device.ownershipLog.v1"
+
+    private let defaults: UserDefaults
+    /// The persisted log; empty (the ring owns all time) when nothing was ever switched.
+    private(set) var log: DeviceOwnershipLog
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        log = Self.persisted(defaults)
+    }
+
+    nonisolated static func persisted(_ defaults: UserDefaults = .standard) -> DeviceOwnershipLog {
+        guard let data = defaults.data(forKey: key),
+              let log = try? JSONDecoder().decode(DeviceOwnershipLog.self, from: data) else { return DeviceOwnershipLog() }
+        return log
+    }
+
+    func record(_ family: DeviceOwnershipLog.Family, since: Date) {
+        var next = log
+        guard next.record(family, since: since), let data = try? JSONEncoder().encode(next) else { return }
+        defaults.set(data, forKey: Self.key)
+        log = next
+    }
+
+    /// "Never had a ring" (decision 28's first-entry rule): no saved ring peripheral, no cached ring
+    /// identity (`RingMetadataStore`), and no sample row on the ring's timeline. Without a readable
+    /// store the answer is "had a ring", the conservative side: the strap then owns time only from
+    /// the switch.
+    static func installNeverHadRing(defaults: UserDefaults = .standard) -> Bool {
+        guard !RingScanner.hasSavedRingToRestore, RingMetadataStore(defaults).load().identifier.isEmpty,
+              let container = OpenCircuitApp.sharedContainer else { return false }
+        let ring = SyncDeviceID.ringConn.rawValue
+        var descriptor = FetchDescriptor<StoredSample>(predicate: #Predicate { $0.deviceID == ring })
+        descriptor.fetchLimit = 1
+        guard let rows = try? container.mainContext.fetch(descriptor) else { return false }
+        return rows.isEmpty
     }
 }
 
