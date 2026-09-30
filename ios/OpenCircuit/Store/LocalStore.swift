@@ -801,8 +801,10 @@ struct LocalStore {
     }
 
     /// Decision 28 (#215): which device owns which time. Empty for a ring-only install, and then every
-    /// ownership rule in this store is a no-op. Replaceable only by tests.
-    static var ownershipLog: @MainActor () -> DeviceOwnershipLog = { DeviceOwnershipStore.shared.log }
+    /// ownership rule in this store is a no-op. Read through `ActiveDeviceChoiceStore.shared`, so the
+    /// choice and the log are reconciled before the first read (review-224b S-A). Replaceable only by
+    /// tests.
+    static var ownershipLog: @MainActor () -> DeviceOwnershipLog = { ActiveDeviceChoiceStore.shared.ownershipLog }
 
     /// A store over `container`'s main context that keeps `container` alive for as long as this
     /// store, or any copy of it, exists.

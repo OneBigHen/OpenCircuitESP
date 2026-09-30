@@ -485,4 +485,50 @@ final class DeviceOwnershipAppTests: XCTestCase {
         XCTAssertEqual(try store.pendingHealthSamples(device: timeline, kinds: kinds).count, 0)
         XCTAssertEqual(try store.pendingStepSamples().count, 0)
     }
+
+    // MARK: Review-224b S-A: a strap chosen before the log existed
+
+    /// From the review's probe: `device.activeChoice.v1 = helioStrap` with no log (a choice persisted
+    /// before `1f3164b`). Building the choice store reconciles the two, so the chosen strap owns time
+    /// from then and stores what it measures.
+    func testAStrapChosenBeforeTheLogExistedOwnsTimeFromTheNextLaunch() throws {
+        defaults.set(ActiveDeviceChoice.helioStrap.rawValue, forKey: ActiveDeviceChoiceStore.key)
+        let log = DeviceOwnershipStore(defaults: defaults)
+        let choice = ActiveDeviceChoiceStore(defaults: defaults, ownership: log, neverHadRing: { false }, now: at(-2))
+        XCTAssertTrue(choice.isHelio)
+        XCTAssertEqual(log.log.entries, [.init(family: .zeppOS, since: at(-2))])
+        XCTAssertEqual(DeviceOwnershipStore.persisted(defaults), log.log, "persisted, not only in memory")
+        XCTAssertEqual(choice.ownershipLog, log.log)
+
+        ownership.install(log.log)
+        let store = try makeStore()
+        let (session, _) = connect(makeStrap(), store: store)
+        XCTAssertEqual(session.lastSyncResult?.interrupted, false)
+        let strapRows = try store.context.fetch(FetchDescriptor<StoredSample>()).filter { $0.deviceID == strapTimeline.rawValue }
+        XCTAssertFalse(strapRows.isEmpty, "the chosen strap stores what it measured while chosen")
+
+        // Reconciled once: the next launch appends nothing.
+        _ = ActiveDeviceChoiceStore(defaults: defaults, ownership: DeviceOwnershipStore(defaults: defaults),
+                                    neverHadRing: { false }, now: at(5))
+        XCTAssertEqual(DeviceOwnershipStore.persisted(defaults).entries, [.init(family: .zeppOS, since: at(-2))])
+    }
+
+    func testTheReconciliationUsesTheFirstEntryRule() throws {
+        defaults.set(ActiveDeviceChoice.helioStrap.rawValue, forKey: ActiveDeviceChoiceStore.key)
+        _ = ActiveDeviceChoiceStore(defaults: defaults, ownership: DeviceOwnershipStore(defaults: defaults),
+                                    neverHadRing: { true }, now: at(-2))
+        XCTAssertEqual(DeviceOwnershipStore.persisted(defaults).entries, [.init(family: .zeppOS, since: .distantPast)],
+                       "an install that never had a ring backfills as a strap-only user")
+    }
+
+    func testTheRingChosenReconcilesNothing() throws {
+        var neverHadRingAsked = false
+        _ = ActiveDeviceChoiceStore(defaults: defaults, ownership: DeviceOwnershipStore(defaults: defaults),
+                                    neverHadRing: { neverHadRingAsked = true; return true }, now: at(-2))
+        defaults.set(ActiveDeviceChoice.ringConn.rawValue, forKey: ActiveDeviceChoiceStore.key)
+        _ = ActiveDeviceChoiceStore(defaults: defaults, ownership: DeviceOwnershipStore(defaults: defaults),
+                                    neverHadRing: { neverHadRingAsked = true; return true }, now: at(-2))
+        XCTAssertTrue(DeviceOwnershipStore.persisted(defaults).isEmpty, "a ring-only install records nothing")
+        XCTAssertFalse(neverHadRingAsked, "and doesn't even look at the store")
+    }
 }

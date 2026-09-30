@@ -38,13 +38,24 @@ final class ActiveDeviceChoiceStore {
     @ObservationIgnored private let neverHadRing: @MainActor () -> Bool
 
     init(defaults: UserDefaults = .standard, ownership: DeviceOwnershipStore? = nil,
-         neverHadRing: (@MainActor () -> Bool)? = nil) {
+         neverHadRing: (@MainActor () -> Bool)? = nil, now: Date = Date()) {
         self.defaults = defaults
         // A store over its own defaults (a test's suite) records its switches there too.
         self.ownership = ownership ?? (defaults === UserDefaults.standard ? .shared : DeviceOwnershipStore(defaults: defaults))
         self.neverHadRing = neverHadRing ?? { DeviceOwnershipStore.installNeverHadRing() }
         current = Self.persisted(defaults)
+        // Review-224b S-A: the choice and the log are two keys. A strap chosen while the log says the
+        // ring owns the present (a choice persisted before the log existed) would own no time and
+        // store nothing, and choosing it again records nothing (`set` records only a change). Put
+        // the invariant back here, with `set`'s first-entry rule. No-op with the ring chosen.
+        if current == .helioStrap, self.ownership.log.currentFamily != .zeppOS {
+            let strapOnly = self.ownership.log.isEmpty && self.neverHadRing()
+            self.ownership.record(.zeppOS, since: strapOnly ? .distantPast : now)
+        }
     }
+
+    /// The ownership log, read through the choice store so the reconciliation above has run first.
+    var ownershipLog: DeviceOwnershipLog { ownership.log }
 
     var isRing: Bool { current == .ringConn }
     var isHelio: Bool { current == .helioStrap }
