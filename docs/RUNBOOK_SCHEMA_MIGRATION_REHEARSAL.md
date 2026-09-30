@@ -28,8 +28,10 @@ grep -c "ShippedStoreMigrationTests .*' failed" /tmp/migration-gate.log   # must
 ```
 
 The two counts must be **equal**, and the failure count must be **0**. Measured on
-2026-08-20: **11 and 11, 0 failed, 0 crashed, 0 restarts, `xcodebuild` exit 0.** If the executed
-count is lower than the declared count, the gate did **not** pass — some of it did not run.
+2026-09-30, after the #218 review added the V8 SQL-column, b33/b43/b45→V8 and forward-only tests:
+**23 and 23, 0 failed, 0 crashed, 0 restarts, `xcodebuild` exit 0** (iPhone 17 simulator, Xcode 26.6;
+it was 11 and 11 on 2026-08-20). If the executed count is lower than the declared count, the gate
+did **not** pass — some of it did not run.
 
 ### Why it is a separate invocation and not "the app-target suite is green"
 
