@@ -187,6 +187,15 @@ timeline only, because its call sites are unchanged. The Helio PR adds its devic
   checked. It now also opens a genuine b56 (V7) store.
 - Gate B is an on-device upgrade from a pre-45 build, and it is Juan's.
 
+**V8 is forward-only.** Once a build carrying SchemaV8 has shipped, recovery is forward-only. Any
+later build, including a revert of #218, must keep `SchemaV8` and the V7→V8 stage in
+`MigrationPlan`. To drop `deviceID`, add a V9 and never remove V8. Never tell testers to reinstall
+a build ≤ 56. Why: a build that doesn't know V8 can't open a V8 store. Its staged migration throws
+`NSCocoaErrorDomain 134504` ("Cannot use staged migration with an unknown model version"), the app
+catches that in `resolveContainer` and goes to `wipeAndRecoverForeground`, and every
+`StoredSample`, `StoredCursor`, `StoredStepSample` and `StoredDaytimeTemp` row is deleted on every
+phone that ever launched a V8 build.
+
 ## 4. Follow-ups (not in this PR)
 
 1. **Retype views to `(any WearableSession)?` and gate ring-only controls.** One line per gate:
