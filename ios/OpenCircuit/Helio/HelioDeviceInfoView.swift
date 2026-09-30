@@ -9,6 +9,10 @@ struct HelioDeviceInfoView: View {
     let connection: HelioConnection
     @State private var confirmDisconnect = false
     @State private var buzzError: String?
+    /// The ring's wake-up alarm. Its phone-side backup notification keeps going off while the strap
+    /// is chosen: it's the person's alarm, and nothing deletes it silently ("For Juan" item 7). Its
+    /// switch lives here too, so it stays visible and can be turned off without the ring's screens.
+    @State private var ringAlarm = RingAlarmController.shared.alarm
 
     private var session: HelioSession? { connection.session }
 
@@ -71,6 +75,23 @@ struct HelioDeviceInfoView: View {
                 }
             }
 
+            if ringAlarm.isEnabled {
+                Section {
+                    Toggle("Your ring alarm's phone backup", isOn: Binding(
+                        get: { ringAlarm.backupNotification },
+                        set: { on in
+                            ringAlarm.backupNotification = on
+                            // The same setter the ring's alarm screen uses: it re-places or removes
+                            // the iOS notification. The alarm itself is left as it is.
+                            RingAlarmController.shared.alarm = ringAlarm
+                        }))
+                } header: {
+                    Text("Ring alarm")
+                } footer: {
+                    Text(ringAlarmFooter)
+                }
+            }
+
             Section {
                 if connection.state == .connected || connection.state == .connecting {
                     Button("Disconnect", role: .destructive) { confirmDisconnect = true }
@@ -84,12 +105,21 @@ struct HelioDeviceInfoView: View {
         }
         .navigationTitle("Helio Strap")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { ringAlarm = RingAlarmController.shared.alarm }
         .confirmationDialog("Disconnect the strap?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
             Button("Disconnect", role: .destructive) { connection.disconnect() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("OpenCircuit stops syncing until you connect again.")
         }
+    }
+
+    private var ringAlarmFooter: String {
+        let time = RingAlarmController.shared.nextFireDate()
+            .map { " at \($0.formatted(date: .omitted, time: .shortened))" } ?? ""
+        return ringAlarm.backupNotification
+            ? "Your ring's wake-up alarm still sends this iPhone a notification\(time) while the strap is chosen. The ring doesn't buzz."
+            : "Off: your ring's wake-up alarm won't send this iPhone a notification. The alarm itself is kept."
     }
 
     private var batteryText: String {
