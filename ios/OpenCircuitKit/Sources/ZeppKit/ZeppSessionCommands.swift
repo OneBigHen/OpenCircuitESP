@@ -118,7 +118,11 @@ public enum ZeppBatteryLevelCharacteristic {
     }
 }
 
-// MARK: - Config (endpoint 0x000A, §5.5), read-only
+// MARK: - Config (endpoint 0x000A, §5.5)
+//
+// Reads, plus a validated single-argument write builder for the haptic alerts (§13.4, §15.3). This
+// file never decides to write: `ZeppHapticAlertSettings` only builds a write for a value the strap
+// itself offered.
 
 public enum ZeppConfigValue: Equatable {
     case bool(Bool)
@@ -134,9 +138,29 @@ public enum ZeppConfigValue: Equatable {
     case unboundedInt(Int32)
 }
 
+/// The constraint bytes a read with include-constraints `01` carries after an entry's value (§5.5
+/// table, placed after the value by §13.4).
+public enum ZeppConfigConstraint: Equatable {
+    /// byte (`0x10`) and byte list (`0x11`): the values the strap accepts.
+    case allowedValues([UInt8])
+    /// short (`0x01`).
+    case shortRange(min: Int16, max: Int16)
+    /// short list (`0x02`).
+    case shortList(minCount: UInt8, maxCount: UInt8, min: Int16, max: Int16)
+    /// int (`0x03`).
+    case intRange(min: Int32, max: Int32)
+    /// string (`0x20`).
+    case maxLength(UInt8)
+    /// string list (`0x21`).
+    case stringChoices(maxLength: UInt8, choices: [String])
+}
+
 public struct ZeppConfigEntry: Equatable {
     public let argument: UInt8
+    /// The value's case also names the wire type (`.bool` = `0x0b`, `.byte` = `0x10`, …).
     public let value: ZeppConfigValue
+    /// nil when the read did not include constraints, or the type carries none.
+    public var constraint: ZeppConfigConstraint? = nil
 }
 
 public struct ZeppConfigReadReply: Equatable {
@@ -146,6 +170,28 @@ public struct ZeppConfigReadReply: Equatable {
     /// True when parsing stopped early (an unknown type code or a truncated entry): `entries`
     /// holds what was parsed before that point (§5.5).
     public let isPartial: Bool
+    /// The reply's include-constraints byte was `01`.
+    public var includesConstraints: Bool = false
+}
+
+/// Config capabilities reply (§5.5): `02`, u8 service version, u8 group count, group ids.
+public struct ZeppConfigCapabilities: Equatable {
+    public let serviceVersion: UInt8
+    public let groups: [UInt8]
+
+    /// §5.5: service versions up to 3 are understood.
+    public var isVersionUnderstood: Bool { serviceVersion <= 3 }
+
+    /// Request payload: `01`.
+    public static let request: [UInt8] = [0x01]
+
+    /// nil unless it starts with `02` and holds every group id it announces.
+    public static func parse(_ payload: [UInt8]) -> ZeppConfigCapabilities? {
+        var reader = ZeppByteReader(payload)
+        guard reader.u8() == 0x02, let version = reader.u8(), let count = reader.u8(),
+              let groups = reader.take(Int(count)) else { return nil }
+        return ZeppConfigCapabilities(serviceVersion: version, groups: groups)
+    }
 }
 
 public enum ZeppConfig {
@@ -174,7 +220,35 @@ public enum ZeppConfig {
     /// `03`, include-constraints `00`, group, arg count, args.
     /// SPEC-GAP: arg count `00` "asks for all args" is 🔴; ZeppKit always names the arguments.
     public static func readRequest(group: UInt8, arguments: [UInt8]) -> [UInt8] {
-        [0x03, 0x00, group, UInt8(clamping: arguments.count)] + arguments
+        readRequest(group: group, arguments: arguments, includeConstraints: false)
+    }
+
+    /// `03`, include-constraints (`01`/`00`), group, arg count, args (§5.5, example H in §13.4).
+    public static func readRequest(group: UInt8, arguments: [UInt8], includeConstraints: Bool) -> [UInt8] {
+        [0x03, includeConstraints ? 0x01 : 0x00, group, UInt8(clamping: arguments.count)] + arguments
+    }
+
+    /// `05`, group, group version, `00`, entry count, entries (value only, no constraints). One
+    /// message per group (§5.5). Only bool and byte values are encoded: the only types ZeppKit writes
+    /// (§13.4's alert thresholds and switches). nil for any other value type or an empty list.
+    public static func writeRequest(group: UInt8, groupVersion: UInt8,
+                                    entries: [(argument: UInt8, value: ZeppConfigValue)]) -> [UInt8]? {
+        guard !entries.isEmpty, entries.count <= Int(UInt8.max) else { return nil }
+        var out: [UInt8] = [0x05, group, groupVersion, 0x00, UInt8(entries.count)]
+        for entry in entries {
+            switch entry.value {
+            case .bool(let on): out += [entry.argument, 0x0b, on ? 0x01 : 0x00]
+            case .byte(let value): out += [entry.argument, 0x10, value]
+            default: return nil
+            }
+        }
+        return out
+    }
+
+    /// Write ack `06 <status>`: the status byte, or nil when the payload is not a write ack.
+    public static func parseWriteAck(_ payload: [UInt8]) -> UInt8? {
+        guard payload.count >= 2, payload[0] == 0x06 else { return nil }
+        return payload[1]
     }
 
     /// Reply: `04`, status (`01` ok), group, group version, includes-constraints, entry count,
@@ -188,33 +262,44 @@ public enum ZeppConfig {
         var entries = [ZeppConfigEntry]()
         for _ in 0..<Int(count) {
             guard let entry = parseEntry(&reader, withConstraints: withConstraints) else {
-                return ZeppConfigReadReply(group: group, groupVersion: version, entries: entries, isPartial: true)
+                return ZeppConfigReadReply(group: group, groupVersion: version, entries: entries, isPartial: true,
+                                           includesConstraints: withConstraints)
             }
             entries.append(entry)
         }
-        return ZeppConfigReadReply(group: group, groupVersion: version, entries: entries, isPartial: false)
+        return ZeppConfigReadReply(group: group, groupVersion: version, entries: entries, isPartial: false,
+                                   includesConstraints: withConstraints)
     }
 
     private static func parseEntry(_ r: inout ZeppByteReader, withConstraints: Bool) -> ZeppConfigEntry? {
         guard let argument = r.u8(), let type = r.u8() else { return nil }
         let value: ZeppConfigValue
-        // SPEC-GAP: §5.5 lists the constraint bytes per type but not their position; they are
-        // assumed to follow the value. ZeppKit's own requests ask for no constraints.
+        var constraint: ZeppConfigConstraint?
+        // Constraint bytes follow the value (§13.4, filling in where §5.5 was silent).
         switch type {
         case 0x0b:
             guard let raw = r.u8(), raw <= 1 else { return nil }
             value = .bool(raw == 1)
         case 0x10:
             guard let raw = r.u8() else { return nil }
-            if withConstraints { guard let n = r.u8(), r.skip(Int(n)) else { return nil } }
+            if withConstraints {
+                guard let n = r.u8(), let allowed = r.take(Int(n)) else { return nil }
+                constraint = .allowedValues(allowed)
+            }
             value = .byte(raw)
         case 0x11:
             guard let n = r.u8(), let list = r.take(Int(n)) else { return nil }
-            if withConstraints { guard let m = r.u8(), r.skip(Int(m)) else { return nil } }
+            if withConstraints {
+                guard let m = r.u8(), let allowed = r.take(Int(m)) else { return nil }
+                constraint = .allowedValues(allowed)
+            }
             value = .byteList(list)
         case 0x01:
             guard let raw = r.i16() else { return nil }
-            if withConstraints { guard r.skip(4) else { return nil } }
+            if withConstraints {
+                guard let min = r.i16(), let max = r.i16() else { return nil }
+                constraint = .shortRange(min: min, max: max)
+            }
             value = .short(raw)
         case 0x02:
             guard let n = r.u8() else { return nil }
@@ -223,21 +308,35 @@ public enum ZeppConfig {
                 guard let item = r.i16() else { return nil }
                 list.append(item)
             }
-            if withConstraints { guard r.skip(6) else { return nil } }
+            if withConstraints {
+                guard let minCount = r.u8(), let maxCount = r.u8(), let min = r.i16(), let max = r.i16() else { return nil }
+                constraint = .shortList(minCount: minCount, maxCount: maxCount, min: min, max: max)
+            }
             value = .shortList(list)
         case 0x03:
             guard let raw = r.i32() else { return nil }
-            if withConstraints { guard r.skip(8) else { return nil } }
+            if withConstraints {
+                guard let min = r.i32(), let max = r.i32() else { return nil }
+                constraint = .intRange(min: min, max: max)
+            }
             value = .int(raw)
         case 0x20:
             guard let text = r.nulTerminatedString() else { return nil }
-            if withConstraints { guard r.skip(1) else { return nil } }
+            if withConstraints {
+                guard let maxLength = r.u8() else { return nil }
+                constraint = .maxLength(maxLength)
+            }
             value = .string(text)
         case 0x21:
             guard let text = r.nulTerminatedString() else { return nil }
             if withConstraints {
-                guard r.skip(1), let n = r.u8() else { return nil }
-                for _ in 0..<Int(n) { guard r.nulTerminatedString() != nil else { return nil } }
+                guard let maxLength = r.u8(), let n = r.u8() else { return nil }
+                var choices = [String]()
+                for _ in 0..<Int(n) {
+                    guard let choice = r.nulTerminatedString() else { return nil }
+                    choices.append(choice)
+                }
+                constraint = .stringChoices(maxLength: maxLength, choices: choices)
             }
             value = .string(text)
         case 0x30:
@@ -253,7 +352,7 @@ public enum ZeppConfig {
             // No length field: an unknown type makes the rest unparseable (§5.5).
             return nil
         }
-        return ZeppConfigEntry(argument: argument, value: value)
+        return ZeppConfigEntry(argument: argument, value: value, constraint: constraint)
     }
 }
 
