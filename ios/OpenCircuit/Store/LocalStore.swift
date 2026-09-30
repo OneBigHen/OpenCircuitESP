@@ -72,7 +72,8 @@ final class StoredSample {
 /// A named watermark. Since SchemaV8 (#214) a row belongs to one device's timeline: `kindRaw` is
 /// the unique (device, name) KEY — `SyncCursorKey.key(name, device:)` — and `deviceID` names the
 /// device. The ring's keys are the pre-V8 keys unchanged (the bare kind, `hk:<kind>`, `export:…`),
-/// so no migrated row was rewritten; another device's key carries its id as a suffix.
+/// so no migrated row was re-keyed (the migration only back-fills `deviceID`); another device's key
+/// carries its id as a suffix.
 @Model
 final class StoredCursor {
     @Attribute(.unique) var kindRaw: String

@@ -494,9 +494,11 @@ struct OpenCircuitApp: App {
     /// judged against its own watermark instead of being dropped as older than the ring's.
     ///
     /// ADDITIVE ONLY: two defaulted String columns, a lightweight stage exactly like V6→V7. Every
-    /// existing row takes the column default, `"ringconn"` (`SyncDeviceID.ringConn`), and NO row is
-    /// read, rewritten or re-keyed by the migration: the ring's cursor keys are the pre-V8 keys
-    /// unchanged (`SyncCursorKey`), which is what makes the stage lightweight. The uniqueness rule
+    /// existing row takes the column default, `"ringconn"` (`SyncDeviceID.ringConn`). No key or value
+    /// changes: the ring's cursor keys are the pre-V8 keys unchanged (`SyncCursorKey`), which is what
+    /// makes the stage lightweight. It is not free at the storage level, though: Core Data back-fills
+    /// the default into every existing row in place, an O(rows) UPDATE (measured 0.7 s per 1M rows on
+    /// the simulator, review #218; real stores hold ≤ 30 days of samples). The uniqueness rule
     /// stays the single `@Attribute(.unique)` string on `StoredCursor.kindRaw`, now the (device, name)
     /// key — `#Unique` is iOS 18 and this target is iOS 17.
     ///

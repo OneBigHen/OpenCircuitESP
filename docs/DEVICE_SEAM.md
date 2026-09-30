@@ -146,7 +146,7 @@ watermark had the same shape, so even a stored backfill would never have reached
 | `StoredSample` | no device | `deviceID: String = "ringconn"` |
 | `StoredCursor` | `@Attribute(.unique) kindRaw` = the cursor name | same unique column, now the **(device, name) key**, plus `deviceID: String = "ringconn"` |
 | Cursor key | `heartRate`, `hk:heartRate`, `export:…` | ring: **unchanged**. Another device: `<name>@<device>` (`SyncCursorKey`), so `hk:`/`export:` prefixes still filter |
-| Migration | | `.lightweight(V7 → V8)`: two defaulted columns, **no row read, rewritten or re-keyed** |
+| Migration | | `.lightweight(V7 → V8)`: two defaulted columns. **No key or value changes**; Core Data back-fills the default into every existing row in place (O(rows), measured 0.7 s per 1M rows on the simulator) |
 
 `#Unique` is iOS 18 and the deployment target is 17. Uniqueness therefore stays the one
 `@Attribute(.unique)` string the table already had, and that string now carries the device.

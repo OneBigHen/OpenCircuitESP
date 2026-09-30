@@ -19,7 +19,11 @@ public struct SyncDeviceID: RawRepresentable, Hashable, Sendable, Codable {
 
     /// Every RingConn ring — and every row written before per-device cursors existed. The SchemaV8
     /// migration gives existing rows this value as a column default, so it is also what the live
-    /// `@Model` defaults spell out literally; `SyncDeviceIDTests` pins the two together.
+    /// `@Model` defaults spell out literally. The kit can't see those literals:
+    /// `SyncDeviceTests.testTheRingTimelineIdIsPinned` pins this constant, and the app's
+    /// `ShippedStoreMigrationTests` (`testABuild56StoreMigratesToPerDeviceCursorsWithZeroRowsLost`,
+    /// `testABuild56StoresDeviceColumnIsRingconnInSQLOnEveryMigratedRow`) pin the literal to it on
+    /// migrated rows.
     public static let ringConn = SyncDeviceID(rawValue: "ringconn")
 
     /// The timeline a wearable writes into. `identityID` is `WearableIdentity.id`.
@@ -34,7 +38,7 @@ public struct SyncDeviceID: RawRepresentable, Hashable, Sendable, Codable {
 /// The persisted `StoredCursor` key for a cursor NAME (`heartRate`, `hk:heartRate`, …) on a device.
 ///
 /// The ring's keys are the pre-V8 keys, unchanged. That is what lets the V7→V8 migration be a
-/// lightweight one that rewrites no row (the build-44 wipe is why every stage here is additive), and
+/// lightweight one that re-keys no row (the build-44 wipe is why every stage here is additive), and
 /// what keeps the ring's cursor reads and writes byte-for-byte what they were. Another device's key
 /// carries its id as a suffix, so it can never collide with the ring's under the unique index, and
 /// an `hk:` / `export:` name keeps its prefix, so every prefix filter keeps working.
