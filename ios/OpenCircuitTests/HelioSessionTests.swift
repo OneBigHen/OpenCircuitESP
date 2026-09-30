@@ -747,6 +747,16 @@ final class HelioStatusTests: XCTestCase {
         XCTAssertEqual(status(.bluetoothOff, .ready), .bluetoothOff)
     }
 
+    func testTheNoSkinTemperatureNoteNamesTheNightsOwnDevice() {
+        // Review-225 N2: the ring's reason comes back for ring nights (every ring-only install);
+        // a strap night gets the strap's own reason.
+        XCTAssertEqual(SleepCardView.noSkinTempNote(nightOwner: .ringConn),
+                       "No skin temperature for this night — it's only recorded while the ring stays connected, and there weren't enough readings to compare.")
+        let strap = SleepCardView.noSkinTempNote(nightOwner: .zeppOS)
+        XCTAssertTrue(strap.contains("strap"))
+        XCTAssertNil(strap.range(of: "\\bring\\b", options: .regularExpression), "no ring wording for a strap night")
+    }
+
     func testTheZeppCoexistenceCopyIsVerbatim() {
         XCTAssertEqual(HelioStatus.dontUnpairCopy,
                        "Don't unpair the strap in the Zepp app; unpairing makes the key stop working.")

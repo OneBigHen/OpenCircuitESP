@@ -1020,11 +1020,26 @@ struct SleepCardView: View {
             // as a defect.
             HStack(spacing: 6) {
                 Image(systemName: "thermometer.medium").font(.caption2).foregroundStyle(.tertiary)
-                Text("No skin temperature for this night — there weren't enough readings from your device to compare.")
+                Text(Self.noSkinTempNote(nightOwner: latest.map {
+                    LocalStore.ownershipLog().owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd)
+                } ?? .ringConn))
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.top, 2)
+        }
+    }
+
+    /// Why a staged night has no skin temperature, for the device that owned the night (decision 28:
+    /// the owner at the midpoint of its in-bed window; the ring for every ring-only install). The
+    /// ring's reason is its live-only temperature above; the strap's temperature is in its history,
+    /// but only its worn minutes inside its own sleep window, 30–42 °C, count (decisions 12, 25).
+    static func noSkinTempNote(nightOwner: DeviceOwnershipLog.Family) -> String {
+        switch nightOwner {
+        case .zeppOS:
+            return "No skin temperature for this night — the strap recorded too few usable readings while worn during this sleep to compare."
+        case .ringConn:
+            return "No skin temperature for this night — it's only recorded while the ring stays connected, and there weren't enough readings to compare."
         }
     }
 
