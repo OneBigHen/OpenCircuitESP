@@ -223,7 +223,8 @@ private struct DemoLiveCard: View {
             OCCard {
                 OCSectionHeader("Live Heart Rate", systemImage: "heart.fill", tint: Theme.hr)
                 LiveVitalReadout(value: Int(buffer.latest), unit: "bpm", tint: Theme.hr,
-                                 pulses: true, sessionValues: buffer.points.map(\.value))
+                                 pulses: true,
+                                 sessionRange: buffer.points.reduce(into: LiveSessionRange()) { $0.include($1.value) })
                 LiveVitalsChart(buffer: buffer, color: Theme.hr, window: 90, unit: "bpm",
                                 emptyText: "Hold still — getting a reading…")
                     .frame(height: 150)

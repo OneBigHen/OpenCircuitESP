@@ -102,6 +102,9 @@ struct ContentView: View {
     /// measurement (HR or SpO₂). Accumulated from `session.liveHR`/`liveSpO2` onChange, reset when
     /// monitoring stops. Display units: bpm for HR, whole-percent for SpO₂.
     @State private var liveBuffer = LiveBuffer()
+    /// Low / high of every reading in the current on-demand measurement (the buffer is trimmed to
+    /// the chart's window, this isn't). Reset with the buffer.
+    @State private var liveRange = LiveSessionRange()
     /// What the readiness card last showed, so the Today synthesis line (#216) agrees with it.
     @State private var readinessReport: ReadinessReport?
     /// Whether the Vitals Status card's last report flagged possible fever signs, so the synthesis
@@ -190,10 +193,10 @@ struct ContentView: View {
                 // liveSpO2 is already a whole percent (0x15 byte[14]), so no ×100 scaling.
                 if session?.monitoring == true, session?.liveMode == .spo2, let s { appendLive(Double(s)) }
             }
-            .onChange(of: session?.monitoring) { _, m in if m != true { liveBuffer.reset() } }
+            .onChange(of: session?.monitoring) { _, m in if m != true { resetLive() } }
             // Also clear on a live-mode switch (HR↔SpO₂ mid-measure keeps `monitoring` true), so the
             // new metric's chart doesn't plot leftover points from the previous mode.
-            .onChange(of: session?.liveMode) { _, _ in liveBuffer.reset() }
+            .onChange(of: session?.liveMode) { _, _ in resetLive() }
             .onAppear {
                 // Wire persistence into the scanner/session so the (currently gated)
                 // epoch-sync decoder can persist Layer-A records once enabled. #24
@@ -438,7 +441,7 @@ struct ContentView: View {
                 // Large live readout above the scrolling chart (#216). nil/0 = still warming up.
                 LiveVitalReadout(value: (isHR ? session.liveHR : session.liveSpO2).flatMap { $0 > 0 ? $0 : nil },
                                  unit: isHR ? "bpm" : "%", tint: isHR ? Theme.hr : Theme.spo2,
-                                 pulses: isHR, sessionValues: liveBuffer.points.map(\.value))
+                                 pulses: isHR, sessionRange: liveRange)
                 LiveVitalsChart(buffer: liveBuffer,
                                 color: isHR ? Theme.hr : Theme.spo2,
                                 window: 90,
@@ -651,6 +654,13 @@ struct ContentView: View {
     /// Append one live reading (already in display units) to the liveline buffer, stamped now.
     private func appendLive(_ value: Double) {
         liveBuffer.append(value: value, at: Date().timeIntervalSince1970)
+        liveRange.include(value)
+    }
+
+    /// Clear the live chart and the session low / high together.
+    private func resetLive() {
+        liveBuffer.reset()
+        liveRange.reset()
     }
 
     /// Project the shared trends points into (date, value) pairs for a hero sparkline, dropping days
