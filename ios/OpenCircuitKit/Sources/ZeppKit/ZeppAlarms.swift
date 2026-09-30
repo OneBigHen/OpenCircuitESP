@@ -7,8 +7,9 @@
 // set on this connection, and then re-reads to check the slot. It never writes a slot the caller did
 // not name, and nothing is written at session setup.
 //
-// Never encoded, so never sent: the alarm capabilities request `01` (🔴 reply layout unknown, never
-// sent by the reference) and "update" `07` (🔴 layout unknown), §12.2.
+// SPEC-GAP: the alarm capabilities request `01` (🔴 reply layout unknown, never sent by the
+// reference) and "update" `07` (🔴 layout unknown, §12.2) are never encoded, so never sent. Capacity
+// is the documented 10 slots (§12.4); edits use `03 01` replace and `05 01` delete only.
 
 import Foundation
 
@@ -488,6 +489,8 @@ public struct ZeppAlarmEditor {
         guard let reply = ZeppAlarmReply.parse(payload) else { return Output() }
         switch reply {
         case .changedOnStrap:
+            // SPEC-GAP: nothing tells a `0f` caused by our own write from one caused by another
+            // central (§12.5). Either way the next edit needs a fresh read (§15.2 step 5).
             isListStale = true
             changeSeenSinceRequest = true
             return Output(events: [.changedOnStrap])
@@ -598,7 +601,8 @@ public struct ZeppAlarmEditor {
                 return Output(events: [.writeUnverified(write, error)])
             }
         case .none, .writing:
-            // Not asked for: ignore it rather than let an unsolicited list stand in for a read.
+            // SPEC-GAP: the spec never says the strap sends a list unasked. One that arrives unasked
+            // (or after its read timed out) is ignored rather than standing in for a read.
             return Output()
         }
     }

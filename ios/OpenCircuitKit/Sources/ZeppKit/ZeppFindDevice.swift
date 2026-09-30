@@ -209,6 +209,8 @@ public struct ZeppFindDevice {
         version = nil
         isFindPhoneActive = false
         var out = Output()
+        // SPEC-GAP: §11.4 owes the stop to "the next authenticated connection". One that doesn't
+        // list 0x001A can't carry it, so the stop stays owed until a connection that does.
         guard capabilities.isSupported(.findDevice) else { return out }
         if isStopOwed {
             out.messages.append(message(ZeppFindDeviceCommand.stop))
