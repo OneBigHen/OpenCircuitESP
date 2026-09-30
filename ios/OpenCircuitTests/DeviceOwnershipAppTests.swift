@@ -689,4 +689,68 @@ final class DeviceOwnershipAppTests: XCTestCase {
         XCTAssertEqual(kept, .ownedByOtherDevice, "the strap's night is stored: a deliberate keep")
         XCTAssertFalse(kept.isSilentLoss)
     }
+
+    // MARK: Review-224c S-1 / decision 28c: only an overnight strap sleep is a night
+
+    /// Hours on the LOCAL day of `oNow`: the overnight gate judges local time, as it does the ring's.
+    private func localHour(_ h: Double) -> Date { Calendar.current.startOfDay(for: oNow).addingTimeInterval(h * 3600) }
+
+    /// A strap sleep session record between two local hours (minute fields count from the previous
+    /// local midnight, `ZeppSleepSession.absolute`).
+    private func localSession(_ from: Double, _ to: Double, stages: [(Double, Double, UInt8)]) -> [UInt8] {
+        var r = [UInt8](repeating: 0, count: ZeppSleepSession.recordLength)
+        func put(_ bytes: [UInt8], at offset: Int) { for (i, b) in bytes.enumerated() { r[offset + i] = b } }
+        func minute(_ h: Double) -> UInt16 { UInt16((h + 24) * 60) }
+        let midnight = UInt32(localHour(0).timeIntervalSince1970)
+        put(le32(midnight), at: 0x000)
+        put(le32(midnight), at: 0x004)
+        r[0x008] = 1
+        r[0x009] = 1
+        put(le16(minute(from)), at: 0x00A)
+        put(le16(minute(to)), at: 0x00C)
+        r[0x016] = 81
+        r[0x054] = UInt8(stages.count)
+        for (i, stage) in stages.enumerated() {
+            put(le16(minute(stage.0)) + le16(minute(stage.1)) + [stage.2], at: 0x056 + 5 * i)
+        }
+        return r
+    }
+
+    /// From review-224c's probe, through the strap's real path: ring→strap at 05:00, mid-sleep (the
+    /// ring went to bed with the night, 28a). The strap syncs a 13:00–14:00 daytime session on the
+    /// same night key. Back to the ring at 18:00: the ring's 23:00–07:00 night is stored and mirrored.
+    func testAStrapDaytimeSessionNeverTakesTheRingsNightKey() throws {
+        ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: localHour(5))]))
+        let store = try makeStore()
+        let device = makeStrap()
+        device.fetchData[.sleepSession] = (stamp(oMidnight), localSession(13, 14, stages: [(13, 14, 0x04)]))
+        clock = localHour(16)
+        let (session, _) = connect(device, store: store)
+        XCTAssertEqual(session.lastSyncResult?.interrupted, false)
+        XCTAssertEqual(session.lastSyncResult?.nights.count, 0, "a daytime session is not a night")
+        XCTAssertEqual(try store.context.fetch(FetchDescriptor<StoredSleepSummary>()).count, 0, "and takes no night key")
+
+        ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: localHour(5)),
+                                                       .init(family: .ringConn, since: localHour(18))]))
+        XCTAssertEqual(try saveRingNight(store, from: localHour(-1), to: localHour(7)), .inserted,
+                       "the night the wearer went to bed with is stored")
+        XCTAssertTrue(HealthKitWriter.ringOwnsNight(ringNight(from: localHour(-1), to: localHour(7)), store: store),
+                      "and mirrored to Health")
+    }
+
+    /// The gate changes nothing for an overnight strap night: stored with the same window and minutes.
+    func testAnOvernightStrapNightStillStoresExactlyAsBefore() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        let device = makeStrap()
+        device.fetchData[.sleepSession] = (stamp(oMidnight), localSession(-1, 7, stages: [(-1, 1, 0x04), (1, 2, 0x05), (2, 3, 0x08), (3, 7, 0x04)]))
+        clock = localHour(12)
+        let (session, _) = connect(device, store: store)
+        XCTAssertEqual(session.lastSyncResult?.nights.map(\.window), [DateInterval(start: localHour(-1), end: localHour(7))])
+        let rows = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
+        XCTAssertEqual(rows.map { "\($0.asleepMin) light \($0.lightMin) deep \($0.deepMin) rem \($0.remMin)" },
+                       ["480 light 360 deep 60 rem 60"])
+        XCTAssertEqual(rows.first?.inBedStart, localHour(-1))
+        XCTAssertEqual(rows.first?.inBedEnd, localHour(7))
+    }
 }
