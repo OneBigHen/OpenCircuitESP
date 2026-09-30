@@ -40,10 +40,10 @@ protocol HelioBackgroundLink: AnyObject {
     /// Where the strap's rows live (`zeppos:<id>`): the connected strap's, else the saved one's; nil
     /// when no strap was ever connected.
     var strapTimeline: SyncDeviceID? { get }
-    /// Background runs in progress on this link (0 or 1: runs take turns, review-225 S2). While it is
-    /// above 0, every session the link creates leaves its finished syncs to the run
-    /// (`HelioSession.backgroundRunOwnsSyncs`): the run flushes Apple Health and logs them. A count,
-    /// not a flag, so one run's exit can never clear another's.
+    /// Background runs in progress on this link, from the end of a run's turn-wait to its return (0 or
+    /// 1: runs take turns, review-225 S2). It only serialises runs; which sessions belong to a run is
+    /// `backgroundRunAdoptsNewSessions`. A count, not a flag, so one run's exit can never clear
+    /// another's.
     var activeBackgroundRuns: Int { get set }
     /// True only while a run's watch loop runs (review-225b S-A): a session the link creates then is
     /// the run's (`HelioSession.backgroundRunOwnsSyncs`), and the run flushes and logs its syncs. A

@@ -60,10 +60,11 @@ final class HelioConnection: NSObject {
     @ObservationIgnored private var scanTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var rssiTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundObserver: NSObjectProtocol?
-    /// Background runs in progress (`HelioBackgroundLink`); a run owns the syncs of the sessions
-    /// created meanwhile.
+    /// Background runs in progress (`HelioBackgroundLink`, review-225 S2): only serialises runs.
     @ObservationIgnored var activeBackgroundRuns = 0
-    /// True only while a background run's watch loop runs (review-225b S-A); read by `makeSession`.
+    /// True only while a background run's watch loop runs (review-225b S-A). `makeSession` reads it:
+    /// a session made then leaves its syncs to that run, which flushes and logs them; a session made
+    /// at any other time, including during a run's teardown or Health flush, flushes and logs its own.
     @ObservationIgnored var backgroundRunAdoptsNewSessions = false
 
     private enum PendingAction { case scan, reconnect, resumeRestored }
