@@ -1143,7 +1143,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(device.fetchAcks, [0x09, 0x09, 0x09], "the open round got its 03 09; nothing was deleted")
         XCTAssertEqual(run.result?.interrupted, true)
         XCTAssertTrue(flushes.isEmpty, "no Health flush once iOS has ended the task")
-        XCTAssertTrue(lastRecord()?.detail?.hasPrefix("helio strap: iOS ended the task") == true)
+        XCTAssertTrue(lastRecord()?.detail?.hasPrefix("helio strap: iOS ended the task; open round kept on the strap (03 09), disconnected") == true)
 
         // What was committed before the expiry stays: activity. The open round's night isn't stored.
         let timeline = try XCTUnwrap(link.strapTimeline)
@@ -1481,6 +1481,29 @@ final class HelioBackgroundSyncTests: XCTestCase {
             .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
         XCTAssertEqual(later.ending, .synced)
         XCTAssertEqual(flushes.map(\.finalized), [true, false])
+    }
+
+    /// Review-225b N-c: a run waiting for its turn that iOS expires is an expiry: logged as one, with no
+    /// teardown claimed (it touched nothing), and the active run carries on.
+    func testAWaitingRunThatIOSExpiresEndsAsExpiredAndTouchesNothing() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        let active = service(link, store: store, pause: { link.transport?.drainSteps(1) })
+        let waiting = service(link, store: store, pause: {})
+        let a = Task { @MainActor in await active.run(kind: .processing, timeout: 3600) }
+        for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
+        let b = Task { @MainActor in await waiting.run(kind: .appRefresh, timeout: 3600) }
+        for _ in 0..<20 { await Task.yield() }
+        b.cancel()
+        let waited = await b.value
+        XCTAssertEqual(waited.ending, .expired)
+        XCTAssertFalse(waited.disconnected)
+        XCTAssertEqual(waited.detail, "helio strap: iOS ended the task")
+        XCTAssertEqual(link.disconnects, 0)
+        let first = await a.value
+        XCTAssertEqual(first.ending, .synced)
+        XCTAssertEqual(link.activeBackgroundRuns, 0)
     }
 
     func testAStrapOutOfRangeKeepsThePendingConnectArmed() async throws {

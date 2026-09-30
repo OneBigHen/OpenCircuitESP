@@ -93,6 +93,8 @@ struct HelioBackgroundRun: Equatable {
     var flushMS: Int?
     /// Nil when no flush ran (a quiet ending, an expiry, or Health unavailable).
     var flush: HealthKitWriter.FlushResult?
+    /// This run acked an open round `03 09` and dropped the link (out of time, or expired).
+    var disconnected = false
 
     /// A quiet ending: nothing was fetched and nothing may be written (decision 7).
     var endedQuietly: Bool {
@@ -107,6 +109,9 @@ struct HelioBackgroundRun: Equatable {
         (ending == .synced && result?.interrupted == false) || flush?.wroteAnything == true
     }
 
+    /// What an out-of-time or expired run did to the link, for its log line.
+    private var teardown: String { disconnected ? "; open round kept on the strap (03 09), disconnected" : "" }
+
     /// The run-log line. Counts only: never a key, a serial number or a health value.
     var detail: String {
         let head: String
@@ -117,8 +122,8 @@ struct HelioBackgroundRun: Equatable {
         case .keyRejected: head = "key rejected; not retrying"
         case .strapBusy: head = "strap busy (another phone or app holds it); not retrying"
         case .unsupported: head = "strap doesn't offer history over Bluetooth"
-        case .outOfTime: head = "out of time; open round kept on the strap (03 09), disconnected"
-        case .expired: head = "iOS ended the task; open round kept on the strap (03 09), disconnected"
+        case .outOfTime: head = "out of time" + teardown
+        case .expired: head = "iOS ended the task" + teardown
         case .handedToApp: head = "handed to the app"
         case .anotherRunActive: head = "another background run held the strap for this run's whole window; nothing done"
         }
@@ -181,7 +186,8 @@ struct HelioBackgroundSyncService {
         while link.activeBackgroundRuns > 0 {
             if Task.isCancelled || now() >= syncDeadline {
                 if nightsFinalized { link.pendingNightsFinalization = true }
-                run.ending = .anotherRunActive
+                // Review-225b N-c: an expiry while waiting is an expiry (no alert pass follows).
+                run.ending = Task.isCancelled ? .expired : .anotherRunActive
                 return record(run, kind: kind)
             }
             await pause()
@@ -283,7 +289,10 @@ struct HelioBackgroundSyncService {
             watched?.backgroundRunOwnsSyncs = false
         case .outOfTime, .expired:
             // The teardown's writes get their moment on the radio before anything else runs.
-            if abandon() { await grace() }
+            if abandon() {
+                run.disconnected = true
+                await grace()
+            }
             // Review-225 N4: iOS may expire the task during that grace; then no flush follows.
             if Task.isCancelled { run.ending = .expired }
             if let watched, watched.syncsFinished > baseline, let result = watched.lastSyncResult { run.result = result }
