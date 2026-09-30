@@ -162,7 +162,7 @@ struct SleepCardView: View {
     }
 
     /// One night resolved for display, from either the live staging or the persisted rollup.
-    private struct Night {
+    struct Night {
         let nightKey: Date
         let summary: SleepStaging.Summary
         let inBedStart: Date?
@@ -253,7 +253,10 @@ struct SleepCardView: View {
     /// thinner fragment repainted the smaller number over the fuller stored night. Live still wins
     /// instantly when it's at least as complete, or when it's a genuinely newer night. Only ever a
     /// real night (asleep > 0); daytime naps are gated out upstream by RingSession (review #1).
-    private var night: Night? {
+    private var night: Night? { Self.selectNight(liveSegments: liveSegments, stored: storedSleep.first) }
+
+    /// The night selection above, over explicit inputs (extracted unchanged so a test can drive it).
+    static func selectNight(liveSegments: [SleepSegment], stored latestRow: StoredSleepSummary?) -> Night? {
         let live: Night? = {
             guard !liveSegments.isEmpty else { return nil }
             let s = SleepStaging.summary(liveSegments)
@@ -274,7 +277,7 @@ struct SleepCardView: View {
                          stageSource: .live)
         }()
         let stored: Night? = {
-            guard let s = storedSleep.first, s.asleepMin > 0 else { return nil }
+            guard let s = latestRow, s.asleepMin > 0 else { return nil }
             let currentStart = s.sleepEditCurrentInBedStart
             let currentEnd = s.sleepEditCurrentInBedEnd
             let start = currentStart > .distantPast ? currentStart : nil
@@ -356,12 +359,21 @@ struct SleepCardView: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// The ring's live staging the card may show (review-224c S-3). When another device keeps the night
+    /// (decision 28a: `.ownedByOtherDevice`) or owns it with none stored (`.ownedByOtherDeviceNoRow`),
+    /// the ring's reading of it is not the night: the card shows the stored, kept night (and Edit and
+    /// the display agree), or the honest notice. Every other outcome passes the staging through, so a
+    /// ring-only install, which never gets either outcome, is unchanged.
+    static func liveSegments(_ staged: [SleepSegment], outcome: SleepPersistOutcome?) -> [SleepSegment] {
+        outcome == .ownedByOtherDevice || outcome == .ownedByOtherDeviceNoRow ? [] : staged
+    }
+
     /// The unsaved-night warning's words. A night the Helio Strap owns (it was chosen when the night
     /// began, decision 28a) but has no stored strap night is not a failure and syncing the ring again
     /// can't store it, so it says exactly that (review-224b N-3, decision 25).
     static func unsavedNightCopy(_ outcome: SleepPersistOutcome?) -> String {
         if outcome == .ownedByOtherDeviceNoRow {
-            return "This night began while the Helio Strap was your chosen device, so it’s the strap’s night. The ring’s reading of it isn’t saved or sent to Apple Health, and no strap night is stored for it."
+            return "The ring’s latest night began while the Helio Strap was your chosen device, so it’s the strap’s night. The ring’s reading of it isn’t saved or sent to Apple Health, and no strap night is stored for it."
         }
         return outcome?.isRecoverableByRetry == true
             ? "This night hasn’t been saved yet, so it isn’t in Apple Health and won’t survive a restart. Sync again near the ring — the epochs are still on it."
@@ -374,7 +386,9 @@ struct SleepCardView: View {
     /// anything about how recent it is.
     @ViewBuilder
     private var recencyNotice: some View {
-        if nightIsUnsaved {
+        // The strap owns the ring's latest night and stored none: the ring's reading isn't on screen
+        // (`liveSegments`), so say why last night is missing (review-224b N-3, review-224c S-3).
+        if nightIsUnsaved || sleepPersistOutcome == .ownedByOtherDeviceNoRow {
             unsavedNightNotice
         } else {
             switch recencyStatus {

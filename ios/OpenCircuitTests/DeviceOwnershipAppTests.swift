@@ -753,4 +753,54 @@ final class DeviceOwnershipAppTests: XCTestCase {
         XCTAssertEqual(rows.first?.inBedStart, localHour(-1))
         XCTAssertEqual(rows.first?.inBedEnd, localHour(7))
     }
+
+    // MARK: Review-224c S-3: the Sleep card after a switch back
+
+    /// The strap keeps the night (390 min); after the switch back the ring stages a fuller reading of
+    /// it (540 min) and gets `.ownedByOtherDevice`. The card shows the strap's stored row, the one Edit
+    /// targets, not the ring's reading.
+    func testTheSleepCardShowsTheStrapsKeptNightNotTheRingsLargerStaging() throws {
+        ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: at(-2)), .init(family: .ringConn, since: at(8))]))
+        let store = try makeStore()
+        XCTAssertEqual(try saveNight(store, strapTimeline, -0.5, 6), .inserted)
+        let ringStaging = ringNight(from: at(-1.5), to: at(7.5))
+        let outcome = try saveNight(store, .ringConn, -1.5, 7.5)
+        XCTAssertEqual(outcome, .ownedByOtherDevice)
+        let row = try XCTUnwrap(store.context.fetch(FetchDescriptor<StoredSleepSummary>()).first)
+        XCTAssertEqual(SleepCardView.selectNight(liveSegments: ringStaging, stored: row)?.stageSource, .live,
+                       "unfiltered, the fuller ring staging would win the card")
+
+        let shown = SleepCardView.selectNight(liveSegments: SleepCardView.liveSegments(ringStaging, outcome: outcome), stored: row)
+        XCTAssertEqual(shown?.stageSource, .stored)
+        XCTAssertEqual(shown?.summary.minutes.asleep, 390, "the strap's kept night")
+        XCTAssertEqual(shown?.inBedStart, at(-0.5))
+        XCTAssertEqual(shown?.nightKey, row.night, "the row Edit targets is the row on screen")
+    }
+
+    /// The strap owns the ring's latest night and stored none: no ring stages as the night, and the
+    /// notice says why.
+    func testANightTheStrapOwnsWithNoRowShowsTheNoticeNotTheRingsStages() {
+        let staged = ringNight(from: at(-1), to: at(7))
+        XCTAssertEqual(SleepCardView.liveSegments(staged, outcome: .ownedByOtherDeviceNoRow), [])
+        XCTAssertNil(SleepCardView.selectNight(liveSegments: SleepCardView.liveSegments(staged, outcome: .ownedByOtherDeviceNoRow),
+                                               stored: nil))
+        let copy = SleepCardView.unsavedNightCopy(.ownedByOtherDeviceNoRow)
+        XCTAssertTrue(copy.contains("the strap’s night") && copy.contains("no strap night is stored"))
+    }
+
+    /// Ring-only: no save ever returns an ownership outcome on an empty log, so the card's live
+    /// staging passes through untouched for every outcome it can get.
+    func testARingOnlyInstallNeverGetsAnOwnershipOutcomeAndTheCardIsUnchanged() throws {
+        ownership.install(DeviceOwnershipLog())
+        let store = try makeStore()
+        let shapes: [(Double, Double)] = [(-1, 7), (-1, 7), (-0.5, 6), (-1.5, 7.5), (23, 31), (13, 15), (46, 55)]
+        let outcomes = try shapes.map { try saveNight(store, .ringConn, $0.0, $0.1) }
+        XCTAssertFalse(outcomes.contains(.ownedByOtherDevice), "\(outcomes)")
+        XCTAssertFalse(outcomes.contains(.ownedByOtherDeviceNoRow), "\(outcomes)")
+        let staged = ringNight(from: at(-1), to: at(7))
+        for outcome in [nil] + SleepPersistOutcome.allCases.map(Optional.some)
+        where outcome != .ownedByOtherDevice && outcome != .ownedByOtherDeviceNoRow {
+            XCTAssertEqual(SleepCardView.liveSegments(staged, outcome: outcome), staged, "\(String(describing: outcome))")
+        }
+    }
 }

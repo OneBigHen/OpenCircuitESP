@@ -1724,7 +1724,10 @@ struct ContentView: View {
     private var sleepCard: some View {
         // Sleep edits and naps are the ring's (its epoch archive proves coverage, and naps route
         // through its scanner): with the Helio Strap chosen they are hidden, not left broken (#215).
-        SleepCardView(liveSegments: session?.stagedSegments ?? [], lastSyncAt: lastSyncAt,
+        // A night the other device keeps is never shown as the ring's reading (review-224c S-3).
+        SleepCardView(liveSegments: SleepCardView.liveSegments(session?.stagedSegments ?? [],
+                                                              outcome: session?.lastSleepPersistOutcome),
+                      lastSyncAt: lastSyncAt,
                       mirrorsSleepToHealth: mirrorsSleepToHealth,
                       sleepPersistOutcome: session?.lastSleepPersistOutcome,
                       onEditSleep: !ringActive ? nil : { night, times, uiCoverage in
