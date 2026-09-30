@@ -2,12 +2,92 @@
 // HEALTH settings that decide what the strap records, heart-rate control, and the standard
 // Heart Rate Measurement / Battery Level characteristics. Builders return message payloads;
 // the caller sends them to the named endpoint through `ZeppLink`.
-//
-// SPEC-GAP (device info, endpoint 0x0043, §5.3): flag bit 0 is "a length-prefixed blob" with no
-// prefix width, and the Helio Strap's flags (0x7f) set bit 0, so no field after it can be located.
-// Not implemented; HelioVerify reads the Device Information Service (0x2A26 / 0x2A27) instead.
 
 import Foundation
+
+// MARK: - Device info (endpoint 0x0043, §5.3)
+
+/// The hardware and firmware versions from a device-info reply. The serial number and the PnP ID
+/// are personal identifiers: the parser steps over them and never stores them.
+public struct ZeppDeviceInfo: Equatable {
+    public static let request: [UInt8] = [0x01]
+
+    /// The reply's u64 flags word (which fields are present).
+    public let flags: UInt64
+    /// nil when the flags don't announce it, or when `isAmbiguous`.
+    public let hardwareVersion: String?
+    public let firmwareVersion: String?
+    /// The bit-0 blob's prefix widths (in bytes) under which the whole reply parsed. `[0]` when
+    /// bit 0 is clear. Worth recording on hardware: it settles the SPEC-GAP below.
+    public let blobPrefixWidths: [Int]
+    /// More than one prefix width parsed and they locate different versions, so none is reported.
+    public let isAmbiguous: Bool
+
+    /// Reply `02 01`, u64 LE flags, then by flag bit: 0 a length-prefixed blob, 1 the serial number
+    /// (NUL-terminated), 2 the hardware version, 3 the firmware version (both NUL-terminated),
+    /// 4 a 7-byte PnP ID. nil for any other header or when no reading of the fields works.
+    ///
+    /// SPEC-GAP: §5.3 doesn't give the width of bit 0's length prefix, and the Helio's flags set
+    /// bit 0. ZeppKit tries 1, 2 and 4 bytes (u8/u16/u32 LE). A width counts only if every field
+    /// the flags announce up to the PnP ID parses: strings NUL-terminated, valid UTF-8, with no
+    /// control characters, and the PnP ID complete. The versions are reported only when all the
+    /// widths that count agree on them; otherwise the reply is ambiguous and none is reported.
+    public static func parse(_ payload: [UInt8]) -> ZeppDeviceInfo? {
+        guard payload.count >= 10, payload[0] == 0x02, payload[1] == 0x01 else { return nil }
+        var header = ZeppByteReader(payload, offset: 2)
+        guard let flags = header.u64() else { return nil }
+        let widths = flags & 0x01 == 0 ? [0] : [1, 2, 4]
+        var readings = [(width: Int, hardware: String?, firmware: String?)]()
+        for width in widths {
+            if let fields = versions(payload, flags: flags, blobPrefixWidth: width) {
+                readings.append((width, fields.hardware, fields.firmware))
+            }
+        }
+        guard let first = readings.first else { return nil }
+        let agree = readings.allSatisfy { $0.hardware == first.hardware && $0.firmware == first.firmware }
+        return ZeppDeviceInfo(flags: flags, hardwareVersion: agree ? first.hardware : nil,
+                              firmwareVersion: agree ? first.firmware : nil,
+                              blobPrefixWidths: readings.map(\.width), isAmbiguous: !agree)
+    }
+
+    private static func versions(_ payload: [UInt8], flags: UInt64, blobPrefixWidth: Int)
+        -> (hardware: String?, firmware: String?)? {
+        var reader = ZeppByteReader(payload, offset: 10)
+        if flags & 0x01 != 0 {
+            let length: Int?
+            switch blobPrefixWidth {
+            case 1: length = reader.u8().map(Int.init)
+            case 2: length = reader.u16().map(Int.init)
+            default: length = reader.u32().map(Int.init)
+            }
+            guard let length, reader.skip(length) else { return nil }
+        }
+        // The serial number is read only to find where it ends; it is dropped here.
+        if flags & 0x02 != 0, printableString(&reader) == nil { return nil }
+        var hardware: String?
+        var firmware: String?
+        if flags & 0x04 != 0 {
+            guard let value = printableString(&reader) else { return nil }
+            hardware = value
+        }
+        if flags & 0x08 != 0 {
+            guard let value = printableString(&reader) else { return nil }
+            firmware = value
+        }
+        // The PnP ID must fit; its bytes are not kept.
+        if flags & 0x10 != 0, !reader.skip(7) { return nil }
+        return (hardware, firmware)
+    }
+
+    /// Strict: NUL-terminated, valid UTF-8, no control characters.
+    private static func printableString(_ reader: inout ZeppByteReader) -> String? {
+        guard let end = reader.bytes[reader.offset...].firstIndex(of: 0),
+              let raw = reader.take(end - reader.offset), reader.skip(1),
+              let text = String(bytes: raw, encoding: .utf8),
+              text.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7F }) else { return nil }
+        return text
+    }
+}
 
 // MARK: - Battery (endpoint 0x0029, §5.3)
 

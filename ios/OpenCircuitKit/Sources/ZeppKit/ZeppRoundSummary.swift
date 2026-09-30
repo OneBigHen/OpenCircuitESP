@@ -89,3 +89,21 @@ public enum ZeppRoundSummary {
         return formatter.string(from: date)
     }
 }
+
+/// HelioVerify `--trace` lines for the history fetch. Control messages are printed in full: they
+/// carry only commands, lengths, timestamps and CRCs. A data packet is printed as its length and
+/// counter byte only, never its payload (that is health data).
+public enum ZeppFetchTrace {
+
+    /// `→ …0004 01 01 ea 07 …` / `← …0004 10 01 01 …`; `channel` names Path B's `0x004B` instead.
+    public static func control(_ bytes: [UInt8], outgoing: Bool, channel: String = "…0004") -> String {
+        let hex = bytes.isEmpty ? "(empty)" : bytes.map { String(format: "%02x", $0) }.joined(separator: " ")
+        return "\(outgoing ? "→" : "←") \(channel) \(hex)"
+    }
+
+    /// `← …0005 241 B, counter 00`.
+    public static func dataPacket(_ bytes: [UInt8]) -> String {
+        guard let counter = bytes.first else { return "← …0005 0 B (empty)" }
+        return "← …0005 \(bytes.count) B, counter " + String(format: "%02x", counter)
+    }
+}

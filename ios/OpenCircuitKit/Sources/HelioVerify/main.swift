@@ -2,7 +2,8 @@
 //
 // Thin glue only: it moves bytes between CoreBluetooth and ZeppKit's pure state machines
 // (`ZeppLink`, `ZeppHistoryFetch`) and prints what they decide. The auth key is never printed or
-// logged, nor is the strap's serial number. The history fetch acks `03 09` (keep on strap) unless
+// logged, nor are the strap's serial number and PnP ID. `--trace` prints the history fetch's
+// control bytes and each data packet's length and counter, never a data payload. The history fetch acks `03 09` (keep on strap) unless
 // `--allow-delete` AND `--out` are both given; then a round is delete-acked only after its raw
 // bytes are written and fsynced to the `--out` file.
 //
@@ -28,6 +29,7 @@ struct Options {
                                   .sleepRespiratoryRate, .sleepSession]
     var setTime = false
     var timeoutSeconds: Double = 300
+    var trace = false
     // Device controls (Controls.swift).
     var findSeconds: Double?
     var vibrate = false
@@ -52,9 +54,11 @@ Without a key: scans, connects, reads the standard battery level (if the strap e
 and firmware/hardware revision, and listens to standard heart-rate notifications (0x2A37; needs
 Zepp's "Heart Rate Push" switch on).
 
-With --key-file: also authenticates, reads battery over the encrypted battery endpoint, reads the
-HEALTH settings (warns about switches that stop recording), streams live HR, and runs a
-NON-DESTRUCTIVE history fetch (ack 03 09: the strap keeps everything), printing summaries.
+With --key-file: also authenticates, prints the services list, reads the hardware and firmware
+versions from the device-info endpoint (0x0043; never the serial number), reads battery over the
+battery endpoint, reads the HEALTH settings (warns about switches that stop recording), streams
+live HR, and runs a NON-DESTRUCTIVE history fetch (ack 03 09: the strap keeps everything),
+printing summaries.
 
 OPTIONS
   --key-file <path>   File holding the 16-byte auth key as 32 hex digits (optional 0x prefix).
@@ -67,6 +71,8 @@ OPTIONS
   --scan-seconds <n>  Give up scanning after n seconds (default 30).
   --timeout <n>       Abort the whole run after n seconds (default 300).
   --set-time          Set the strap's clock to this Mac's time before fetching (off by default).
+  --trace             Print every history-fetch control message both ways as hex, and each data
+                      packet's length and counter byte (never its payload).
   --out <path>        Append each fetched round (raw hex + metadata, JSON lines) to this file and
                       fsync it. The file holds REAL HEALTH DATA: keep it out of git.
   --allow-delete      DESTRUCTIVE. Ack 03 01 ("saved, drop it from the strap") for each round,
@@ -130,6 +136,7 @@ func parseOptions(_ args: [String]) -> Options {
         case "--since-hours": o.sinceHours = number("--since-hours")
         case "--timeout": o.timeoutSeconds = number("--timeout")
         case "--set-time": o.setTime = true
+        case "--trace": o.trace = true
         case "--find":
             // Optional value: `--find` alone buzzes for 10 s.
             if i + 1 < args.count, let n = Double(args[i + 1]) {
@@ -221,7 +228,7 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
 
     enum Step: String {
         case scanning, connecting, discovering, readingBasics, liveHR, enablingChunked, authenticating,
-             servicesList, battery, setTime, config, authedHR, enablingFetch, fetching, controls, done
+             servicesList, deviceInfo, battery, setTime, config, authedHR, enablingFetch, fetching, controls, done
     }
 
     let options: Options
@@ -251,6 +258,8 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     var controlWaitToken = 0
     var controlTimer: Timer?
     var configCapabilities: ZeppConfigCapabilities?
+    /// DIS 0x2A27, to cross-check the device-info hardware version.
+    var disHardwareRevision: String?
 
     init(options: Options, key: ZeppAuthKey?) {
         self.options = options
@@ -484,12 +493,10 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             services = list
             link?.apply(servicesList: list)
             printServices(list)
-            guard list.contains(ZeppEndpoint.battery) else {
-                log("battery (endpoint): 0x0029 not in the services list; skipped")
-                return afterBattery()
-            }
-            step = .battery
-            send(ZeppEndpoint.battery, ZeppBatteryStatus.request)
+            requestDeviceInfo()
+        case (.deviceInfo, ZeppEndpoint.deviceInfo):
+            printDeviceInfo(message.payload)
+            requestBattery()
         case (.battery, ZeppEndpoint.battery):
             if let battery = ZeppBatteryStatus.parse(message.payload) {
                 let charging = battery.isCharging.map { $0 ? "charging" : "not charging" } ?? "charging state unknown"
@@ -521,10 +528,53 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         case (.controls, ZeppEndpoint.config):
             receiveAlertsMessage(message.payload)
         case (.fetching, ZeppEndpoint.activityFetch):
+            if options.trace { log("  " + ZeppFetchTrace.control(message.payload, outgoing: false, channel: "0x004b")) }
             feedFetchControl(message.payload)
         default:
             log("message on endpoint 0x\(String(format: "%04x", message.endpoint)) (\(message.payload.count) B) ignored in step '\(step.rawValue)'")
         }
+    }
+
+    /// §5.3 device info, when the strap lists endpoint 0x0043. Only the versions are printed.
+    func requestDeviceInfo() {
+        guard services?.contains(ZeppEndpoint.deviceInfo) == true else {
+            log("device info: 0x0043 not in the services list; skipped")
+            return requestBattery()
+        }
+        step = .deviceInfo
+        send(ZeppEndpoint.deviceInfo, ZeppDeviceInfo.request)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.step == .deviceInfo else { return }
+            self.log("device info: no reply in 5 s; skipped")
+            self.requestBattery()
+        }
+    }
+
+    func printDeviceInfo(_ payload: [UInt8]) {
+        guard let info = ZeppDeviceInfo.parse(payload) else {
+            return log("device info: unparseable reply (\(payload.count) B)")
+        }
+        let widths = info.blobPrefixWidths.map { "\($0) B" }.joined(separator: ", ")
+        let blob = info.flags & 0x01 == 0 ? "no bit-0 blob" : "bit-0 blob prefix width(s) that parse: \(widths)"
+        let detail = "flags 0x\(String(info.flags, radix: 16)), \(blob)"
+        if info.isAmbiguous {
+            return log("device info: versions ambiguous, the parsing widths disagree (\(detail))")
+        }
+        // A mis-located field could shift the serial number into a version (the SPEC-GAP in
+        // ZeppDeviceInfo.parse). If DIS gave a hardware revision and this one differs, print neither.
+        if let dis = disHardwareRevision, let hardware = info.hardwareVersion, dis != hardware {
+            return log("device info: hardware version differs from DIS 0x2A27, so the fields may be misaligned; versions withheld (\(detail))")
+        }
+        log("device info: hardware \(info.hardwareVersion ?? "not reported"), firmware \(info.firmwareVersion ?? "not reported") (\(detail))")
+    }
+
+    func requestBattery() {
+        guard services?.contains(ZeppEndpoint.battery) == true else {
+            log("battery (endpoint): 0x0029 not in the services list; skipped")
+            return afterBattery()
+        }
+        step = .battery
+        send(ZeppEndpoint.battery, ZeppBatteryStatus.request)
     }
 
     func afterBattery() {
@@ -614,6 +664,7 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         for action in actions {
             switch action {
             case .sendControl(let bytes):
+                if options.trace { log("  " + ZeppFetchTrace.control(bytes, outgoing: true)) }
                 if let c = characteristics[.activityControl] { write(ZeppWrite(.activityControl, bytes), to: c) }
             case .roundReady(let round):
                 roundsDelivered += 1
@@ -723,7 +774,9 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         case .firmwareRevision:
             log("firmware: \(String(decoding: bytes, as: UTF8.self))")
         case .hardwareRevision:
-            log("hardware: \(String(decoding: bytes, as: UTF8.self))")
+            let revision = String(decoding: bytes, as: UTF8.self)
+            disHardwareRevision = revision.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\0")))
+            log("hardware: \(revision)")
         case .heartRateMeasurement:
             if let hr = ZeppHeartRateMeasurement.parse(bytes) {
                 let rr = hr.rrIntervals.isEmpty ? "" : ", \(hr.rrIntervals.count) RR interval(s)"
@@ -735,8 +788,10 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             self.link = link
             handle(out)
         case .activityControl:
+            if options.trace { log("  " + ZeppFetchTrace.control(bytes, outgoing: false)) }
             feedFetchControl(bytes)
         case .activityData:
+            if options.trace { log("  " + ZeppFetchTrace.dataPacket(bytes)) }
             guard var machine = fetch else { return }
             let actions = machine.receiveData(bytes)
             fetch = machine
