@@ -1,12 +1,15 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-// OpenCircuitKit holds the platform-agnostic core of the iOS app: the RingConn frame
-// codec (ported from desktop/opencircuit/framing.py), metric models, and — later —
-// the openwhoop analytics port. It depends on NO Apple frameworks so it builds and
-// tests with `swift test` on the command line, without Xcode or a device. The
-// CoreBluetooth / HealthKit / SwiftData glue lives in the Xcode app target and
-// imports this package.
+// The `OpenCircuitKit` target holds the platform-agnostic core of the iOS app: the RingConn
+// frame codec (ported from desktop/opencircuit/framing.py), metric models, and the openwhoop
+// analytics port. That target imports only Foundation, NO other Apple framework, so it builds
+// and tests with `swift test` on the command line, without Xcode or a device. The
+// CoreBluetooth / HealthKit / SwiftData glue lives in the Xcode app target and imports it.
+//
+// The Zepp targets are not pure: `ZeppKit` imports CommonCrypto (AES) and Security (the
+// CSPRNG), and the `HelioVerify` tool imports CoreBluetooth. The app links only the
+// `OpenCircuitKit` product.
 let package = Package(
     name: "OpenCircuitKit",
     products: [
@@ -36,5 +39,7 @@ let package = Package(
         // macOS CoreBluetooth verifier for a real strap: `swift run HelioVerify --help`.
         // Thin BLE glue only; every decision lives in ZeppKit.
         .executableTarget(name: "HelioVerify", dependencies: ["ZeppKit"]),
+        // HelioVerify's command-line parsing (write gating), without Bluetooth.
+        .testTarget(name: "HelioVerifyTests", dependencies: ["HelioVerify"]),
     ]
 )

@@ -76,6 +76,42 @@ final class FetchTests: XCTestCase {
         XCTAssertEqual(controls(notDurable.commit(roundID: round2.id, durable: false)), [[0x03, 0x09]])
     }
 
+    func testDeletePolicyKeepsARoundWithoutACRC() throws {
+        // The 3-byte transfer done carries no CRC: nothing proves the data arrived intact (#219 review N3).
+        var fetch = machine([(.hrv, sinceD)], policy: .deleteAfterDurableCommit)
+        _ = fetch.start(); _ = fetch.receiveControl(startReplyD); _ = fetch.receiveData(dataPacketD)
+        let round = try XCTUnwrap(readyRound(fetch.receiveControl(hex("10 02 01"))))
+        XCTAssertFalse(round.crcVerified)
+        XCTAssertEqual(controls(fetch.commit(roundID: round.id, durable: true)), [[0x03, 0x09]])
+
+        var activity = machine([(.activity, sinceD)], policy: .deleteAfterDurableCommit)
+        _ = activity.start()
+        _ = activity.receiveControl(activityStart(3, at: hex("ea 07 09 1d 00 00 00 08")))
+        _ = activity.receiveData([0x00] + threeMinutes)
+        let noCRC = try XCTUnwrap(readyRound(activity.receiveControl(hex("10 02 01"))))
+        XCTAssertEqual(controls(activity.commit(roundID: noCRC.id, durable: true)), [[0x03, 0x09]])
+    }
+
+    func testLengthPreservingCorruptionWithoutACRCIsDeliveredButNeverDeleted() throws {
+        // The review's fuzz case: one packet gains a byte and a later one loses a byte, so the length
+        // still matches; with no CRC the round parses, and it must still be kept on the strap.
+        let data = Array(dataPacketD.dropFirst())
+        var fetch = machine([(.hrv, sinceD)], policy: .deleteAfterDurableCommit)
+        _ = fetch.start(); _ = fetch.receiveControl(startReplyD)
+        XCTAssertEqual(fetch.receiveData([0x00] + data.prefix(6) + [0xEE]), [])
+        XCTAssertEqual(fetch.receiveData([0x01] + data.dropFirst(6).dropLast()), [])
+        let round = try XCTUnwrap(readyRound(fetch.receiveControl(hex("10 02 01"))))
+        XCTAssertNotEqual(round.rawData, data)
+        XCTAssertFalse(round.crcVerified)
+        XCTAssertEqual(controls(fetch.commit(roundID: round.id, durable: true)), [[0x03, 0x09]])
+        // With the CRC, the same corruption fails the round instead.
+        var checked = machine([(.hrv, sinceD)], policy: .deleteAfterDurableCommit)
+        _ = checked.start(); _ = checked.receiveControl(startReplyD)
+        _ = checked.receiveData([0x00] + data.prefix(6) + [0xEE])
+        _ = checked.receiveData([0x01] + data.dropFirst(6).dropLast())
+        XCTAssertEqual(controls(checked.receiveControl(transferDoneD)), [[0x03, 0x09]])
+    }
+
     func testCommitForAnotherRoundIsIgnored() throws {
         var fetch = machine([(.hrv, sinceD)], policy: .deleteAfterDurableCommit)
         _ = fetch.start(); _ = fetch.receiveControl(startReplyD); _ = fetch.receiveData(dataPacketD)
@@ -512,5 +548,107 @@ final class FetchTests: XCTestCase {
         XCTAssertEqual(run.rounds.count, 1)
         XCTAssertTrue(round.crcVerified)
         XCTAssertEqual(round.parsed.records.count, 3)
+    }
+
+    // MARK: Announced length cap (#219 review S1)
+
+    /// The round buffer, read through reflection (the property is private).
+    private func buffered(_ fetch: ZeppHistoryFetch) -> [UInt8]? {
+        Mirror(reflecting: fetch).children.first { $0.label == "buffer" }?.value as? [UInt8]
+    }
+
+    func testAnnouncedLengthOverTheCapFailsTheRoundBeforeAnyDataIsBuffered() {
+        // The review probe: a start reply announcing ff ff ff ff, then 1 MiB of data.
+        let now = date(1_790_700_000)
+        var fetch = ZeppHistoryFetch(plan: [(.autoStress, now.addingTimeInterval(-3_600))], now: now,
+                                     configuration: .init(ackPolicy: .deleteAfterDurableCommit, timeZone: utc))
+        _ = fetch.start()
+        var reply: [UInt8] = [0x10, 0x01, 0x01] + le32(0xFFFF_FFFF)
+        reply += ZeppFetchTimestamp.encode(now.addingTimeInterval(-3_600), timeZone: utc)
+        reply.append(0x00)
+        XCTAssertEqual(fetch.receiveControl(reply), [
+            .roundFailed(type: .autoStress, failure: .announcedLengthTooLarge(announced: 0xFFFF_FFFF, limit: 4 << 20)),
+            .sendControl(hex("03 09")),
+        ])
+        XCTAssertEqual(fetch.phase, .awaitingAckReply)
+        let packet = [UInt8](repeating: 0x20, count: 512)
+        var counter: UInt8 = 0
+        for _ in 0..<(1024 * 1024 / 512) {
+            XCTAssertEqual(fetch.receiveData([counter] + packet), [])
+            counter &+= 1
+        }
+        XCTAssertEqual(buffered(fetch), [])
+        XCTAssertEqual(fetch.phase, .awaitingAckReply)
+    }
+
+    func testActivityCapCountsRecordsTimesEight() {
+        // ff ff ff ff activity records would be about 34 GB.
+        var fetch = machine([(.activity, sinceD)])
+        _ = fetch.start()
+        XCTAssertEqual(fetch.receiveControl(activityStart(0xFFFF_FFFF, at: hex("ea 07 09 1d 00 00 00 08"))), [
+            .roundFailed(type: .activity, failure: .announcedLengthTooLarge(announced: 0xFFFF_FFFF * 8, limit: 4 << 20)),
+            .sendControl(hex("03 09")),
+        ])
+        // 524,288 records are exactly 4 MiB and still accepted; one more record is not.
+        var atCap = machine([(.activity, sinceD)])
+        _ = atCap.start()
+        XCTAssertEqual(atCap.receiveControl(activityStart(524_288, at: hex("ea 07 09 1d 00 00 00 08"))),
+                       [.sendControl([0x02])])
+        var overCap = machine([(.activity, sinceD)])
+        _ = overCap.start()
+        XCTAssertEqual(overCap.receiveControl(activityStart(524_289, at: hex("ea 07 09 1d 00 00 00 08"))), [
+            .roundFailed(type: .activity, failure: .announcedLengthTooLarge(announced: 4_194_312, limit: 4 << 20)),
+            .sendControl(hex("03 09")),
+        ])
+    }
+
+    func testCapIsConfigurableAndInclusive() {
+        // Worked example D announces 12 bytes.
+        var atLimit = ZeppHistoryFetch(plan: [(.hrv, sinceD)], now: date(1_790_633_430),
+                                       configuration: .init(timeZone: plusTwo, maxRoundBytes: 12))
+        _ = atLimit.start()
+        XCTAssertEqual(atLimit.receiveControl(startReplyD), [.sendControl([0x02])])
+        var belowLimit = ZeppHistoryFetch(plan: [(.hrv, sinceD)], now: date(1_790_633_430),
+                                          configuration: .init(timeZone: plusTwo, maxRoundBytes: 11))
+        _ = belowLimit.start()
+        XCTAssertEqual(belowLimit.receiveControl(startReplyD), [
+            .roundFailed(type: .hrv, failure: .announcedLengthTooLarge(announced: 12, limit: 11)),
+            .sendControl(hex("03 09")),
+        ])
+        // Like every failed round, it is retried once from the same since.
+        XCTAssertEqual(belowLimit.receiveControl(hex("10 03 01")), [.sendControl(hex("01 49 ea 07 09 1d 00 00 00 08"))])
+        XCTAssertEqual(ZeppHistoryFetch.Configuration().maxRoundBytes, 4_194_304)
+    }
+
+    func testHundredDayActivityBacklogIsAccepted() throws {
+        // 100 days × 1440 minutes = 144,000 records = 1,152,000 B, the default first-ever cursor's
+        // worth of activity. Made-up minutes, delivered in 4000-byte packets with a CRC.
+        let records = 144_000
+        let minute = hex("01 10 02 46 00 00 00 00")
+        var data = [UInt8]()
+        data.reserveCapacity(records * 8)
+        for _ in 0..<records { data += minute }
+        var fetch = machine([(.activity, sinceD)], now: date(1_800_000_000))
+        _ = fetch.start()
+        XCTAssertEqual(fetch.receiveControl(activityStart(records, at: hex("ea 07 09 1d 00 00 00 08"))),
+                       [.sendControl([0x02])])
+        var counter: UInt8 = 0
+        var offset = 0
+        while offset < data.count {
+            let end = min(offset + 4000, data.count)
+            XCTAssertEqual(fetch.receiveData([counter] + data[offset..<end]), [])
+            counter &+= 1
+            offset = end
+        }
+        let round = try XCTUnwrap(readyRound(fetch.receiveControl([0x10, 0x02, 0x01] + le32(ZeppCRC32.checksum(data)))))
+        XCTAssertTrue(round.crcVerified)
+        XCTAssertEqual(round.rawData.count, 1_152_000)
+        XCTAssertEqual(round.parsed.records.count, records)
+        XCTAssertEqual(round.nextSince, date(1_790_632_800 + TimeInterval(records * 60)))
+    }
+
+    func testAnnouncedLengthTooLargeDescription() {
+        XCTAssertEqual(ZeppRoundFailure.announcedLengthTooLarge(announced: 34_359_738_360, limit: 4_194_304).description,
+                       "announced length too large, announced 34359738360 B, limit 4194304 B")
     }
 }

@@ -79,7 +79,11 @@ final class SessionCommandTests: XCTestCase {
 
     func testConfigRead() {
         XCTAssertEqual(ZeppConfig.readRequest(group: 0x08, arguments: [0x13, 0x31]), hex("03 00 08 02 13 31"))
-        XCTAssertEqual(ZeppConfig.recordingArguments, [0x01, 0x04, 0x05, 0x11, 0x12, 0x13, 0x31])
+        XCTAssertEqual(ZeppConfig.recordingArguments, [0x01, 0x05, 0x11, 0x12, 0x13, 0x31])
+        XCTAssertEqual(ZeppConfig.informationalArguments, [0x04])
+        // The read HelioVerify sends is unchanged: the recording switches plus 0x04, in this order.
+        XCTAssertEqual(ZeppConfig.readRequest(group: ZeppConfig.healthGroup, arguments: ZeppConfig.healthReadArguments),
+                       hex("03 00 08 07 01 04 05 11 12 13 31"))
 
         let reply = ZeppConfig.parseReadReply(hex("04 01 08 03 00 04 01 10 00 05 0b 01 13 0b 00 31 0b 01"))
         XCTAssertEqual(reply?.group, 0x08)
@@ -93,6 +97,26 @@ final class SessionCommandTests: XCTestCase {
         XCTAssertNil(settings.highAccuracySleep)
         XCTAssertEqual(settings.warnings.count, 2)                      // HR monitoring off, stress off
         XCTAssertTrue(settings.warnings[0].contains("heart-rate monitoring is off"))
+    }
+
+    /// Arg 0x04 read off on the Helio while every minute of a 12 h activity fetch carried a heart
+    /// rate (§5.5): it is the "Active HR monitoring" sampling boost, not a recording switch.
+    func testActiveHRMonitoringIsInformationalNotAWarning() throws {
+        // HR monitoring automatic, 0x04 off, every other switch on (made-up values).
+        let off = try XCTUnwrap(ZeppConfig.parseReadReply(
+            hex("04 01 08 03 00 07 01 10 ff 04 0b 00 05 0b 01 11 0b 01 12 0b 01 13 0b 01 31 0b 01")))
+        XCTAssertEqual(off.isPartial, false)
+        let settings = ZeppHealthSettings(off)
+        XCTAssertEqual(settings.heartRateDuringActivity, false)
+        XCTAssertEqual(settings.warnings, [])
+        XCTAssertEqual(settings.informational, ["Active HR monitoring (sampling boost during activity): off"])
+
+        let on = try XCTUnwrap(ZeppConfig.parseReadReply(hex("04 01 08 03 00 01 04 0b 01")))
+        XCTAssertEqual(ZeppHealthSettings(on).informational, ["Active HR monitoring (sampling boost during activity): on"])
+        XCTAssertEqual(ZeppHealthSettings(on).warnings, [])
+
+        let absent = try XCTUnwrap(ZeppConfig.parseReadReply(hex("04 01 08 03 00 01 13 0b 01")))
+        XCTAssertEqual(ZeppHealthSettings(absent).informational, [])
     }
 
     func testConfigValueTypesWithConstraintsAndUnknownTypeStops() {

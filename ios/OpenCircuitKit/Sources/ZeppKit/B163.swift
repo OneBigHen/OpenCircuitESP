@@ -161,11 +161,18 @@ public enum B163 {
         case degenerateSharedSecret
     }
 
-    public struct KeyPair: Equatable {
+    /// The private scalar never appears in a description or reflection; the public key does.
+    public struct KeyPair: Equatable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
         /// The EFFECTIVE scalar (bits ≥ 162 already cleared), 24 bytes little-endian.
         public let privateKey: [UInt8]
         /// X ‖ Y, 24 bytes each, little-endian.
         public let publicKey: [UInt8]
+
+        public var description: String {
+            "B163.KeyPair(privateKey: <redacted>, publicKey: \(ZeppHex.string(publicKey)))"
+        }
+        public var debugDescription: String { description }
+        public var customMirror: Mirror { Mirror(self, children: ["publicKey": publicKey], displayStyle: .struct) }
     }
 
     // MARK: Curve constants (tiny-ECDH-c's NIST_B163 set, 32-bit words, least-significant first)

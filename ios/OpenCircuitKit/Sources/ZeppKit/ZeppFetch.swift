@@ -2,9 +2,10 @@
 //
 // THE ACK IS THE ONLY DESTRUCTIVE THING IN THIS PROTOCOL. `03 01` tells the strap the data is saved
 // on the phone and it stops offering it; `03 09` acknowledges but keeps it (§6.3). This machine
-// sends `03 09` on EVERY path except one: the policy is `.deleteAfterDurableCommit` AND the caller
-// has called `commit(roundID:durable: true)` for that exact round after persisting it. Failures,
-// empty rounds, aborts and the default policy all keep the data on the strap.
+// sends `03 09` on EVERY path except one: the policy is `.deleteAfterDurableCommit` AND the round's
+// transfer done carried a CRC that matched AND the caller has called `commit(roundID:durable: true)`
+// for that exact round after persisting it. Failures, rounds without a CRC, empty rounds, aborts
+// and the default policy all keep the data on the strap.
 //
 // Path-agnostic: control bytes are identical on Path A (`…0004`) and Path B (endpoint 0x004B,
 // §6.1). The caller routes `.sendControl` payloads and feeds control replies to
@@ -15,7 +16,8 @@ import Foundation
 public enum ZeppAckPolicy: Equatable {
     /// Always `03 09`: the strap keeps everything (development default, §6.3).
     case keepOnDevice
-    /// `03 01` only for a round the caller confirmed as durably committed; `03 09` otherwise.
+    /// `03 01` only for a CRC-verified round the caller confirmed as durably committed; `03 09`
+    /// otherwise.
     case deleteAfterDurableCommit
 }
 
@@ -47,6 +49,9 @@ public enum ZeppRoundFailure: Equatable {
     case startRefused(status: UInt8)
     /// The start reply was not 15 or 16 bytes, or it announced data with an invalid timestamp.
     case malformedStartReply
+    /// The start reply announced more bytes (length × the type's unit) than
+    /// `Configuration.maxRoundBytes` allows. Rejected before any data is buffered.
+    case announcedLengthTooLarge(announced: Int, limit: Int)
     /// A data packet counter was skipped or repeated (§9 #9).
     case packetCounterGap(expected: UInt8, got: UInt8)
     /// More data than the start reply announced. Both counts are bytes: for activity, `expected`
@@ -71,6 +76,8 @@ extension ZeppRoundFailure: CustomStringConvertible {
         switch self {
         case .startRefused(let status): return String(format: "start refused, status %02x", status)
         case .malformedStartReply: return "malformed start reply"
+        case .announcedLengthTooLarge(let announced, let limit):
+            return "announced length too large, announced \(announced) B, limit \(limit) B"
         case .packetCounterGap(let expected, let got):
             return String(format: "packet counter gap, expected %02x, got %02x", expected, got)
         case .dataOverflow(let expected, let received):
@@ -99,6 +106,7 @@ public struct ZeppFetchRound: Equatable {
     /// parsed records if the store should be able to re-decode later.
     public let rawData: [UInt8]
     /// true when the transfer-done reply carried a CRC and it matched; false when it carried none.
+    /// Only a CRC-verified round can be delete-acked (`03 01`).
     public let crcVerified: Bool
     public let parsed: ZeppParsedRecords
     /// The *since* the next round of this type will use (last record + 1 minute); nil when the
@@ -138,13 +146,20 @@ public struct ZeppHistoryFetch {
         /// SPEC-GAP: §9 says "retry" without a count; one retry, then the type is left for next time.
         public var maxRetriesPerType = 1
         public var timeZone: TimeZone = .current
+        /// Upper bound on one round's announced size in bytes (length × the type's unit). The strap
+        /// controls the announced length (any u32), and the round is buffered in memory, so a larger
+        /// announcement fails the round before any data is kept. 4 MiB is well above the largest
+        /// real round: a 100-day activity backlog is 144,000 records × 8 B = 1,152,000 B, and the
+        /// real 12 h activity round was 5760 B (§10.1).
+        public var maxRoundBytes = 4 << 20
 
         public init(ackPolicy: ZeppAckPolicy = .keepOnDevice, maxRoundsPerType: Int = 11,
-                    maxRetriesPerType: Int = 1, timeZone: TimeZone = .current) {
+                    maxRetriesPerType: Int = 1, timeZone: TimeZone = .current, maxRoundBytes: Int = 4 << 20) {
             self.ackPolicy = ackPolicy
             self.maxRoundsPerType = maxRoundsPerType
             self.maxRetriesPerType = maxRetriesPerType
             self.timeZone = timeZone
+            self.maxRoundBytes = maxRoundBytes
         }
     }
 
@@ -224,12 +239,16 @@ public struct ZeppHistoryFetch {
     }
 
     /// The caller's decision for a delivered round. `durable: true` means the round's records are
-    /// persisted and will survive a crash; only then, and only under `.deleteAfterDurableCommit`,
-    /// does the strap get `03 01`. Anything else is `03 09`.
+    /// persisted and will survive a crash; only then, only under `.deleteAfterDurableCommit`, and
+    /// only for a round whose CRC was checked (`crcVerified`), does the strap get `03 01`. Anything
+    /// else is `03 09`.
     public mutating func commit(roundID: Int, durable: Bool) -> [Action] {
         guard phase == .awaitingCommit, let round = pendingRound, round.id == roundID else { return [] }
         pendingRound = nil
-        let mode: ZeppAckMode = (durable && configuration.ackPolicy == .deleteAfterDurableCommit) ? .delete : .keep
+        // A 3-byte transfer done has no CRC, so nothing proves the data arrived intact: keep it.
+        // The Helio always sent the 7-byte form (§10.1), so this costs nothing there.
+        let deletable = durable && round.crcVerified && configuration.ackPolicy == .deleteAfterDurableCommit
+        let mode: ZeppAckMode = deletable ? .delete : .keep
         if let next = round.nextSince, next.timeIntervalSince(round.since) >= 1, next <= now {
             afterAck = .nextRound(since: next)
         } else {
@@ -282,12 +301,18 @@ public struct ZeppHistoryFetch {
             phase = .awaitingAckReply
             return [.noData(type: type), .sendControl(ZeppFetchCommand.ack(.keep))]
         }
+        // Checked in bytes from here on: activity announces records (§6.2). The cap bounds the
+        // memory a strap can make us hold for one round; the round is kept on the strap.
+        let (announced, overflow) = Int(length).multipliedReportingOverflow(by: type.startReplyLengthUnit)
+        guard !overflow, announced <= configuration.maxRoundBytes else {
+            return failRound(type, .announcedLengthTooLarge(announced: overflow ? .max : announced,
+                                                            limit: configuration.maxRoundBytes))
+        }
         guard let start = ZeppFetchTimestamp.decode(bytes[7..<15]) else {
             return failRound(type, .malformedStartReply)
         }
         roundStart = start
-        // Checked in bytes from here on: activity announces records (§6.2).
-        expectedLength = Int(length) * type.startReplyLengthUnit
+        expectedLength = announced
         phase = .receivingData
         return [.sendControl(ZeppFetchCommand.fetchData)]
     }
@@ -308,10 +333,11 @@ public struct ZeppHistoryFetch {
             var reader = ZeppByteReader(bytes, offset: 3)
             let expected = reader.u32() ?? 0
             let computed = ZeppCRC32.checksum(buffer)
-            // SPEC-GAP: Gadgetbridge skips the CRC check for activity (0x01) without saying why, and
-            // no activity round has reached this check on hardware yet (§10.1). ZeppKit checks it
-            // for every type; a mismatch keeps the data on the strap, and the failure carries the
-            // announced and the computed CRC so the next hardware run answers the question.
+            // Checked for every type. Gadgetbridge skips the check for activity (0x01) without saying
+            // why, but on the Helio the activity CRC matches like every other type's: 60 records
+            // (480 B) and a full 12 h round of 720 records (5760 B) (§6.5, §10.1, HW 2026-09-30
+            // 13:35). A mismatch keeps the data on the strap, and the failure carries the
+            // announced and the computed CRC.
             guard expected == computed else {
                 return failRound(type, .crcMismatch(expected: expected, computed: computed))
             }

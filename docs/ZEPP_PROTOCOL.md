@@ -46,6 +46,7 @@ Citations use these aliases. Line numbers are 1-based at the pinned commit.
 | `AMZ-S` | Amazfit support page for the Helio Strap, https://support.amazfit.com/us/amazfit_helio_strap/docs/OSUldKzExovDlRxnMyCcH10dnL0 (© 2025) | fetched 2026-09-30 |
 | `AMZ-M` | Amazfit Helio Strap user manual, https://support.amazfit.com/us/amazfit_helio_strap/files/user-manual.pdf.pdf (PDF created 2025-08-07); `AMZ-M p.N` = printed page N | fetched 2026-09-30 |
 | `HW:2026-09-30 (hw 0.132.27.2)` | Our own HelioVerify run against Juan's Helio Strap: hardware revision 0.132.27.2 (his Zepp account lists firmware 3.3.6.5), macOS CoreBluetooth, every ack `03 09`. Control bytes and lengths only; results in §10.1 | 2026-09-30 |
+| `HW:2026-09-30 13:35` | Juan's read-only re-test of the same strap with HelioVerify at `293cd90`, every ack `03 09`: the activity CRC, a full 12 h round, the device-info firmware read and HEALTH arg `0x04`. Results in §10.1 | 2026-09-30 |
 
 HelioCore is the only reference known to run on a real Helio Strap from iOS; Gadgetbridge
 covers the whole Zepp OS family and marks the Helio Strap *experimental*
@@ -71,9 +72,9 @@ disagree, §9 says so.
 Firmware seen in the wild on Helio Straps: **3.11.0** and **3.11.0.1** (user reports,
 Gadgetbridge issues #5986 opened 2026-04-08 and #5843 opened 2026-03-06). Juan's strap:
 hardware revision **0.132.27.2** (DIS `0x2A27`); his Zepp account lists firmware **3.3.6.5**.
-The strap has **no DIS firmware-revision characteristic** (`0x2A26`), so the firmware version
-has not been read over BLE yet; endpoint `0x0043` (§5.3) is the remaining route. 🟢
-`HW:2026-09-30 (hw 0.132.27.2)` for the hardware revision and the missing `0x2A26`.
+The strap has **no DIS firmware-revision characteristic** (`0x2A26`) 🟢
+`HW:2026-09-30 (hw 0.132.27.2)`. Its own device-info read (endpoint `0x0043`, §5.3) reports
+firmware **3.25.0.3** 🟢 `HW:2026-09-30 13:35`, not the 3.3.6.5 the Zepp account lists.
 
 ---
 
@@ -485,7 +486,9 @@ and flags as described; the Helio's list is in §3.5.
   identifier: never log it or commit it. 🔴 **the width of bit 0's length prefix is not given**,
   and the Helio's flags set bit 0 (§1), so the fields after it can't be located with certainty.
   The Helio lists `0x0043` but has no DIS firmware revision (§10.1), so this endpoint is the only
-  BLE route to its firmware version. The next hardware run records which width parses.
+  BLE route to its firmware version. On the Helio it reported firmware **3.25.0.3** 🟢
+  `HW:2026-09-30 13:35`; which prefix width parsed is not recorded in §10.1, so the 🔴 on the
+  width stands.
 - **Battery** (endpoint `0x0029`, encrypted by default): request `03`. Reply `04` + 20 bytes
   (21 total). Payload byte `[2]` = level in %, byte `[3]` = `00` not charging / `01`
   charging; bytes `[11..18]` hold a last-charge date (u16 year, month, day, h, m, s, i8
@@ -507,7 +510,8 @@ UTF-8 then `00`. Reply `02 <status>`.
 
 The strap only records a metric if its monitoring setting is on. The Zepp app sets them;
 **read them after auth** and warn the user when one is off, rather than silently fetching
-nothing.
+nothing. Not every HEALTH switch is a recording switch: `0x04` only changes the sampling rate
+(table below).
 
 **Commands** 🟡 `SVC/Config:104-111,283-388,938-960`
 
@@ -549,7 +553,7 @@ written).
 | Arg | Type | Meaning | Relevant fetch type(s) |
 |---|---|---|---|
 | `0x01` | byte | all-day HR monitoring: `00` off, `ff` "smart"/auto, `N` = every N minutes (Gadgetbridge caps at 120) | activity HR, resting/max HR, HRV 🔴 | 
-| `0x04` | bool | HR monitoring during activity | activity HR 🔴 |
+| `0x04` | bool | the vendor's **"Active heart rate monitoring"** switch: it only raises the HR sampling rate during detected activity. It does **not** gate recording: it read `false` in a complete (non-partial) config read, and every one of the 720 minutes of the same session's 12 h activity fetch carried a heart rate. Read it for information; never warn about it. | none: 🟢 does not gate recording `HW:2026-09-30 13:35` (§10.1); the sampling-boost meaning is the vendor's switch description, not measured 🟡 |
 | `0x05` | bool | share HR with third parties. 🔴 Probably the Zepp app's **"Heart Rate Push"** switch (Zepp › Device › Helio Strap › Health Monitoring), which the strap needs for standard-HR broadcast (§7) | live HR |
 | `0x11` | bool | high-accuracy sleep monitoring (uses HR for sleep; needed for REM staging 🔴) | sleep session |
 | `0x12` | bool | sleep breathing-quality monitoring. Gadgetbridge notes it is required for **sleep SpO₂** (`FOP/Spo2Sleep:31-33`); 🔴 likely also for sleep respiratory rate | `0x26`, `0x38` 🔴 |
@@ -608,7 +612,7 @@ Phone                                                          Strap
 | **empty start reply** | status `01` with **length 0** means the strap has nothing for this type since *since*, **whatever the start timestamp holds**: don't validate it. Two forms seen: a far-future **sentinel** start (e.g. `3a 08 02 06 02 1c 10 f0` = 2106-02-06 02:28:16 at UTC−4, which is 2³² − 86 400 Unix seconds) for a type with nothing in the window, and an **all-zero** start (8 × `00`, not a valid date) on the follow-up round straight after a round that delivered data. Both are then acked like any empty round. | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` (both forms; 🔴 what the sentinel's value means) |
 | **fetch data** | the single byte `02` | 🟢 `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `FETCH:220`, `HC:944` |
 | **data packet** | on `…0005`: byte `[0]` = u8 **packet counter** starting at `00` for each round and incrementing by 1 (wrapping); the rest is data. Concatenate the data parts. A packet can be much longer than 20 bytes (a 241-byte packet was seen at the Mac's MTU). | 🟢 `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `FETCH:123-143`, `HC:955-965` |
-| **transfer done** | `10 02 <status>`; status `01` = ok. 7-byte form carries u32 LE **CRC-32** (same CRC as §3.3) of the concatenated data parts, counters excluded. | 🟢 `HW:2026-09-30 (hw 0.132.27.2)`: 7-byte form, and the CRC matched for every type except activity, where it is **unknown** (§6.5); 🟡 `FETCH:223-246` |
+| **transfer done** | `10 02 <status>`; status `01` = ok. 7-byte form carries u32 LE **CRC-32** (same CRC as §3.3) of the concatenated data parts, counters excluded. | 🟢 `HW:2026-09-30 (hw 0.132.27.2)`: 7-byte form, and the CRC matched for every type; activity's too 🟢 `HW:2026-09-30 13:35` (60 records / 480 B and 720 records / 5760 B, §10.1); 🟡 `FETCH:223-246` |
 | **ack** | `03`, then ack mode (§6.3) | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` (`03 09` only); 🟡 `FETCH:260-277` |
 | **ack reply** | `10 03 …`; Gadgetbridge treats it as "round finished" and only then starts the next round/type | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` (`10 03 01` after every ack, including empty rounds); 🟡 `FETCH:173-176` |
 
@@ -643,7 +647,8 @@ window at UTC−4. The length field counts **records**: 30 minutes × 8 bytes = 
 
 A correct phone waits for the transfer done, checks 240 = 30 × 8 bytes and the CRC, then
 acks. A 12-hour activity window announced `720` (720 minutes, so 5760 data bytes are
-expected; that round was also aborted early, at 960 bytes, so the full size is not yet seen).
+expected; that round was also aborted early, at 960 bytes). In the re-test all 720 records
+(5760 B) arrived and the CRC matched 🟢 `HW:2026-09-30 13:35`.
 
 ### 6.3 Ack: keep vs delete (critical)
 
@@ -661,8 +666,10 @@ Gadgetbridge's rules on Zepp OS (🟡 `FETCH:204-209,236-258`):
 
 **OpenCircuit rule**: send `03 09` during development (so Zepp/Gadgetbridge can pull the same
 window for side-by-side validation) and, in production, send `03 01` **only after the parsed
-round is durably committed** to the local store (mirroring `HistoryCommitGate`). Any failure
-path → `03 09`.
+round is durably committed** to the local store (mirroring `HistoryCommitGate`), and **only for
+a round whose transfer done carried a CRC that matched** (the 7-byte form). A 3-byte transfer
+done has no integrity check, so that round is kept (`03 09`); the Helio always sent the 7-byte
+form (§10.1). Any failure path → `03 09`.
 
 Unknowns (🔴, §10): whether `01` frees strap storage immediately; how long the strap retains
 unsynced data when only `09` is ever sent (it may eventually overwrite the oldest).
@@ -705,7 +712,7 @@ support, and the strap inherits all Zepp OS defaults except display-dependent on
 
 | Code | Name | Record layout (LE) | Rate / timestamps | Units / scaling | GB maps to | Helio in GB | Tag / source |
 |---|---|---|---|---|---|---|---|
-| `0x01` | **activity** | **8 bytes/min** on Zepp OS: `[0]` kind, `[1]` intensity, `[2]` steps, `[3]` HR, `[4]` unknown, `[5]` sleep, `[6]` deep-sleep, `[7]` REM (sleep bytes: use low 7 bits) | 1/min from *start* | steps = count in that minute; HR bpm, `ff` or `00` = no reading (HelioCore drops them; GB stores raw); intensity 0–255 (GB divides by 256). CRC is **not** checked by GB for this type; 🔴 whether it matches on the Helio (no hardware activity round has reached the check yet). | per-minute activity sample | yes (always) | 🟢 8 bytes/min, length in records `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Activity:71-164`, `SUP:984-986`, `HC:1180-1193` |
+| `0x01` | **activity** | **8 bytes/min** on Zepp OS: `[0]` kind, `[1]` intensity, `[2]` steps, `[3]` HR, `[4]` unknown, `[5]` sleep, `[6]` deep-sleep, `[7]` REM (sleep bytes: use low 7 bits) | 1/min from *start* | steps = count in that minute; HR bpm, `ff` or `00` = no reading (HelioCore drops them; GB stores raw); intensity 0–255 (GB divides by 256). CRC is **not** checked by GB for this type; on the Helio it **matches** like every other type's (60 records / 480 B, and a full 12 h round of 720 records / 5760 B). | per-minute activity sample | yes (always) | 🟢 8 bytes/min, length in records `HW:2026-09-30 (hw 0.132.27.2)`; 🟢 CRC `HW:2026-09-30 13:35`; fields 🟡 `FOP/Activity:71-164`, `SUP:984-986`, `HC:1180-1193` |
 | `0x02` | manual HR | 6 bytes: u32 ts, i8 tz (¼ h), u8 bpm | event | bpm | manual-HR sample | yes | 🟡 `FOP/HeartRateManual:63-90` (only empty replies on the Helio so far) |
 | `0x0d` | PAI | 102 bytes: u8 type (`05` valid, `00` pre-reset: skip), u32 ts, i8 tz, 31 unknown, f32 PAI low, f32 moderate, f32 high, u16 min low, u16 min moderate, u16 min high, f32 PAI today, f32 PAI total, 39 unknown | daily | PAI points, minutes | PAI sample | yes | 🟢 102-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Pai:62-129` |
 | `0x12` | stress (manual) | 5 bytes: u32 ts, u8 stress | event | 0–100 | stress, type manual | yes | 🟡 `FOP/StressManual:64-95` (only empty replies on the Helio so far) |
@@ -955,20 +962,23 @@ as the Zepp app shows them, so they can be restored by hand.
 ### 10.1 Results from a real strap (2026-09-30)
 
 Juan ran HelioVerify against his Helio Strap: hardware revision 0.132.27.2, firmware 3.3.6.5
-per his Zepp account, macOS CoreBluetooth, local time UTC−4 (offset byte `f0`), every ack
-`03 09`, no time or setting written. Source tag for everything below: `HW:2026-09-30 (hw 0.132.27.2)`. Only control bytes and
-lengths are recorded here; no health value, serial number, MAC or setting value is.
+per his Zepp account (the strap itself reports 3.25.0.3: see the re-test below), macOS
+CoreBluetooth, local time UTC−4 (offset byte `f0`), every ack `03 09`, no time or setting
+written. Source tag for everything below: `HW:2026-09-30 (hw 0.132.27.2)`, except the re-test
+section, which is `HW:2026-09-30 13:35`. Only control bytes and lengths are recorded here; no
+health value, serial number or MAC is, and the only setting value is HEALTH arg `0x04` (a
+sampling switch, recorded to settle §5.5).
 
 | §10 item | Result | Promoted |
 |---|---|---|
 | 1 Advertisement | Not recorded in this run. The strap matched HelioVerify's Helio Strap name matcher (§1), and the controls, which run only on that model, worked (item 15). | — |
-| 2 GATT dump | Present: `…0016`, `…0017`, `…0004`, `…0005`, `0x2A37`, `0x2A19`, `0x2A2B`, `0x2A27`. **No DIS firmware revision `0x2A26`**, so the firmware version was not printed. Parent services, properties and write types not recorded. | §1, §2 |
+| 2 GATT dump | Present: `…0016`, `…0017`, `…0004`, `…0005`, `0x2A37`, `0x2A19`, `0x2A2B`, `0x2A27`. **No DIS firmware revision `0x2A26`**, so the firmware version was not printed from DIS (the device-info endpoint gave it in the re-test). Parent services, properties and write types not recorded. | §1, §2 |
 | 3 Auth | The real key authenticated. The wrong-key test (`10 05 25`) was **not run**. | §4.3 success path, §4.4 session key |
 | 4 Services list | 28 endpoints (listed in §3.5). `0x004B` is present. Battery `0x0029`, connection `0x0015` and `0x004B` are plaintext on this strap. | §3.5, §5.2 |
 | 5 Encrypted round-trip | Replies on `0x000A` and `0x001A` decrypted, and their trailer CRC matched `CRC-32(P ‖ S)`. (Battery could not serve: it is plaintext here.) Whether the device's sequence numbers are its own or follow ours was not recorded. | §3.3 |
 | 6 Chunk acks | Not recorded. | — |
 | 7 Time set | **Not run** (HelioVerify's `--set-time` is off by default). | — |
-| 8 HEALTH config read | Config service version 3, groups `00 0b 08 09 0a`; HEALTH group `0x08` version 3. Argument values are personal settings and are not recorded here. Arg `0x05` vs Zepp's "Heart Rate Push": not tested. | §5.5 |
+| 8 HEALTH config read | Config service version 3, groups `00 0b 08 09 0a`; HEALTH group `0x08` version 3. Argument values are personal settings and are not recorded here, except arg `0x04` in the re-test. Arg `0x05` vs Zepp's "Heart Rate Push": not tested. | §5.5 |
 | 9 Fetch each type | Path A, 30-minute and 12-hour windows. Start replies are 16 bytes. **Activity's length counts records**; every other type counts bytes and its CRC matched (table below). Values were not compared with Zepp. | §6.1, §6.2, §6.4, §6.5 |
 | 10 Ack semantics | After `03 09`, fetching an overlapping temperature window again **re-delivered** the data. A mid-transfer `03 09` was tolerated. Ack `01`: **not run**. | §6.3 |
 | 11 Tier 0 live HR | Without auth: **not run**. With auth (§7.1 start + keep-alive): one `0x2A37` notification per second. | §7.1 |
@@ -987,8 +997,8 @@ lengths are recorded here; no health value, serial number, MAC or setting value 
 
 | Type | Window | Announced length → data received | Unit | CRC |
 |---|---|---|---|---|
-| activity `0x01` | 30 min | `30` → one 241-byte packet: counter + 240 bytes = 30 × 8 | **records** | unknown: ZeppKit aborted the round with a false overflow before the check (fixed since) |
-| activity `0x01` | 12 h | `720` → ZeppKit aborted at 960 bytes | **records** | unknown |
+| activity `0x01` | 30 min | `30` → one 241-byte packet: counter + 240 bytes = 30 × 8 | **records** | not reached: ZeppKit aborted the round with a false overflow before the check (fixed since). Ok in the re-test |
+| activity `0x01` | 12 h | `720` → ZeppKit aborted at 960 bytes | **records** | not reached. Ok in the re-test: 720 records, 5760 B |
 | temperature `0x2e` | 30 min / 12 h | `240` → 240 B / 5760 B | bytes | ok |
 | stress-auto `0x13` | 12 h | 720 B (1 byte per minute) | bytes (= records here) | ok |
 | HRV `0x49` | — | 2136 B = 356 × 6 | bytes | ok |
@@ -1009,11 +1019,24 @@ lengths are recorded here; no health value, serial number, MAC or setting value 
 - The strap coped with ZeppKit's mid-transfer `03 09` on the activity round: it still sent
   its transfer done and `10 03 01`, and the next type fetched normally.
 
+**Re-test at 13:35** (`HW:2026-09-30 13:35`: HelioVerify at `293cd90`, read-only, every ack
+`03 09`):
+
+- **Activity CRC**: a start reply announced `3c 00 00 00`, i.e. 60 records; 60 records (480 B)
+  arrived and the CRC matched. A 12 h run gave 720 records (5760 B), CRC ok. In that same
+  12 h run all 7 fetched types matched their CRCs, with no retries and no errors. Promotes
+  the activity CRC in §6.2 and §6.5.
+- **Firmware**: the strap's own device-info read (endpoint `0x0043`, §5.3) reports firmware
+  **3.25.0.3**. The hardware revision (0.132.27.2) was already known. Promotes §1.
+- **HEALTH arg `0x04`**: it read `false` in a complete (non-partial) config read, yet in the
+  12 h activity fetch of the same session all 720 minutes carried a heart rate. So `0x04` does
+  **not** gate recording: it is the vendor's "Active heart rate monitoring" switch, which only
+  raises the HR sampling rate during detected activity. Promotes §5.5.
+
 **Still untested** (keep their tags): wrong-key auth (`10 05 25`); ack `01` (delete); Tier 0
 live HR without auth; Zepp-app coexistence; time set (`0x0047`, `06 01`); the HRV statistic
-(RMSSD vs SDNN). Also not yet observed: the activity CRC; a full 12-hour activity round;
-the firmware version over BLE (endpoint `0x0043`, and the width of its bit-0 prefix, §5.3);
-the advertisement; chunk acks; write types;
+(RMSSD vs SDNN). Also not yet observed: the width of the device-info bit-0 prefix (§5.3; not
+recorded in the re-test); the advertisement; chunk acks; write types;
 Path B (`0x004B`); arg `0x05` vs "Heart Rate Push"; the device's sequence numbers; any value
 compared against Zepp (HRV unknown byte, temperature constants, sleep-session minute base);
 the `0x26` layout. Controls (items 13–21): find device before auth; how long a lone `03`
