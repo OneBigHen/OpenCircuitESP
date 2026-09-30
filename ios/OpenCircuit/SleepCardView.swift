@@ -350,12 +350,22 @@ struct SleepCardView: View {
     private var unsavedNightNotice: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.icloud").font(.caption2).foregroundStyle(.orange)
-            Text(sleepPersistOutcome?.isRecoverableByRetry == true
-                 ? "This night hasn’t been saved yet, so it isn’t in Apple Health and won’t survive a restart. Sync again near the ring — the epochs are still on it."
-                 : "This night couldn’t be saved. It isn’t in Apple Health and won’t survive a restart. Send a diagnostics export from Device Info if it keeps happening.")
+            Text(Self.unsavedNightCopy(sleepPersistOutcome))
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
+    }
+
+    /// The unsaved-night warning's words. A night the Helio Strap owns (it was chosen when the night
+    /// began, decision 28a) but has no stored strap night is not a failure and syncing the ring again
+    /// can't store it, so it says exactly that (review-224b N-3, decision 25).
+    static func unsavedNightCopy(_ outcome: SleepPersistOutcome?) -> String {
+        if outcome == .ownedByOtherDeviceNoRow {
+            return "This night began while the Helio Strap was your chosen device, so it’s the strap’s night. The ring’s reading of it isn’t saved or sent to Apple Health, and no strap night is stored for it."
+        }
+        return outcome?.isRecoverableByRetry == true
+            ? "This night hasn’t been saved yet, so it isn’t in Apple Health and won’t survive a restart. Sync again near the ring — the epochs are still on it."
+            : "This night couldn’t be saved. It isn’t in Apple Health and won’t survive a restart. Send a diagnostics export from Device Info if it keeps happening."
     }
 
     /// The recency note to show above the stage details, if any: the unsaved-night warning, the

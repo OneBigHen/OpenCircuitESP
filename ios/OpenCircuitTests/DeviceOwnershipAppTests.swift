@@ -359,7 +359,8 @@ final class DeviceOwnershipAppTests: XCTestCase {
         XCTAssertTrue(pending.allSatisfy { $0.start < at(-2) || $0.start >= at(8) })
         XCTAssertEqual(try store.ownedSamples(kind: .heartRate, from: .distantPast, to: .distantFuture), pending)
 
-        XCTAssertEqual(try saveRingNight(store, from: at(-1), to: at(7)), .ownedByOtherDevice)
+        XCTAssertEqual(try saveRingNight(store, from: at(-1), to: at(7)), .ownedByOtherDeviceNoRow,
+                       "the strap owns it and stored none (review-224b N-3)")
         XCTAssertEqual(try store.context.fetch(FetchDescriptor<StoredSleepSummary>()).count, 0, "no night saved")
         XCTAssertFalse(HealthKitWriter.ringOwnsNight(ringNight(from: at(-1), to: at(7)), store: store), "and none mirrored")
     }
@@ -666,5 +667,22 @@ final class DeviceOwnershipAppTests: XCTestCase {
         XCTAssertEqual(try saveNight(store, .ringConn, -1, 7), .inserted)
         XCTAssertTrue(store.nightKeeping(.ringConn, inBedStart: at(-1), inBedEnd: at(7)).keep)
         XCTAssertEqual(store.otherDevicesNightWindows(.ringConn, overlapping: at(-6), to: at(12)), [])
+    }
+
+    // MARK: Review-224b N-3: an owned night with no stored row is a gap, not a keep
+
+    func testTheRingsStagingOfAStrapNightSaysWhetherTheStrapStoredOne() throws {
+        ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: at(-2)), .init(family: .ringConn, since: at(8))]))
+        let store = try makeStore()
+        let noRow = try saveNight(store, .ringConn, -1, 7)
+        XCTAssertEqual(noRow, .ownedByOtherDeviceNoRow, "the strap stored no night: nothing backs this one")
+        XCTAssertTrue(noRow.isSilentLoss, "so the Sleep card shows its unsaved-night notice")
+        XCTAssertTrue(SleepCardView.unsavedNightCopy(noRow).contains("the strap’s night"))
+        XCTAssertFalse(SleepCardView.unsavedNightCopy(noRow).contains("Sync again"), "no promise a retry can't keep")
+
+        XCTAssertEqual(try saveNight(store, strapTimeline, -0.5, 6.5), .inserted)
+        let kept = try saveNight(store, .ringConn, -1, 7)
+        XCTAssertEqual(kept, .ownedByOtherDevice, "the strap's night is stored: a deliberate keep")
+        XCTAssertFalse(kept.isSilentLoss)
     }
 }

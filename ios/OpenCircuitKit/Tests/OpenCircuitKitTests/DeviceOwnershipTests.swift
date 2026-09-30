@@ -106,4 +106,14 @@ final class DeviceOwnershipTests: XCTestCase {
         XCTAssertFalse(SleepPersistOutcome.ownedByOtherDevice.isSilentLoss)
         XCTAssertEqual(SleepPersistOutcome.ownedByOtherDevice.rawValue, "ownedByOtherDevice")
     }
+
+    /// Review-224b N-3: when the other device owns the night but stored none, the wearer has no night.
+    func testAnOwnedNightWithNoStoredRowIsNotStored() {
+        let o = SleepPersistOutcome.ownedByOtherDeviceNoRow
+        XCTAssertFalse(o.wroteRow)
+        XCTAssertFalse(o.nightIsStored)
+        XCTAssertTrue(o.isSilentLoss, "the card must not hide the gap")
+        XCTAssertFalse(o.isRecoverableByRetry, "this device syncing again can't store it")
+        XCTAssertEqual(o.rawValue, "ownedByOtherDeviceNoRow")
+    }
 }

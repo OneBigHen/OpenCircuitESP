@@ -1745,8 +1745,10 @@ struct LocalStore {
             ObservabilityStore().recordMetricEvent(
                 source: "sleep-drop",
                 detail: "night=\(Self.stamp(Calendar.current.startOfDay(for: night))) device=\(family.rawValue) "
-                    + "reason=owned-by-other-device")
-            return .ownedByOtherDevice
+                    + "reason=owned-by-other-device otherNightStored=\(keeping.otherDeviceRowExists)")
+            // Review-224b N-3: only a stored night of the other device makes this a keep; without one
+            // the wearer has no night, and the card must say so rather than hide the gap.
+            return keeping.otherDeviceRowExists ? .ownedByOtherDevice : .ownedByOtherDeviceNoRow
         }
         let dayStart = Calendar.current.startOfDay(for: night)
         let m = summary.minutes
