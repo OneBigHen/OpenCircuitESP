@@ -560,6 +560,15 @@ final class HelioKeyStoreTests: XCTestCase {
         defer { UserDefaults().removePersistentDomain(forName: suite) }
         let store = HelioKeyStore(service: "com.standardsoftwaresolutions.opencircuit.tests.helio", account: "t", defaults: defaults)
         store.forget()
+        // An unsigned test host (`CODE_SIGNING_ALLOWED=NO`) has no keychain entitlement, so every
+        // SecItem call fails with errSecMissingEntitlement (-34018). That is the harness, not the
+        // store: skip rather than fail. Any other status is a real failure.
+        do {
+            _ = try store.save(pasted: keyHex)
+        } catch HelioKeyStoreError.keychain(let status) where status == -34018 {
+            throw XCTSkip("Keychain unavailable in an unsigned test host (errSecMissingEntitlement)")
+        }
+        store.forget()
         XCTAssertNil(store.load())
         XCTAssertFalse(try store.save(pasted: "not a key"))
         XCTAssertNil(store.load(), "an invalid paste saves nothing")
