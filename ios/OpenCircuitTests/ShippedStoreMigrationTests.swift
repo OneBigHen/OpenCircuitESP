@@ -1,5 +1,6 @@
 import SwiftData
 import XCTest
+import OpenCircuitKit
 @testable import OpenCircuit
 
 // SHIPPED-STORE MIGRATION — can the app still open the stores that are on real phones?
@@ -181,6 +182,187 @@ final class ShippedStoreMigrationTests: XCTestCase {
         XCTAssertEqual(summaries.first?.asleepMin, 246)
     }
 
+    // MARK: - Builds 47–56 (SchemaV7) → per-device cursors (SchemaV8, #214)
+    //
+    // The LAST SHIPPED shape is V7 (b47…b56). V8 adds `deviceID` to `StoredSample` and `StoredCursor`.
+    // These start from a genuine b56 store written through the transcribed `ShippedB56` shapes below
+    // (not the app's schema enums) and open it through the real `makeContainerOrThrow`.
+
+    /// Representative b56 rows: raw samples of several kinds (a cumulative-counter delta among them),
+    /// the three cursor families the table holds (store-ingest, `hk:` Health mirror, `export:`), and
+    /// a row in every other table.
+    private func writeShippedB56Store() throws {
+        let schema = Schema(ShippedModels.b56)
+        let container = try ModelContainer(
+            for: schema, configurations: ModelConfiguration(schema: schema, url: storeURL))
+        let context = ModelContext(container)
+
+        for (i, kind) in ["heartRate", "hrvSDNN", "spo2", "temperature", "respiratoryRate"].enumerated() {
+            for n in 0..<3 {
+                let at = night.addingTimeInterval(Double(n * 300 - i))
+                context.insert(ShippedB45.StoredSample(kindRaw: kind, start: at, end: at,
+                                                       value: 50 + Double(i * 10 + n)))
+            }
+        }
+        let steps = ShippedB45.StoredSample(kindRaw: "steps", start: night, end: night, value: 42)
+        steps.rawValue = 1_042
+        steps.isDelta = true
+        steps.dailyTotal = 842
+        context.insert(steps)
+
+        for (key, last) in b56Cursors { context.insert(ShippedB45.StoredCursor(kindRaw: key, last: last)) }
+
+        let step = ShippedB45.StoredStepSample()
+        step.start = night
+        step.delta = 137
+        context.insert(step)
+        let temp = ShippedB45.StoredDaytimeTemp()
+        temp.time = night
+        temp.celsius = 33.5
+        context.insert(temp)
+        let daily = ShippedB45.StoredDaily()
+        daily.day = night
+        daily.steps = 8_421
+        context.insert(daily)
+        let period = ShippedB45.StoredPeriodEntry()
+        period.start = night
+        context.insert(period)
+        let headache = ShippedB45.StoredHeadacheEntry()
+        headache.onset = night
+        context.insert(headache)
+        let risk = ShippedB45.StoredHeadacheRisk()
+        risk.day = night
+        context.insert(risk)
+        let nap = ShippedB56.StoredNap()
+        nap.start = night.addingTimeInterval(3_600)
+        nap.end = night.addingTimeInterval(7_200)
+        nap.isManuallyAdded = true
+        context.insert(nap)
+        let summary = ShippedB56.StoredSleepSummary()
+        summary.night = night
+        summary.asleepMin = 412
+        summary.sleepBasis = "measured"
+        context.insert(summary)
+        try context.save()
+    }
+
+    /// The b56 cursor rows: per-kind store-ingest cursors, the `hk:` Health watermarks, an `export:`
+    /// watermark and the `.sleep` cursor the Health sleep gate reads.
+    private var b56Cursors: [String: Date] {
+        ["heartRate": night.addingTimeInterval(600), "spo2": night.addingTimeInterval(599),
+         "hrvSDNN": night.addingTimeInterval(599), "steps": night, "sleep": night.addingTimeInterval(-60),
+         "hk:heartRate": night.addingTimeInterval(300), "hk:spo2": night.addingTimeInterval(299),
+         "export:sleepSessions": night.addingTimeInterval(-86_400)]
+    }
+
+    /// ZERO ROWS LOST, every table. The V7→V8 stage adds two defaulted columns and nothing else.
+    func testABuild56StoreMigratesToPerDeviceCursorsWithZeroRowsLost() throws {
+        try writeShippedB56Store()
+        let container = try openExactlyAsTheAppDoes()
+        let context = ModelContext(container)
+
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StoredSample>()), 16)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StoredCursor>()), b56Cursors.count)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StoredStepSample>()), 1)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StoredDaytimeTemp>()), 1)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StoredDaily>()), 1)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StoredPeriodEntry>()), 1)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StoredHeadacheEntry>()), 1)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StoredHeadacheRisk>()), 1)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<StoredNap>()).first?.isManuallyAdded, true)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<StoredSleepSummary>()).first?.asleepMin, 412)
+
+        // Every migrated sample belongs to the ring's timeline, with its values untouched.
+        let samples = try context.fetch(FetchDescriptor<StoredSample>())
+        XCTAssertEqual(Set(samples.map(\.deviceID)), [SyncDeviceID.ringConn.rawValue])
+        let steps = try XCTUnwrap(samples.first { $0.kindRaw == "steps" })
+        XCTAssertEqual(steps.value, 42)
+        XCTAssertEqual(steps.rawValue, 1_042)
+        XCTAssertTrue(steps.isDelta)
+        XCTAssertEqual(steps.dailyTotal, 842)
+        withExtendedLifetime(container) {}
+    }
+
+    /// CURSORS PRESERVED PER KIND under the legacy device: same keys, same watermarks, device =
+    /// `ringconn` — and the store reads back exactly the per-kind cursor it read before.
+    func testABuild56StoresCursorsArePreservedPerKindUnderTheLegacyDevice() throws {
+        try writeShippedB56Store()
+        let container = try openExactlyAsTheAppDoes()
+        let context = ModelContext(container)
+
+        let rows = try context.fetch(FetchDescriptor<StoredCursor>())
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: rows.map { ($0.kindRaw, $0.last) }), b56Cursors,
+                       "no key re-written and no watermark moved")
+        XCTAssertEqual(Set(rows.map(\.deviceID)), [SyncDeviceID.ringConn.rawValue])
+
+        let store = LocalStore(container.mainContext)
+        let cursor = try store.loadCursor()
+        XCTAssertEqual(cursor.last(.heartRate), night.addingTimeInterval(600))
+        XCTAssertEqual(cursor.last(.spo2), night.addingTimeInterval(599))
+        XCTAssertEqual(cursor.last(.steps), night)
+        XCTAssertEqual(cursor.last(.sleep), night.addingTimeInterval(-60))
+        XCTAssertNil(cursor.last(.temperature), "a kind with no cursor row stays never-synced")
+        // The seeded HR rows are at 0, +300 and +600 s and `hk:heartRate` sits at +300 s, so exactly
+        // one is still pending for Apple Health — the same answer as before the migration.
+        XCTAssertEqual(try store.pendingHealthSamples().filter { $0.kind == .heartRate }.map(\.start),
+                       [night.addingTimeInterval(600)])
+        withExtendedLifetime(container) {}
+    }
+
+    /// THE BUG THIS CHANGE FIXES, on a migrated store. The ring's HR watermark is at +600 s. A strap
+    /// joins and backfills two days of HR that are all OLDER than that. Before V8 they were dropped as
+    /// already-synced; now each is judged against the strap's own cursor and kept — and the ring's
+    /// behaviour is unchanged: its cursor does not move, and a ring sample older than its own
+    /// watermark is still dropped.
+    func testANewDevicesBackfillOlderThanTheRingsWatermarkIsNotDropped() throws {
+        try writeShippedB56Store()
+        let container = try openExactlyAsTheAppDoes()
+        let store = LocalStore(container.mainContext)
+        let strap = SyncDeviceID.timeline(for: .zeppOS(model: "Helio Strap"), identityID: "STRAP-1")
+        let backfill = [2.0, 1.0].map {
+            QuantitySample(kind: .heartRate, start: night.addingTimeInterval(-86_400 * $0), value: 64)
+        }
+
+        let kept = try store.ingest(backfill, device: strap)
+        XCTAssertEqual(kept.map(\.start), backfill.map(\.start), "the strap's older history must be kept")
+        XCTAssertEqual(try store.loadCursor(device: strap).last(.heartRate), backfill.last?.start)
+        XCTAssertEqual(try store.loadCursor().last(.heartRate), night.addingTimeInterval(600),
+                       "the ring's watermark must not move")
+
+        let stale = QuantitySample(kind: .heartRate, start: night.addingTimeInterval(-3_600), value: 70)
+        XCTAssertEqual(try store.ingest([stale]), [], "the ring still drops what it already synced")
+
+        let stored = try ModelContext(container).fetch(FetchDescriptor<StoredSample>())
+        XCTAssertEqual(stored.filter { $0.deviceID == strap.rawValue }.count, 2)
+        XCTAssertEqual(stored.count, 18)
+
+        // And Apple Health would get them too: the strap's backfill is pending under its own `hk:`
+        // watermark, while the ring's pending set is exactly what it was.
+        XCTAssertEqual(try store.pendingHealthSamples(device: strap).map(\.start), backfill.map(\.start))
+        XCTAssertEqual(try store.pendingHealthSamples().filter { $0.kind == .heartRate }.map(\.start),
+                       [night.addingTimeInterval(600)])
+        withExtendedLifetime(container) {}
+    }
+
+    /// A cumulative counter's delta is taken against the SAME device's previous raw value. Two
+    /// devices' raw step counters are unrelated numbers; one shared "previous" would turn a strap's
+    /// first reading into a bogus delta against the ring's counter, and the ring's next into another.
+    func testCumulativeCountersNeverTakeADeltaAcrossDevices() throws {
+        try writeShippedB56Store()   // the ring's steps row: raw counter 1 042 at `night`
+        let container = try openExactlyAsTheAppDoes()
+        let store = LocalStore(container.mainContext)
+        let strap = SyncDeviceID.timeline(for: .zeppOS(model: "Helio Strap"), identityID: "STRAP-1")
+
+        let strapSteps = try store.ingest(
+            [QuantitySample(kind: .steps, start: night.addingTimeInterval(3_600), value: 1_500)], device: strap)
+        XCTAssertEqual(strapSteps.map(\.value), [1_500], "the strap's first reading has no previous raw value")
+
+        let ringSteps = try store.ingest(
+            [QuantitySample(kind: .steps, start: night.addingTimeInterval(7_200), value: 1_100)])
+        XCTAssertEqual(ringSteps.map(\.value), [58], "the ring's delta is against ITS OWN 1 042, as before")
+        withExtendedLifetime(container) {}
+    }
+
     // MARK: - Making the blindness impossible to repeat
 
     /// THE STRUCTURAL GUARD, as a function so the same rule can be aimed at a synthetic plan.
@@ -210,7 +392,7 @@ final class ShippedStoreMigrationTests: XCTestCase {
     func testNoHistoricalSchemaVersionNamesALiveType() {
         let all = OpenCircuitApp.MigrationPlan.schemas
         guard let current = all.last else { return XCTFail("empty migration plan") }
-        XCTAssertEqual(current.versionIdentifier, OpenCircuitApp.SchemaV7.versionIdentifier,
+        XCTAssertEqual(current.versionIdentifier, OpenCircuitApp.SchemaV8.versionIdentifier,
                        "the CURRENT version is the only one allowed to name live types")
         for offender in Self.historicalVersionsNamingLiveTypes(all) {
             XCTFail("""
@@ -229,10 +411,10 @@ final class ShippedStoreMigrationTests: XCTestCase {
     /// asserted it; until this test, nothing did.
     func testTheLiveContainerListsExactlyTheCurrentVersionsModels() throws {
         let container = try OpenCircuitApp.makeContainerOrThrow(storeURL: storeURL)
-        XCTAssertEqual(container.schema, Schema(OpenCircuitApp.SchemaV7.models), """
+        XCTAssertEqual(container.schema, Schema(OpenCircuitApp.SchemaV8.models), """
             The container schema and the CURRENT VersionedSchema have drifted apart. Everything \
-            above derives "which types are live" from SchemaV7.models; a type the app can reach \
-            but SchemaV7 does not name would be invisible to that derivation.
+            above derives "which types are live" from SchemaV8.models; a type the app can reach \
+            but SchemaV8 does not name would be invisible to that derivation.
             """)
     }
 
@@ -267,6 +449,8 @@ final class ShippedStoreMigrationTests: XCTestCase {
                        "SchemaV5 must describe the store builds 38–43 wrote")
         XCTAssertEqual(Schema(OpenCircuitApp.SchemaV6.models), Schema(ShippedModels.b45),
                        "SchemaV6 must describe the store build 45 wrote")
+        XCTAssertEqual(Schema(OpenCircuitApp.SchemaV7.models), Schema(ShippedModels.b56),
+                       "SchemaV7 must describe the store builds 47–56 wrote")
     }
 
     /// Consecutive versions must stay distinguishable, or SwiftData rejects the whole plan with
@@ -330,7 +514,7 @@ final class ShippedStoreMigrationTests: XCTestCase {
         let decoded = try JSONDecoder().decode(RollupBackup.self,
                                                from: JSONEncoder().encode(exported))
 
-        let schema = Schema(OpenCircuitApp.SchemaV7.models)
+        let schema = Schema(OpenCircuitApp.SchemaV8.models)
         let fresh = try ModelContainer(
             for: schema, configurations: ModelConfiguration(schema: schema,
                                                             isStoredInMemoryOnly: true))
@@ -647,6 +831,73 @@ private enum ShippedB34 {
     }
 }
 
+/// Builds 47–56 (SchemaV7): b45's shapes + the reversibility / provenance block on the summary and
+/// the three nap columns. Transcribed from `git show v1.0-b56:ios/OpenCircuit/Store/LocalStore.swift`;
+/// the stored-property lines of every `@Model` are identical at every tag b47 → b56.
+private enum ShippedB56 {
+    @Model final class StoredSleepSummary {
+        @Attribute(.unique) var night: Date = Date.distantPast
+        var asleepMin: Int = 0
+        var deepMin: Int = 0
+        var lightMin: Int = 0
+        var remMin: Int = 0
+        var awakeMin: Int = 0
+        var efficiency: Double = 0
+        var inBedStart: Date = Date.distantPast
+        var inBedEnd: Date = Date.distantPast
+        var sleepOnset: Date = Date.distantPast
+        var sleepWake: Date = Date.distantPast
+        var updatedAt: Date = Date.distantPast
+        var skinTempC: Double = 0
+        var sleepScore: Int = 0
+        var stressScore: Int = 0
+        var feelScore: Int = 0
+        var hrDeep: Int = 0
+        var hrLight: Int = 0
+        var hrRem: Int = 0
+        var hrAwake: Int = 0
+        var movementLevels: [Int] = []
+        var hypnogramData: Data = Data()
+        var osaAvgSpO2: Double = 0
+        var osaMinSpO2: Double = 0
+        var osaTimeBelow90Sec: Double = 0
+        var osaODI: Double = 0
+        var osaValidWindows: Int = 0
+        var editedInBedStart: Date = Date.distantPast
+        var editedInBedEnd: Date = Date.distantPast
+        var isManuallyEdited: Bool = false
+        var widenedRecordedInBedStart: Date = Date.distantPast
+        var widenedRecordedInBedEnd: Date = Date.distantPast
+        var widenedRecordedOnset: Date = Date.distantPast
+        var widenedRecordedWake: Date = Date.distantPast
+        var recordedHypnogramData: Data = Data()
+        var measuredAsleepSeconds: Double = -1
+        var assertedAsleepSeconds: Double = -1
+        var coverageFraction: Double = -1
+        var longestGapSeconds: Double = -1
+        var measuredEfficiency: Double = -1
+        var sleepBasis: String = ""
+        init() {}
+    }
+    @Model final class StoredNap {
+        @Attribute(.unique) var start: Date = Date.distantPast
+        var end: Date = Date.distantPast
+        var asleepMin: Int = 0
+        var isLongNap: Bool = false
+        var healthWritten: Bool = false
+        var updatedAt: Date = Date.distantPast
+        var isManuallyEdited: Bool = false
+        var isManuallyAdded: Bool = false
+        var napSegmentsData: Data? = nil
+        var editedStart: Date? = nil
+        var editedEnd: Date? = nil
+        var recordedNapSegmentsData: Data? = nil
+        var healthWrittenStart: Date = Date.distantPast
+        var healthWrittenEnd: Date = Date.distantPast
+        init() {}
+    }
+}
+
 private enum ShippedModels {
     /// The seven non-summary entities present from b18 (when `StoredDaytimeTemp` and
     /// `StoredStepSample` arrived together) through b45. `StoredNap` is the b22–b45 shape.
@@ -663,6 +914,14 @@ private enum ShippedModels {
     static var b34: [any PersistentModel.Type] { common + [ShippedB34.StoredSleepSummary.self] }
     static var b43: [any PersistentModel.Type] { common + [ShippedB43.StoredSleepSummary.self] }
     static var b45: [any PersistentModel.Type] { common + [ShippedB45.StoredSleepSummary.self] }
+    /// b47–b56: the b45 entity set with the V7 nap and summary.
+    static var b56: [any PersistentModel.Type] {
+        [ShippedB45.StoredSample.self, ShippedB45.StoredCursor.self, ShippedB45.StoredDaily.self,
+         ShippedB56.StoredNap.self, ShippedB45.StoredPeriodEntry.self,
+         ShippedB45.StoredDaytimeTemp.self, ShippedB45.StoredStepSample.self,
+         ShippedB45.StoredHeadacheEntry.self, ShippedB45.StoredHeadacheRisk.self,
+         ShippedB56.StoredSleepSummary.self]
+    }
 }
 
 // MARK: - The eleventh type

@@ -5,12 +5,24 @@ import OpenCircuitKit
 
 @MainActor
 final class HealthWatermarkTests: XCTestCase {
+    /// The containers `makeStore()` built, kept alive for the whole test. `LocalStore` holds only the
+    /// `mainContext`; once its `ModelContainer` is released SwiftData traps on the next fetch
+    /// (EXC_BREAKPOINT in `storeCursorRows`), which crashed every test in this suite. Same pattern as
+    /// `ExportWatermarkTests` / `HeadacheStoreTests`.
+    private var containers: [ModelContainer] = []
+
+    override func tearDown() {
+        containers.removeAll()
+        super.tearDown()
+    }
+
     private func makeStore() throws -> LocalStore {
         let container = try ModelContainer(
             for: StoredSample.self, StoredCursor.self,
             StoredSleepSummary.self, StoredDaily.self, StoredNap.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
+        containers.append(container)
         return LocalStore(container.mainContext)
     }
 

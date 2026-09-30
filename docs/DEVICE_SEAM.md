@@ -125,9 +125,67 @@ sample" and an open question for Juan (§5). Flipping it is one line in
 .local())` (the iPhone) and its route with `device: nil`. It is outside `HealthKitWriter`, and
 re-attributing workouts is a visible Health change of its own (follow-ups §4).
 
-## 3. Store (Part B, schema change)
+## 3. Store (Part B, schema change: SchemaV8)
 
-_See the section appended by the `feat/device-seam-store` branch._
+**The bug.** `StoredCursor` was unique per `kindRaw` and `StoredSample` had no device column.
+`SyncCursor.selectNew` drops every sample at or before the kind's single watermark, so a second
+device's backfill that is older than the ring's watermark was silently discarded. The `hk:` Health
+watermark had the same shape, so even a stored backfill would never have reached Apple Health.
+
+**The change.**
+
+| | Before (V7, b47–b56) | After (V8) |
+|---|---|---|
+| `StoredSample` | no device | `deviceID: String = "ringconn"` |
+| `StoredCursor` | `@Attribute(.unique) kindRaw` = the cursor name | same unique column, now the **(device, name) key**, plus `deviceID: String = "ringconn"` |
+| Cursor key | `heartRate`, `hk:heartRate`, `export:…` | ring: **unchanged**. Another device: `<name>@<device>` (`SyncCursorKey`), so `hk:`/`export:` prefixes still filter |
+| Migration | | `.lightweight(V7 → V8)`: two defaulted columns, **no row read, rewritten or re-keyed** |
+
+`#Unique` is iOS 18 and the deployment target is 17. Uniqueness therefore stays the one
+`@Attribute(.unique)` string the table already had, and that string now carries the device.
+Renaming the column (`originalName:`), or a custom stage that rewrote every key, would each have
+added a failure mode to a migration whose failure path deletes raw history (build 44). The ring's
+keys staying byte-identical is what keeps the stage lightweight.
+
+**Legacy device id: a documented constant, `SyncDeviceID.ringConn` = `"ringconn"`, not the
+persisted active-ring id.** Why:
+1. **The store's device dimension is a timeline, not a peripheral.** Multi-ring has always been
+   sequential with a merged timeline (`RingScanner`: "no per-ring data segregation"). If each
+   ring's peripheral UUID were the store device, the ring you swap to would start with an empty
+   cursor. It would re-admit everything still on it and re-write it to Apple Health, which is a
+   behaviour change for ring users. Every RingConn ring therefore maps to `"ringconn"`
+   (`SyncDeviceID.timeline(for:identityID:)`), and a Zepp device maps to `zeppos:<id>`.
+2. **The persisted active-ring id isn't reliably available inside the stage.** It lives in
+   UserDefaults (`com.opencircuit.ring.activePeripheralID`). It is nil after an explicit
+   disconnect, and a lightweight stage can only apply a static column default. Using it would mean
+   a custom stage that reads outside the store mid-migration.
+3. It is a literal default, so the migration is a pure schema diff. The value is pinned by
+   `SyncDeviceTests.testTheRingTimelineIdIsPinned` and by the migration test asserting every
+   migrated row reads `SyncDeviceID.ringConn.rawValue`.
+
+**Every cursor read/write, per device, defaulting to the ring.**
+- `ingest`, `previewIngest`, `loadCursor`: only that device's rows, via `SyncCursor.forDevice`.
+- `cumulativeState`: a step delta is never taken against another device's raw counter.
+- `pendingHealthSamples`, `markHealthWritten`, `loadHealthCursor`: the `hk:` watermark is per device.
+- `repairFutureSyncCursors`: resets a row to its own device's latest sample.
+- `upsertCursor`: labels new rows with their device.
+
+`SyncCursor.selectNew` itself is unchanged; what changed is that the cursor it runs on belongs to
+one device. **Every existing caller passes no device**, so the ring reads and writes exactly the
+rows and keys it did before. The app-target suites for this code (`CaptureToStoreEndToEndTests`,
+`HealthWatermarkTests`, `SyncCursorPlausibilityTests`) had crashed on every run because of a
+container-lifetime bug in their harness. They were fixed first (test-only) and pass 16/16 both
+before and after the store change.
+
+**Not in this change (Helio driver PR):** `HealthKitWriter.flushToHealth` still mirrors the ring's
+timeline only, because its call sites are unchanged. The Helio PR adds its device to that pass
+(`pendingHealthSamples(device:)` / `markHealthWritten(_:device:)` already exist). Dashboard reads
+(`samples(kind:…)`, Trends) stay device-agnostic, which is correct while v1 has one active device.
+
+**Gates** (`docs/RUNBOOK_SCHEMA_MIGRATION_REHEARSAL.md`):
+- Gate A is `-only-testing:OpenCircuitTests/ShippedStoreMigrationTests` with the executed count
+  checked. It now also opens a genuine b56 (V7) store.
+- Gate B is an on-device upgrade from a pre-45 build, and it is Juan's.
 
 ## 4. Follow-ups (not in this PR)
 

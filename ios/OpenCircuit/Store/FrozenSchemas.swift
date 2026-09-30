@@ -36,13 +36,18 @@ import SwiftData
 ///
 ///   | entity | shipped shape history |
 ///   |---|---|
-///   | `StoredSample`, `StoredCursor`, `StoredDaily`, `StoredPeriodEntry` | unchanged b1 → b45 |
-///   | `StoredStepSample`, `StoredDaytimeTemp` | first shipped b18 (together), unchanged b18 → b45 |
-///   | `StoredHeadacheEntry`, `StoredHeadacheRisk` | first shipped b34, unchanged b34 → b45 |
-///   | `StoredNap` | 6 props b1–b21; **11 props b22 → b45, unchanged**; SchemaV7 adds 3 |
-///   | `StoredSleepSummary` | 19 props b1–b12 · 21 b13–b20 · 26 b21 · **29 b22–b37 (V4, and V3)** · **30 b38–b43 (V5)** · **34 b45 (V6)** · 40 on V7 |
+///   | `StoredSample`, `StoredCursor` | unchanged b1 → b56; **SchemaV8 adds `deviceID`** (#214) |
+///   | `StoredDaily`, `StoredPeriodEntry` | unchanged b1 → b56 |
+///   | `StoredStepSample`, `StoredDaytimeTemp` | first shipped b18 (together), unchanged b18 → b56 |
+///   | `StoredHeadacheEntry`, `StoredHeadacheRisk` | first shipped b34, unchanged b34 → b56 |
+///   | `StoredNap` | 6 props b1–b21; **11 props b22 → b46**; **14 b47 → b56 (V7)** |
+///   | `StoredSleepSummary` | 19 props b1–b12 · 21 b13–b20 · 26 b21 · **29 b22–b37 (V4, and V3)** · **30 b38–b43 (V5)** · **34 b45–b46 (V6)** · **41 b47–b56 (V7)** |
 ///
-/// The ENTITY COUNT is itself part of the shape: 6 entities b1–b17, 8 b18–b33, 10 b34–b45. That is
+/// (b47–b56 re-measured for #214: the stored-property lines of every live `@Model` hash identically
+/// at every tag from `v1.0-b47` through `v1.0-b56`. V7's two widened entities are pinned as nested
+/// snapshots in `OpenCircuitApp.SchemaV7`, like V4…V6; the other eight are the types below.)
+///
+/// The ENTITY COUNT is itself part of the shape: 6 entities b1–b17, 8 b18–b33, 10 b34–b56. That is
 /// why `SchemaV3` (8 entities, 29-prop summary, 11-prop nap) describes builds 22–33 exactly and
 /// **is reachable** — see the correction above `OpenCircuitApp.SchemaV1`, and do not restate the
 /// retired claim that V1/V2/V3 are all inert.
