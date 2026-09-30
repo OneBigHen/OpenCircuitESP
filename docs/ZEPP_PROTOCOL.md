@@ -39,6 +39,11 @@ Citations use these aliases. Line numbers are 1-based at the pinned commit.
 | `HC` | HelioCore (no licence; facts only), `GooseSwift/GooseSwiftApp.swift` | github `a9eelsh/heliocore@ca2a4fa0cd3a10d926c8705957ef91e7251aaa18` (2026-06-03) |
 | `TE` | tiny-ECDH-c (Unlicense), `ecdh.c` / `ecdh.h` | `kokke/tiny-ECDH-c@a6095d6e1feaa4e77b84cddda8468d8651ca3a32` |
 | `OC-vec` | Vectors computed for this document: tiny-ECDH-c, cross-checked by an independent pure-Python sect163r2 implementation, AES via Python `cryptography` and LibreSSL, CRC via zlib | 2026-09-30 |
+| `GB-res/` | Gadgetbridge resources, path under `app/src/main/res/` (§11–§15 only) | same pin as `GB/` |
+| `GB#N` | Gadgetbridge issue or pull request N on codeberg `Freeyourgadget/Gadgetbridge` (issues and PRs share one number space) | fetched 2026-09-30 |
+| `GB@sha` | a Gadgetbridge commit, cited for *when* a behaviour was added (§11–§15 only) | codeberg, fetched 2026-09-30 |
+| `AMZ-S` | Amazfit support page for the Helio Strap, https://support.amazfit.com/us/amazfit_helio_strap/docs/OSUldKzExovDlRxnMyCcH10dnL0 (© 2025) | fetched 2026-09-30 |
+| `AMZ-M` | Amazfit Helio Strap user manual, https://support.amazfit.com/us/amazfit_helio_strap/files/user-manual.pdf.pdf (PDF created 2025-08-07); `AMZ-M p.N` = printed page N | fetched 2026-09-30 |
 
 HelioCore is the only reference known to run on a real Helio Strap from iOS; Gadgetbridge
 covers the whole Zepp OS family and marks the Helio Strap *experimental*
@@ -195,10 +200,14 @@ Gadgetbridge resets it to 0 on reconnect before re-auth overwrites it (`ENC:160-
 |---|---|---|---|
 | `0x0000` | services list | no | 🟡 `SVC/Services:32,38` |
 | `0x000A` | config (settings) | yes | 🟡 `SVC/Config:104,116` |
+| `0x000F` | alarms (§12) | no | 🟡 `SVC/Alarms:47,72` |
 | `0x0015` | connection (MTU announce, ping/pong) | yes | 🟡 `SVC/Connection:30,38` |
 | `0x0016` | steps (realtime) | no | 🟡 `SVC/Steps:34,45` |
 | `0x0017` | user info | yes | 🟡 `SVC/UserInfo:45,51` |
+| `0x0018` | vibration patterns (§13.1) | yes | 🟡 `SVC/VibrationPatterns:44,50` |
+| `0x001A` | find device / find phone (§11) | yes | 🟡 `SVC/FindDevice:34,60` |
 | `0x001D` | heart rate (realtime control) | no | 🟡 `SVC/HeartRate:36,59` |
+| `0x001E` | notifications: **not used for the strap** (§13.3) | yes | 🟡 `SVC/Notification:59,98` |
 | `0x0029` | battery | yes | 🟡 `SVC/Battery:32,38` |
 | `0x0043` | device info | no | 🟡 `SVC/DeviceInfo:48,56` |
 | `0x0047` | time | no | 🟡 `SVC/Time:39,49` |
@@ -207,6 +216,10 @@ Gadgetbridge resets it to 0 on reconnect before re-auth overwrites it (`ENC:160-
 
 (Endpoint numbers coincide numerically with some characteristic short UUIDs, e.g. `0x0016`,
 `0x0017`. They are unrelated namespaces.)
+
+The `0x000F`, `0x0018`, `0x001A` and `0x001E` rows were added by the device-controls addendum
+(§11–§15). As with every row, the services list (§5.2) decides whether the endpoint exists on
+the connected strap and whether it is encrypted.
 
 A **connection ping**: the device may send `03` on endpoint `0x0015`; answer `04` on the
 same endpoint. 🟡 `SVC/Connection:54-58`
@@ -824,8 +837,581 @@ Record firmware (DIS `0x2A26` or endpoint `0x0043`) with every run. Keep capture
 12. **Coexistence**: with the Zepp app installed but force-quit, does it steal the
     connection? After uninstalling Zepp, does the key keep working across strap reboots?
 
+Device controls (§11–§15). Before any **write** in items 16–19, write down the strap's alarms
+as the Zepp app shows them, so they can be restored by hand.
+
+13. **Services list, controls rows**: are `0x001A`, `0x000F`, `0x0018`, `0x001E` present, and
+    with which encryption flags? Promotes the new §3.5 rows.
+14. **Find-device capabilities**: send `01` on `0x001A` and record the full reply (expected
+    `02 01 <version>`). Record the version byte. Promotes §11.2.
+15. **Find device, continuous vs one-shot**: send `03` once and nothing else. Time the vibration
+    with a stopwatch: does it stop by itself, and after how long? Is `07` (§11.3) sent when it
+    stops? Then send `03`, wait 5 s, send `06`: does it stop at once? Then `03`, `06` 500 ms
+    later: one short buzz? Promotes §11.3 and §11.4.
+16. **Find device before auth**: after connecting, send `03` on `0x001A` in plaintext **before**
+    the auth handshake. Record any reply or disconnect, and whether the strap vibrates.
+    Expected: nothing. Promotes §11.6.
+17. **Alarms read**: send `09` on `0x000F` with a known set of alarms made in Zepp (including one
+    disabled, one one-shot, one with smart wake if Zepp offers it). Check that the reply length
+    is 2 + 10 × count, that the fields match §12.3, and what the 5 tail bytes hold. Promotes §12.3.
+18. **Alarm write**: make a once-alarm in a free slot for 2 minutes ahead (§15.2 sequence).
+    Check the ack status byte; check it fires, how long it vibrates, and whether tapping stops
+    it; check whether any message reaches the phone when it fires or is dismissed. Then delete it
+    and check the ack. Check whether the Zepp app (if still installed) shows it; re-read to see
+    what became of the fired once-alarm. Promotes §12.2 (ack status), §12.3 (once alarms) and
+    §12.5.
+19. **Alarm capabilities**: send `01` on `0x000F` and record the reply. It is read-only in every
+    reference, but its layout is unknown. Does it report the slot count? Promotes §12.2 and
+    §12.4.
+20. **Config groups and haptic args**: record the config capabilities reply (§5.5) and a
+    constraints-included read of group `0x03` (all §13.4 args) and group `0x08` args `02 03 14 32 41
+    42 43 44 45 46 51`. Which are present on the Helio, and with which allowed values? Promotes
+    §13.4.
+21. **Strap-originated find phone**: is there any gesture (e.g. a multi-tap) that makes the strap
+    send `11` on `0x001A`? Promotes §11.5.
+
+---
+
+## 11. Find device (endpoint `0x001A`)
+
+This section and §12–§15 are the **device-controls addendum** (2026-09-30). The Helio Strap has
+a vibration motor and no display (§1). Amazfit documents three phone-triggered or scheduled
+vibrations: "Find Device" (60 s, continuous), up to 10 alarms (60 s, stopped by tapping the
+strap) and a set of health alerts (§13.4). 🟡 `AMZ-S`, `AMZ-M p.2-3,10-12`. HelioCore implements
+none of this (no match for vibration, alarm or find anywhere in `HC`), so every protocol fact
+below comes from Gadgetbridge alone, plus two Helio tester reports in its tracker.
+
+### 11.1 Channel
+
+| Fact | Tag / source |
+|---|---|
+| Find device and find phone share endpoint **`0x001A`**. | 🟡 `SVC/FindDevice:34` |
+| It is **encrypted by default**. As always, the services list (§5.2) can override that. | 🟡 `SVC/FindDevice:60`, `SVC/Services:83-85` |
+| Gadgetbridge sends only the capabilities request (§11.2) at session setup, and only if the services list contains `0x001A`. It sends start/stop commands whenever the user asks, **without** checking the services list. OpenCircuit must be stricter (§14). | 🟡 `GB/service/devices/huami/zeppos/ZeppOsSupport.java:947-951`, `SVC/FindDevice:139,149-154` |
+
+### 11.2 Capabilities and version
+
+Send `01`. The strap replies with three bytes, `02 <b1> <version>`. 🟡 `SVC/FindDevice:36-37,73-82`
+
+| Byte | Meaning |
+|---|---|
+| `[0]` = `02` | capabilities reply |
+| `[1]` | `01` in every example Gadgetbridge records; not interpreted. 🔴 probably a status byte |
+| `[2]` | **find-device service version**. Gadgetbridge records version `01` on a Mi Band 7 and `02` on an Active 2 and a GTR 4. |
+
+A reply that isn't exactly 3 bytes is ignored, and the version stays 0. **Version ≥ 2 means the
+strap supports continuous find** (§11.4). 🟡 `SVC/FindDevice:76-81,86,199-201`. The Helio's version
+is not recorded anywhere: 🔴 (§10 item 14).
+
+### 11.3 Messages
+
+| Bytes | Direction | Meaning | Tag / source |
+|---|---|---|---|
+| `01` | phone → strap | capabilities request (§11.2) | 🟡 `SVC/FindDevice:36,139` |
+| `02 …` | strap → phone | capabilities reply (§11.2) | 🟡 `SVC/FindDevice:37,73-82` |
+| **`03`** | phone → strap | **start** "find device": the strap starts vibrating | 🟡 `SVC/FindDevice:38,179-185` |
+| `04` | strap → phone | the strap acknowledges a **start**. No further bytes are read. 🔴 whether it also acknowledges a stop. | 🟡 `SVC/FindDevice:39,83-94` |
+| **`06`** | phone → strap | **stop** "find device" | 🟡 `SVC/FindDevice:40,180` |
+| `07` | strap → phone | the strap stopped "find device" on its own side. Gadgetbridge only logs it. 🔴 whether it is sent after a tap on the strap, after the strap's own timeout, or both. | 🟡 `SVC/FindDevice:41,106-108` |
+| `11` | strap → phone | the strap asks the phone to ring ("find phone", §11.5) | 🟡 `SVC/FindDevice:42,95-105` |
+| `12 01` | phone → strap | acknowledgement of `11` (`01` = success) | 🟡 `SVC/FindDevice:43,187-191` |
+| `13` | strap → phone | the strap ends "find phone" | 🟡 `SVC/FindDevice:44,109-113` |
+| `14` | phone → strap | the phone ends "find phone" (the user found it) | 🟡 `SVC/FindDevice:45,193-197` |
+| `15 <mode>` | strap → phone | find-phone mode: `00` vibrate only, `01` ring | 🟡 `SVC/FindDevice:46,114-126` |
+
+Opcodes `05`, `08`–`10` and everything above `15` are not used by any reference. Ignore unknown
+opcodes; never send them.
+
+### 11.4 One-shot vs continuous, and how long the strap buzzes
+
+- **Continuous** (version ≥ 2): one `03` makes the strap vibrate until it is told to stop with
+  `06` (or until it stops on its own, see below). 🟡 `SVC/FindDevice:86-92`,
+  `GB@bbd9868e` (the commit that added version-based continuous-find detection, 2025-04-03).
+- **One-shot** (version < 2): each `03` plays **one** burst, using the strap's "find band"
+  vibration pattern (type `09`, §13.1). To keep it going, Gadgetbridge waits for the `04` ack and
+  then sends another `03` after a delay. The delay is the total length of the find-band pattern
+  (on + off times, multiplied by its repeat count), capped at 10 s. When the pattern is the
+  device default, Gadgetbridge doesn't know its length and uses 10 s. It stops the cycle when the
+  user presses stop, and then sends `06`. 🟡 `SVC/FindDevice:83-94,149-154`,
+  `GB/service/devices/huami/HuamiUtils.java:46-70`
+- **Helio evidence** (🟡, one Gadgetbridge tester each):
+  - Gadgetbridge's find device on a Helio Strap is "continuous until stopped … a repeating series
+    of vibrations that continues indefinitely until you tap 'Found It!'" (`GB#6715`, comment of
+    2026-09-06).
+  - With Gadgetbridge's call handling (a single `03` when the call rings and `06` when it is
+    answered or ends; **no** re-send loop), the tester got "continuous vibration for incoming calls
+    until hung up" (`GB#6755`, 2026-09-12). A single `03` therefore keeps the Helio vibrating for at
+    least a ring's length. That strongly suggests the Helio is a version ≥ 2 (continuous) device.
+    🔴 until §10 item 14 records the version byte.
+- **Duration**: Amazfit says "Find Device" in the Zepp app makes the strap "vibrate continuously
+  for 60 seconds" (`AMZ-M p.3`). 🔴 **whether the 60 s limit is enforced by the strap or by the
+  Zepp app** sending `06`. The Gadgetbridge tester's "indefinitely" argues for the app, but it
+  would also be true if the strap were one-shot and Gadgetbridge's 10 s re-send loop were running.
+  §10 item 15 decides.
+- **Gadgetbridge pitfall (don't copy)**: Gadgetbridge's settings code reads the find-device version
+  from a stored preference that its find-device code never writes, so its *settings* always
+  treat a Zepp OS device as one-shot (and offer a "find band" vibration pattern). Its find loop
+  uses the version from the live reply and is unaffected. `SVC/FindDevice:48-49,77,199-201`
+  (no preference update anywhere in that file), `GB/devices/huami/zeppos/ZeppOsCoordinator.java:584-586,606-608`.
+
+**OpenCircuit rule** (🔴 recommendation):
+- Always send `06` when finding ends: when the user stops it, and **after 60 s of phone-side time**
+  at the latest. Never rely on the strap's own timeout.
+- Version ≥ 2: send one `03`.
+- Version < 2, or no well-formed capabilities reply: send `03`, and on each `04` send another
+  `03` 10 s later, until 60 s have passed. Then send `06`.
+- If the link drops while finding, the strap may keep vibrating until its own timeout (unknown).
+  On the next authenticated connection, if a find was active when the link dropped, send `06`
+  once.
+- Treat `07` from the strap as "finding stopped" and update the UI.
+
+### 11.5 Find phone (strap → phone)
+
+Some Zepp OS devices can ask the phone to ring. The strap sends `11`. Gadgetbridge replies at
+once with `12 01`, because a device only sends its mode after that acknowledgement. It then
+waits 1.5 s for an optional `15 <mode>` (`00` vibrate only, `01` ring) before it starts ringing
+(ring if no mode arrives). `13` from the strap, or `14` from the phone, ends it. 🟡
+`SVC/FindDevice:95-126,187-197`. 🔴 **whether the Helio can send `11` at all**: it has no screen or
+button, and Amazfit documents no gesture for it (`AMZ-M`). §10 item 21. v1: answer `11` with
+`12 01` and show a local notification. That is harmless and needs no UI beyond it.
+
+### 11.6 Before authentication
+
+Endpoint `0x001A` is encrypted by default (§11.1), and before auth there is no session key.
+Every reference sends find-device commands only after auth and the services list (§5). 🟡
+`GB/service/devices/huami/zeppos/ZeppOsSupport.java:900-951`. 🔴 whether the strap would accept a
+**plaintext** `03` before auth (§10 item 16). **Rule: find device requires a completed auth.**
+Without the key there is no find device and no buzz (the plan of record's "key required"
+decision). ZeppKit's refusal to send encrypted messages before the session is confirmed already
+enforces this.
+
+### 11.7 Worked example E: find device start and stop (constructed, made-up key)
+
+This continues worked examples B and C: the same session key
+`8c 45 6e 06 23 92 2f ab 73 ce 01 a0 cd dd ee ff`. After example B the encrypted-sequence
+number is `0x2933d232`. Start is the connection's 4th message (handle `0x04`); stop is the 5th
+(handle `0x05`). `0x001A` is encrypted (the default). `OC-vec`
+
+| Step | Start (`03`) | Stop (`06`) |
+|---|---|---|
+| message key = session key XOR handle | `88 41 6a 02 27 96 2b af 77 ca 05 a4 c9 d9 ea fb` | `89 40 6b 03 26 97 2a ae 76 cb 04 a5 c8 d8 eb fa` |
+| `P ‖ S` | `03` `32 d2 33 29` | `06` `33 d2 33 29` |
+| CRC-32 over `P ‖ S` | `0xe374a1e5` → `e5 a1 74 e3` | `0x932849f0` → `f0 49 28 93` |
+| padded plaintext (1 + 4 + 4 = 9 → 16) | `03 32 d2 33 29 e5 a1 74 e3` + 7 × `00` | `06 33 d2 33 29 f0 49 28 93` + 7 × `00` |
+| AES-128-ECB(message key) | `8f 01 cd 1e ad c4 db 8b e8 24 03 ae 5b ff 55 45` | `75 74 e9 d5 fa 93 f4 4d a0 fb 8c 33 b2 52 53 cd` |
+| next sequence number | `0x2933d233` | `0x2933d234` |
+
+At MTU 247 each is one 27-byte chunk; at MTU 23 each takes two chunks (the first chunk has room
+for 9 data bytes, §3.2):
+
+```
+MTU 247, start (27 B): 03 0f 00 04 00 | 01 00 00 00 | 1a 00 | 8f 01 cd 1e ad c4 db 8b e8 24 03 ae 5b ff 55 45
+MTU 247, stop  (27 B): 03 0f 00 05 00 | 01 00 00 00 | 1a 00 | 75 74 e9 d5 fa 93 f4 4d a0 fb 8c 33 b2 52 53 cd
+
+MTU 23, start:  chunk 0 (20 B): 03 09 00 04 00 | 01 00 00 00 | 1a 00 | 8f 01 cd 1e ad c4 db 8b e8
+                chunk 1 (12 B): 03 0e 00 04 01 | 24 03 ae 5b ff 55 45
+```
+
+The total-length field is `01`: the plaintext length (§3.3). The strap then replies `04` on
+`0x001A` (its own handle and encryption). If the services list had flagged `0x001A` plaintext,
+the start would instead be one 12-byte chunk: `03 07 00 04 00 01 00 00 00 1a 00 03`.
+
+A **short buzz** (§13.2) is exactly this pair with the stop sent 500 ms after the start.
+
+---
+
+## 12. Alarms (endpoint `0x000F`)
+
+### 12.1 Channel
+
+| Fact | Tag / source |
+|---|---|
+| Alarms use endpoint **`0x000F`**, **plaintext by default** (the services list may override). | 🟡 `SVC/Alarms:47,72` |
+| The Helio stores **up to 10 alarms**. Each vibrates for 60 s and is stopped by tapping the front of the strap repeatedly. They are made in Zepp › Device › Helio Strap › Alarm. | 🟡 `AMZ-M p.2,3,12`, `AMZ-S` |
+| Gadgetbridge reads the alarm list at session setup when `0x000F` is in the services list. | 🟡 `SVC/Alarms:105-118`, `GB/service/devices/huami/zeppos/ZeppOsSupport.java:947-951` |
+| A Helio tester reports alarms work with Gadgetbridge. | 🟡 `GB#6715` (2026-09-04: the motor "works fine for alarms and the 'Find device' feature") |
+
+### 12.2 Commands
+
+| Bytes | Direction | Meaning | Tag / source |
+|---|---|---|---|
+| `01` | phone → strap | capabilities request. **Defined but never sent by Gadgetbridge**; the reply (`02 …`) layout is unknown. | 🔴 `SVC/Alarms:49-50` |
+| `03 01 <record>` | phone → strap | **create or replace** the alarm in the slot named inside the 10-byte record (§12.3). Gadgetbridge uses this for new alarms *and* for every change to an existing one, including enable/disable. The `01` is not explained; 🔴 it is probably the number of records that follow. Always send `01` and one record. | 🟡 `SVC/Alarms:51,144-171` |
+| `04 <status>` | strap → phone | create ack | 🟡 `SVC/Alarms:52,83-85` |
+| `05 01 <slot>` | phone → strap | **delete** the alarm in `<slot>` (same unexplained `01`) | 🟡 `SVC/Alarms:53,172-179` |
+| `06 <status>` | strap → phone | delete ack | 🟡 `SVC/Alarms:54,86-88` |
+| `07 …` | phone → strap | "update". It exists, but its layout is unknown and Gadgetbridge never sends it. **Never send it.** | 🔴 `SVC/Alarms:55` |
+| `08 <status>` | strap → phone | update ack | 🟡 `SVC/Alarms:56,89-91` |
+| `09` | phone → strap | **read all alarms** | 🟡 `SVC/Alarms:57,114-118` |
+| `0a <count> <record>…` | strap → phone | alarm list: `count` (u8), then `count` × 10-byte records. The payload must be exactly 2 + 10 × `count` bytes; otherwise discard the whole reply. | 🟡 `SVC/Alarms:58,96-99,184-196` |
+| `0f` | strap → phone | **the alarms changed on the strap**. Gadgetbridge re-reads the list with `09`; any further bytes are ignored. | 🟡 `SVC/Alarms:59,92-95` |
+
+The ack **status** byte is only logged by Gadgetbridge. 🔴 `01` = success, by analogy with every
+other Zepp OS ack in this document. Treat anything else, or no ack, as a failure.
+
+**Enable/disable** has no command of its own. Re-send the whole record with `03 01` and the
+enabled bit changed. 🟡 `SVC/Alarms:151-157`
+
+### 12.3 One alarm record (10 bytes)
+
+The record is identical in the create command (after `03 01`) and in each entry of the `0a` list.
+🟡 `SVC/Alarms:61-69,158-171,234-246`
+
+```
+ +-------+------+------+--------+--------+-------------------------+
+ | flags | slot | hour | minute | repeat | 5 bytes, meaning unknown |
+ +-------+------+------+--------+--------+-------------------------+
+   [0]     [1]    [2]     [3]      [4]          [5..9]
+```
+
+| Offset | Field | Encoding | Tag / source |
+|---|---|---|---|
+| `[0]` | flags | bit 0 (`0x01`) **smart wake**; bit 1 (`0x02`) unknown, never set by Gadgetbridge; bit 2 (`0x04`) **enabled**; bits 3–7 not used by any reference | 🟡 `SVC/Alarms:67-69,151-157,239-240` |
+| `[1]` | slot | position 0–9. It is the alarm's identity: there is no other id. | 🟡 `SVC/Alarms:62,162,238`, `GB/devices/huami/HuamiCoordinator.java:155-157` |
+| `[2]` | hour | 0–23, the **strap's local wall-clock time** (whatever §5.1 last set) | 🟡 `SVC/Alarms:63,163` |
+| `[3]` | minute | 0–59 | 🟡 `SVC/Alarms:64,164` |
+| `[4]` | repeat | day bitmask, **Monday = bit 0** … **Sunday = bit 6**: `01` Mon, `02` Tue, `04` Wed, `08` Thu, `10` Fri, `20` Sat, `40` Sun. `00` = **once** (no repeat); `1f` = Mon–Fri; `7f` = every day. Bit 7 is never set. | 🟡 `SVC/Alarms:65,165,243`, `GB/model/Alarm.java:32-41` |
+| `[5..9]` | unknown | Gadgetbridge writes five `00`s. It notes that `[8]` is `00` in what it sends but `01` in what the device returns. Ignore them on read; write `00`s. | 🟡 `SVC/Alarms:166-170` |
+
+**Pitfall:** this day mask is **Monday-first**, while the time command's day-of-week byte (§5.1)
+counts **Sunday = 0**. Don't share a helper between them.
+
+**Once alarms**: the record has no date. Gadgetbridge sends the hour and minute only; the strap
+presumably fires at the next occurrence. 🔴 whether a fired once-alarm is then disabled, deleted
+or kept by the strap (§10 item 18: re-read after it fires).
+
+**Fields a display-less strap has no use for, or that don't exist:**
+- **Label / title**: no field in the record. There is no way to send one. 🟡 (absent from the layout)
+- **Snooze**: no field. Gadgetbridge's view is that Zepp OS alarms always snooze and that no flag
+  disables it (`GB/devices/huami/zeppos/ZeppOsCoordinator.java:319-322`, said of the watches).
+  Amazfit documents only "tap to stop" for the Helio (`AMZ-M p.2,12`). 🔴 whether the strap
+  snoozes at all.
+- **Sound**: none; the strap has only the motor.
+- **Smart wake**: Gadgetbridge offers the bit on every slot of every Zepp OS device
+  (`ZeppOsCoordinator.java:325-327`). Amazfit's Helio documents don't mention smart wake. 🔴
+  whether the Helio honours the bit. The smart-wake window is not in the known fields (🔴 maybe
+  in `[5..9]`).
+
+### 12.4 Capacity
+
+- **10 slots, numbered 0–9.** Amazfit documents 10 (`AMZ-M p.12`). Gadgetbridge hard-codes 10 for
+  every Zepp OS device and silently drops anything beyond (`HuamiCoordinator.java:155-157`,
+  `SVC/Alarms:120-131`). 🟡
+- **The strap does not report its capacity** through any path a reference uses. The `01`
+  capabilities reply (§12.2) might, but its layout is unknown. 🔴
+- Defensive rule: if a list reply has `count` > 10, a slot ≥ 10, or the same slot twice, treat
+  alarms as **unsupported for this connection** and write nothing (§14).
+
+### 12.5 Strap → phone messages
+
+| Event | Message | Tag |
+|---|---|---|
+| alarms edited on the strap side (e.g. by another central, or a once-alarm expiring 🔴) | `0f` on `0x000F` | 🟡 `SVC/Alarms:92-95` |
+| an alarm **fires** | **none known** | 🔴 |
+| an alarm is **dismissed** (tap) | **none known** | 🔴 |
+
+So the phone cannot know that an alarm rang or was dismissed. Don't build features on it. §10
+item 18 checks for any unexpected message during a fire.
+
+### 12.6 Worked example F: set a 06:30 weekday alarm (constructed)
+
+Precondition: a read (§15.2 step 2) returned one alarm, in slot 3, so the lowest free slot is 0.
+The new alarm is slot 0, enabled, no smart wake, 06:30, Monday–Friday.
+
+```
+record  = 04 00 06 1e 1f 00 00 00 00 00
+          |  |  |  |  |  +------------- 5 unknown bytes, written as 00
+          |  |  |  |  +---------------- repeat 0x1f = Mon|Tue|Wed|Thu|Fri
+          |  |  |  +------------------- minute 0x1e = 30
+          |  |  +---------------------- hour 6
+          |  +------------------------- slot 0
+          +---------------------------- flags 0x04 = enabled, no smart wake
+payload = 03 01 04 00 06 1e 1f 00 00 00 00 00      (12 bytes)
+```
+
+Plaintext (the default for `0x000F`), handle `0x06`: `OC-vec`
+
+```
+MTU 247 (23 B): 03 07 00 06 00 | 0c 00 00 00 | 0f 00 | 03 01 04 00 06 1e 1f 00 00 00 00 00
+
+MTU 23:  chunk 0 (20 B): 03 01 00 06 00 | 0c 00 00 00 | 0f 00 | 03 01 04 00 06 1e 1f 00 00
+         chunk 1 ( 8 B): 03 06 00 06 01 | 00 00 00
+```
+
+Expected reply on `0x000F`: `04 01` (create ack; status `01` 🔴). Then re-read: example G. To
+**disable** this alarm later, send `03 01 00 00 06 1e 1f 00 00 00 00 00` (flags `00`). To
+**delete** it, send `05 01 00` and expect `06 01`.
+
+If the services list flags `0x000F` as encrypted, encrypt as in §3.3. The values below use the
+session of example C with sequence number `0x2933d234` (right after example E), handle `0x06`.
+`OC-vec`
+
+| Step | Bytes |
+|---|---|
+| message key = session key XOR `0x06` | `8a 43 68 00 25 94 29 ad 75 c8 07 a6 cb db e8 f9` |
+| `P ‖ S` | `03 01 04 00 06 1e 1f 00 00 00 00 00` `34 d2 33 29` |
+| CRC-32 over those 16 bytes | `0xe7a148e8` → `e8 48 a1 e7` |
+| padded plaintext (12 + 4 + 4 = 20 → 32) | the 16 bytes above, `e8 48 a1 e7`, 12 × `00` |
+| AES-128-ECB(message key) | `29 21 7f fc d3 8d a4 6a aa de c6 76 68 0b e7 b8 1e 23 15 f1 6c 90 5e e2 98 9b 17 90 c0 78 3d 6c` |
+| one chunk at MTU 247 (43 B) | `03 0f 00 06 00 0c 00 00 00 0f 00` + the 32 ciphertext bytes |
+| next sequence number | `0x2933d235` |
+
+### 12.7 Worked example G: read back a list of 2 alarms (constructed)
+
+The re-read after example F (§15.2 step 7):
+
+```
+→ 09
+← 0a 02
+     04 00 06 1e 1f 00 00 00 01 00
+     01 03 09 0f 60 00 00 00 01 00
+```
+
+Length check: 2 + 2 × 10 = 22 bytes ✓. Decoded:
+
+| Slot | Enabled | Smart wake | Time | Repeat |
+|---|---|---|---|---|
+| 0 | yes (flags `04`) | no | 06:30 | `1f` Mon–Fri |
+| 3 | **no** (flags `01`: only the smart-wake bit) | yes | 09:15 | `60` Sat + Sun |
+
+Slot 0 is example F's alarm. Free slots: 1, 2, 4–9. Byte `[8]` of each record is `01`, as
+Gadgetbridge says the device returns; a parser must ignore it.
+
+---
+
+## 13. Vibration and other haptics
+
+What the phone can make the motor do, from most to least useful for OpenCircuit.
+
+### 13.1 Vibration patterns (endpoint `0x0018`)
+
+| Fact | Tag / source |
+|---|---|
+| Endpoint **`0x0018`**, **encrypted by default**. | 🟡 `SVC/VibrationPatterns:44,50` |
+| **Set** = `03`, u8 **type**, u8 **source** (`01` custom pattern follows, `00` use the device's built-in default), u8 **test** (`01` = also play it now, `00` = store only), u8 **n** = number of on/off pairs, then n × (u16 LE **on** ms, u16 LE **off** ms). With source `00`, n is `00` and nothing follows. | 🟡 `SVC/VibrationPatterns:113-136` |
+| Reply `04 <status>` (only logged). | 🟡 `SVC/VibrationPatterns:47,59-68` |
+| Gadgetbridge caps a pattern at **10 s** in total (on + off), dropping any pair that would exceed it. It attributes the limit to the official app. | 🟡 `SVC/VibrationPatterns:117-120`, `GB/service/devices/huami/HuamiUtils.java:72-100` |
+| **There is no read command.** Gadgetbridge can't read the strap's patterns back and marks that as unresolved. | 🟡 `SVC/VibrationPatterns:71-77` |
+| Gadgetbridge **writes every type on every connect**, with source `00` (device default) for any type the user has not customised in Gadgetbridge. Connecting Gadgetbridge therefore resets any custom pattern made in Zepp. **Don't copy that.** | 🟡 `SVC/VibrationPatterns:71-77,104-110`, `GB/devices/huami/HuamiCoordinator.java:438-483` |
+
+**Type codes** 🟡 `GB/service/devices/huami/HuamiVibrationPatternNotificationType.java:24-33`, and
+which of them Gadgetbridge configures on Zepp OS (`GB/devices/huami/zeppos/ZeppOsCoordinator.java:570-593`):
+
+| Type | Meaning | Gadgetbridge sets it on Zepp OS | Plausible on the Helio |
+|---|---|---|---|
+| `00` | app notifications | always | 🔴 no: the strap is not sent notifications (§13.3) |
+| `01` | incoming call | always | 🔴 no, same reason |
+| `02` | incoming SMS | always | 🔴 no, same reason |
+| `04` | goal reached | always | 🔴 only if the strap has goal alerts (§13.4) |
+| `05` | alarm | always | 🔴 probably: the strap fires alarms itself |
+| `06` | idle / inactivity alert | always | 🔴 only if the strap has inactivity alerts (§13.4) |
+| `08` | event reminder | if the reminders capability reports slots | 🔴 unknown |
+| `09` | find band | when find device is one-shot (always, given the §11.4 pitfall) | 🔴 only for one-shot find |
+| `0a` | to-do list | never (not implemented) | — |
+| `0c` | schedule | never (not implemented) | — |
+
+🔴 **Whether the Helio implements `0x0018` at all** is unknown (§10 item 13). 🔴 Whether a set
+with test = `01` also **stores** the pattern: assume it does.
+
+Layout illustration (constructed; **v1 must not send it**, see §15): alarm type, custom, play
+now, two pairs of 400 ms on / 200 ms off →
+`03 05 01 01 02 90 01 c8 00 90 01 c8 00`.
+
+### 13.2 "Vibrate now"
+
+No reference has a dedicated "vibrate now" or motor-test opcode for Zepp OS. Two ways exist:
+
+| Method | How | Tag / source | Use in OpenCircuit |
+|---|---|---|---|
+| **Find-device pulse** | send `03` on `0x001A`, then `06` 500 ms later | 🟡 on the Helio: Gadgetbridge's notification buzz (`SVC/FindDevice:166-171`, `GB@4e786b26`), which a Helio tester reports gives a "single vibration" (`GB#6755`, 2026-09-12) | **Yes.** The only transient buzz. The length of the buzz for a given delay is 🔴 (what the strap plays between start and stop). |
+| Pattern test | §13.1 set with test = `01` | 🔴 not reported on the Helio; may persist | **No.** It can overwrite a stored pattern that can't be read back. |
+
+### 13.3 Notifications and calls on a strap without a display
+
+- Zepp OS normally sends notifications on endpoint `0x001E` (encrypted by default), and the watch
+  shows and buzzes them. 🟡 `SVC/Notification:59,98`
+- **Gadgetbridge never uses `0x001E` for the Helio Strap.** For a device without a display (except
+  the Helio Ring), it turns each phone notification into a find-device pulse (§13.2), and an
+  incoming call into find-device start, with stop when the call is answered or ends. The
+  user-facing "send app notifications" switch still applies. 🟡
+  `GB/service/devices/huami/zeppos/ZeppOsSupport.java:414-438`, added in `GB@4e786b26`
+  (2026-09-12, `GB#6755`, closing `GB#6715`). A Helio tester confirmed both behaviours
+  (`GB#6755`). Gadgetbridge's website now lists "calls and notifications (vibrating the strap)"
+  for the Helio (gadgetbridge.org, Amazfit gadgets page, fetched 2026-09-30).
+- The Helio Ring (also no display) is excluded from that path and is sent real notifications on
+  `0x001E`. 🟡 same lines. OpenCircuit's controls are specified for the **strap only**.
+- Gadgetbridge hides the vibration-pattern and "sound and vibration" settings for devices without
+  a display (`ZeppOsCoordinator.java:483-505`).
+- **For OpenCircuit**: an iOS app can't observe other apps' notifications or calls, so relaying
+  them isn't possible the way Gadgetbridge does it on Android. 🔴 whether the strap vibrates for
+  iPhone notifications through ANCS on its own: Amazfit documents no notification feature for
+  the Helio (`AMZ-M`). The pulse can still be used for OpenCircuit's **own** events (e.g. a sync
+  finished, a health alert computed on the phone).
+
+### 13.4 Strap-side haptic alerts configured through the config endpoint
+
+These are **persistent settings** on the strap (§5.5 transport: endpoint `0x000A`, encrypted by
+default; one write message per group). The strap evaluates them itself and vibrates without the
+phone. Value types are §5.5's type codes. 🟡 `SVC/Config:390-402,467-576` unless stated.
+
+**Constraint bytes follow the value** in a read with constraints included (e.g. a byte entry
+is: arg, `10`, value, n, n allowed values). 🟡
+`GB/service/devices/huami/zeppos/services/config/ConfigByte.java:27-41`. This fills in where §5.5 was
+silent.
+
+| Group | Arg | Type | Meaning | Encoding | Helio evidence |
+|---|---|---|---|---|---|
+| HEALTH `08` | `02` | byte | **high heart-rate alert** threshold | `00` = off, otherwise bpm. The allowed values come from the constraints; Gadgetbridge's own list is 100–150 in steps of 10 (`GB-res/values/arrays.xml:3073-3081`) | 🟡 Amazfit: alerts when HR stays above/below the limit for 10 consecutive minutes at rest, not during sleep (`AMZ-M p.10`, `AMZ-S`). Arg presence 🔴 |
+| HEALTH `08` | `03` | byte | **low heart-rate alert** threshold | `00` = off, else bpm (Gadgetbridge: 40/45/50, `arrays.xml:3110-3115`) | same as above |
+| HEALTH `08` | `14` | bool | **relax (stress) reminder** | `00`/`01` | 🟡 Amazfit: alerts when stress stays above the limit for 10 min at rest; needs stress monitoring (arg `13`, §5.5) on (`AMZ-M p.11`) |
+| HEALTH `08` | `32` | byte | **low SpO₂ alert** threshold | `00` = off, else % (Gadgetbridge: 80/85/90, `arrays.xml:3124-3129`) | 🟡 Amazfit: alerts when SpO₂ stays below the value for 10 min, not during sleep; needs all-day SpO₂ (arg `31`) on (`AMZ-M p.10`) |
+| HEALTH `08` | `41` | bool | **inactivity (sedentary) alert** | `00`/`01` | 🔴 not in Amazfit's Helio documents; a Helio user reported the sedentary reminder "not working" with Gadgetbridge (`GB#5799`, 2026-02-15) |
+| HEALTH `08` | `42` / `43` | hh:mm | inactivity alert active window start / end | u8 hour, u8 minute | 🔴 |
+| HEALTH `08` | `44` | bool | inactivity alert quiet window enabled | `00`/`01` | 🔴 |
+| HEALTH `08` | `45` / `46` | hh:mm | quiet window start / end | u8 hour, u8 minute | 🔴 |
+| HEALTH `08` | `51` | bool | **goal-reached alert** | `00`/`01` | 🔴 not in Amazfit's Helio documents |
+| HEALTH `08` | `52`–`57` | see note | goals: steps (`52`: short if the HEALTH version is 1, int otherwise), calories (`53`, short), weight (`54`: short below version 3, int from 3), sleep (`55`, short), standing time (`56`, short), fat-burn time (`57`, short) | LE | 🔴 (`SVC/Config:528-533,595-625`) |
+| SOUND & VIBRATION `03` | `09` | bool | vibrate for alerts | `00`/`01` | 🔴 group `03` may not exist on the strap |
+| SOUND & VIBRATION `03` | `12` | byte | **vibration intensity** | `00` normal, `01` enhanced (`SVC/Config:1634-1637`) | 🔴 |
+| SYSTEM `0a` | `0a` | byte | do-not-disturb mode | `00` off, `01` scheduled, `02` automatic, `03` always (`SVC/Config:1538-1543`) | 🔴 whether it exists on the strap, and whether it silences alarms or alerts |
+| SYSTEM `0a` | `0b` / `0c` | hh:mm | DND schedule start / end | u8 hour, u8 minute | 🔴 |
+| WORKOUT `09` | `41` | bool | workout-detection alert | `00`/`01` | 🔴 meaning (probably a buzz when an auto-detected workout starts) |
+
+Other args in group `03` (`02` volume, `06` crown vibration, `07` alert tone, `08` cover to mute,
+`0a` text-to-speech) are watch features. Ignore them.
+
+Group versions: Gadgetbridge understands SOUND & VIBRATION version `02`, SYSTEM `01`, WORKOUT
+`01` and HEALTH `01`–`03`. It discards a read reply whose version differs (HEALTH excepted).
+So the args above are only known at those versions. 🟡 `SVC/Config:319-327,390-402`.
+Echo the version from the read reply when writing (§9).
+
+**Haptics with no known config key** (Amazfit, `AMZ-M p.2-5`): power-on/off buzz, pairing
+success/failure buzz, **low-battery buzz at 20 %, 10 % and 5 %**, firmware-update done/failed
+buzz, and the workout pace/speed/high-HR alerts (configured per workout in the Zepp app). None
+of them can be triggered or configured by OpenCircuit.
+
+**Gadgetbridge behaviour not to copy:** on the first HEALTH read reply of each connection it
+**writes the user's fitness goals** to the strap (`SVC/Config:356-360`). That is a persistent write
+that the user didn't ask for.
+
+Worked example H (constructed): read the four HR/SpO₂/stress alert args with constraints, then
+set the high-HR alert to 120 bpm. `OC-vec`
+
+```
+→ 03 01 08 04 02 03 14 32                 read, constraints on, HEALTH, 4 args
+← 04 01 08 03 01 04                        ok, HEALTH v3, constraints included, 4 entries
+     02 10 00 07 00 64 6e 78 82 8c 96      high HR: byte, value 00 (off); 7 allowed: 0,100,110,120,130,140,150
+     03 10 00 04 00 28 2d 32               low HR:  byte, value 00 (off); 4 allowed: 0,40,45,50
+     14 0b 00                              relax reminder: bool, off (bools carry no constraints)
+     32 10 5a 04 50 55 5a 00               low SpO₂: byte, value 0x5a = 90 %; 4 allowed: 80,85,90,0
+→ 05 08 03 00 01 02 10 78                  write HEALTH v3 (echoed), 1 entry: arg 02, byte, 0x78 = 120
+← 06 01                                    write ack
+```
+
+120 is in the allowed list, so the write is valid. A value outside the list must be refused on
+the phone and never sent.
+
+### 13.5 What is 🔴 unknown for the Helio specifically
+
+- the find-device version byte; whether the 60 s limit is strap-side; whether `07` is sent; how long a 500 ms pulse actually buzzes (§11);
+- whether `0x0018` exists, which pattern types the strap uses, and whether a test also stores (§13.1);
+- whether the smart-wake bit and any snooze exist; what happens to a once-alarm after it fires; the alarm ack status values; the alarm capabilities reply (§12);
+- which of the §13.4 args the strap reports (Amazfit documents only the HR, SpO₂ and relax alerts);
+- whether the strap can send find-phone `11` (§11.5);
+- whether any command works before auth (§11.6).
+
+---
+
+## 14. Capability detection
+
+**Rule: a control is shown only when the connected strap has positively reported support for
+it in this connection. If support is absent, unknown or malformed, hide the control and never
+send its commands.** Gadgetbridge is looser: it sends find device without checking the services
+list (§11.1) and assumes 10 alarm slots.
+
+| Feature | Show it only when | If absent |
+|---|---|---|
+| **Find device** | auth completed (§4) **and** the services list (§5.2) contains `0x001A` | hide; send nothing on `0x001A` |
+| Continuous vs one-shot | capabilities reply `02 01 <v>` of exactly 3 bytes: v ≥ 2 → continuous | no well-formed reply → one-shot emulation (§11.4), still with the 60 s phone-side stop |
+| **Buzz** (pulse, §13.2) | same as find device | hide |
+| **Alarms** (view) | services list contains `0x000F` **and** a well-formed `0a` reply to `09` arrived in this connection (length, count ≤ 10, unique slots < 10) | hide the alarm screen. Never show "no alarms" when the list could not be read: that is a different statement |
+| **Alarms** (edit) | the view condition, **and** the time has been set this connection (§5.1): alarms fire in strap-local time | read-only view |
+| Smart wake toggle | 🔴 no capability known | don't offer it in v1; preserve the bit on alarms that already have it |
+| **Vibration patterns** | services list contains `0x0018` | v1: **not exposed at all**, whatever the list says (no read-back, §15) |
+| **Haptic alert settings** (§13.4) | the group is listed in the config capabilities reply (§5.5) **and** the arg is present in a read reply **with the expected type code**. Read with constraints on, and offer only the allowed values. | hide that one setting. Never write an arg the strap didn't report. Gadgetbridge does the same, `GB/devices/huami/zeppos/ZeppOsSettingsCustomizer.java:77-107`, `SVC/Config:1148` |
+| Find phone (`11` from the strap) | always handled when `0x001A` is listed (answer `12 01`) | nothing |
+| Notifications endpoint `0x001E` | never used for the strap (§13.3) | — |
+
+Device gate: all of §11–§15 applies to a device identified as `Amazfit Helio Strap` (§1). The
+Helio Ring shares the protocol, but Gadgetbridge routes it differently (§13.3). Keep the ring out
+of scope until it is tested.
+
+---
+
+## 15. State safety
+
+### 15.1 Persistent vs transient
+
+| Command | Endpoint | Effect on strap state | Tag |
+|---|---|---|---|
+| find start `03` / stop `06`, pulse | `0x001A` | **transient**: stops within 60 s at most (phone-side rule, §11.4) | 🟡 |
+| find-phone ack `12 01`, stop `14` | `0x001A` | transient | 🟡 |
+| capabilities `01` (find, alarms, config); alarm read `09`; config read `03` | various | **read-only** | 🟡 |
+| alarm create/replace `03 01 …` | `0x000F` | **persistent**: overwrites whatever the slot held, including an alarm the user made in Zepp | 🟡 |
+| alarm delete `05 01 <slot>` | `0x000F` | **persistent and destructive** | 🟡 |
+| alarm update `07` | `0x000F` | unknown: **never send** | 🔴 |
+| vibration pattern set `03 …` | `0x0018` | **persistent, and cannot be read back**: the user's Zepp pattern is lost for good | 🟡 |
+| vibration pattern test (test = `01`) | `0x0018` | 🔴 may also persist: treat as persistent | 🔴 |
+| config write `05 …` | `0x000A` | **persistent**; can also change what the strap *records* (§5.5) | 🟡 |
+
+**Never at session setup.** Connecting must not write alarms, patterns or config. Gadgetbridge
+does all three on connect or on the first edit: it rewrites every one of its alarm slots
+(creating or deleting each, `SVC/Alarms:120-182`), resets vibration patterns
+(`SVC/VibrationPatterns:71-77`) and writes fitness goals (`SVC/Config:356-360`). OpenCircuit must
+only write in response to an explicit user edit of that one item.
+
+### 15.2 Alarm read-before-write sequence (🔴 recommendation, built from the facts above)
+
+1. **Preconditions**: authenticated; `0x000F` in the services list; time set this connection
+   (§5.1); no other alarm write in flight.
+2. **Read**: send `09`, wait for `0a` (time out after a few seconds). Validate: length
+   = 2 + 10 × count, count ≤ 10, every slot < 10 and unique. On failure: stop, write nothing,
+   show "couldn't read alarms".
+3. **Show the strap's list as the truth.** Keep no local alarm list that could be "synced" over it.
+4. **User edits one alarm.** Build exactly one message for that slot:
+   - new alarm → the **lowest free slot**; none free → refuse ("the strap already has 10 alarms");
+   - change or enable/disable → `03 01` + the full record with only the edited fields changed,
+     flags bits 0 and 2 as the user set them; unknown flag bits and bytes `[5..9]` written as `0`
+     (the path Gadgetbridge has exercised);
+   - delete → `05 01 <slot>`.
+5. **Race check**: if a `0f` arrived after step 2, discard the edit's base, re-read (step 2) and
+   ask the user to confirm again.
+6. **Write, then wait for the ack** (`04` or `06`). Status other than `01`, or no ack → report
+   failure; don't retry blindly.
+7. **Re-read** (`09`) and confirm the slot holds what was written; display the re-read list.
+8. Never touch a slot the user didn't edit; never write more than one alarm per user action.
+
+### 15.3 Config write sequence (🔴 recommendation)
+
+Read the group's args with constraints on (§13.4 example H) → validate the new value against the
+allowed values or min/max → write **one** arg, echoing the group version from the read → expect
+`06 01` → re-read the arg and show the strap's value.
+
+### 15.4 Find device safety
+
+- Always pair a start with a stop (§11.4): the user's stop button, the 60 s phone timer, and a
+  stop on the next reconnect if the link dropped mid-find.
+- No automatic find device or pulse at connect, sync or in the background without an explicit
+  user action or setting. It is a physical interruption to the wearer.
+
+
 ---
 
 ## Changelog
 
 - 2026-09-30: first version (zepp-spec agent, #215 Phase 0). All claims 🟡/🔴.
+- 2026-09-30: device-controls addendum (zepp-controls-spec agent, #215): §11 find device, §12
+  alarms, §13 vibration and haptic alerts, §14 capability detection, §15 state safety; four
+  endpoints added to §3.5; source aliases `GB-res/`, `GB#N`, `GB@sha`, `AMZ-S`, `AMZ-M`; capture
+  items 13–21 in §10; worked examples E–H. Sections 1–10 are otherwise unchanged. All new
+  claims are 🟡/🔴.
