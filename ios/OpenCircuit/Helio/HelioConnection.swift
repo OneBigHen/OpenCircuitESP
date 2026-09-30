@@ -253,8 +253,9 @@ final class HelioConnection: NSObject {
 
     private func makeSession(for peripheral: CBPeripheral) {
         // The process-wide container when no view handed a store over yet (a switch made from a
-        // screen, or a restoration launch); never `makeContainer()`, whose recovery path can wipe.
-        let store = localStore ?? OpenCircuitApp.sharedContainer.map { LocalStore($0.mainContext) }
+        // screen, or a restoration launch), opened now if launch couldn't (before the first unlock);
+        // never `makeContainer()`, whose recovery path can wipe.
+        let store = localStore ?? (try? OpenCircuitApp.backgroundStore())
         let session = HelioSession(
             transport: self, identityID: peripheral.identifier.uuidString, model: .helioStrap,
             key: keyStore.load(), keyStore: keyStore, sink: store.map { HelioStoreSink(store: $0) },

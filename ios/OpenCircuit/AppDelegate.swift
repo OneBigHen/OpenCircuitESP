@@ -60,8 +60,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let helioActive = ActiveDeviceChoiceStore.persisted() == .helioStrap
         if helioActive, HelioConnection.hasSavedStrap {
             MainActor.assumeIsolated {
-                if let container = OpenCircuitApp.sharedContainer ?? (try? OpenCircuitApp.makeContainerOrThrow()) {
-                    // `container:` keeps a fallback-built container alive as long as the strap's store.
+                // A fallback-built container is published as `sharedContainer`, so later sites reuse
+                // it; `container:` keeps it alive as long as the strap's store.
+                if let container = try? OpenCircuitApp.sharedOrFallbackContainer() {
                     HelioConnection.shared.setLocalStore(LocalStore(container: container))
                 }
                 HelioConnection.shared.reconnectKnown()
@@ -80,8 +81,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 // if neither container resolves (pre-first-unlock Data Protection) the store stays nil
                 // and behavior is exactly as before. `setLocalStore` is a reference assign that also
                 // propagates to an existing session (no second drain), so one-writer is preserved.
-                if let container = OpenCircuitApp.sharedContainer ?? (try? OpenCircuitApp.makeContainerOrThrow()) {
-                    // `container:` keeps a fallback-built container alive as long as the scanner's store.
+                // A fallback-built container is published as `sharedContainer` (#222 review Q2), so
+                // the BGTask handler, the Focus filter and the intents reuse it instead of opening a
+                // second container over the same file; `container:` keeps it alive as long as the
+                // scanner's store.
+                if let container = try? OpenCircuitApp.sharedOrFallbackContainer() {
                     RingScanner.shared.setLocalStore(LocalStore(container: container))
                 }
                 RingScanner.shared.reconnectKnownPeripheral()
@@ -182,8 +186,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 // turn — see OpenCircuitApp.sharedContainer). In the rare case it isn't built yet,
                 // fall back to the NON-destructive `makeContainerOrThrow()`, whose throw is caught
                 // below → the run aborts, the scheduler chain stays armed, and the next wake retries;
-                // the store is never touched.
-                let container = try OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()
+                // the store is never touched. A fallback-built container is published for the next
+                // site, and the stores below keep it alive (`container:`, #222 review U2).
+                let container = try OpenCircuitApp.sharedOrFallbackContainer()
                 // #215: the ring's background drain runs only while the ring is the chosen device; it
                 // is what constructs the ring's scanner and central. The strap's wake took the branch
                 // above; this catches a switch to the strap between that check and this task running.
@@ -197,7 +202,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                     return
                 }
                 let service = RingBackgroundSyncService(
-                    store: LocalStore(container.mainContext),
+                    store: LocalStore(container: container),
                     health: HealthKitWriter()
                 )
                 // Pass the per-task budget. The app-refresh path keeps the ~28 s budget so the
@@ -222,7 +227,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 // is then shared with the fever cross-check inside `evaluate`, so a background wake
                 // never pays for that scan twice; opted out, this costs one UserDefaults read and
                 // the pass is exactly as it was before #183.
-                let alertStore = LocalStore(container.mainContext)
+                let alertStore = LocalStore(container: container)
                 let alerts = HealthNotificationCenter()
                 let restingHRDaily = UserDefaults.standard.bool(forKey: HeadacheDefaults.enabled)
                     ? alerts.restingHRDailySeries(store: alertStore) : nil
@@ -270,10 +275,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
         let operation = Task { @MainActor in
             do {
-                // #131: never the destructive `makeContainer()`; `container:` keeps a fallback-built
-                // container alive for as long as the store.
-                let container = try OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()
-                let store = LocalStore(container: container)
+                // #131: never the destructive `makeContainer()`; the store keeps a fallback-built
+                // container alive, and the container is published for the next site.
+                let store = try OpenCircuitApp.backgroundStore()
                 let run = await HelioBackgroundSyncService.live(store: store).run(kind: kind, timeout: timeout)
                 if run.ending != .expired {
                     await Self.evaluateAlerts()

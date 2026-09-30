@@ -1,6 +1,5 @@
 import AppIntents
 import Foundation
-import SwiftData
 
 /// Opt-in Focus Filter shown by iOS under Settings > Focus > Sleep > Add Filter.
 ///
@@ -87,12 +86,14 @@ private enum SleepFocusSyncRunner {
             // Background work must never reach makeContainer()'s destructive recovery path. This
             // mirrors AppDelegate's BGTask invariant: reuse the launch container or attempt the
             // non-destructive builder and retry on a later trigger if protected data is unavailable.
-            let container = try OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()
-            let store = LocalStore(container.mainContext)
+            // A fallback-built container is published for the next site, and `container:` keeps it
+            // alive for as long as the store (#222 review Q2 + U2).
+            let container = try OpenCircuitApp.sharedOrFallbackContainer()
+            let store = LocalStore(container: container)
             // #215 phase 4, decision 1: the chosen device's drain only. With the Helio Strap chosen the
             // ring's scanner is never constructed; the strap's drain runs instead.
             if BackgroundDrain(ActiveDeviceChoiceStore.persisted()) == .strap {
-                await runStrap(container: container)
+                await runStrap(store: store)
                 return
             }
             let service = RingBackgroundSyncService(store: store, health: HealthKitWriter())
@@ -155,10 +156,8 @@ private enum SleepFocusSyncRunner {
     /// Focus ending is the authoritative "the night is over" signal, so the strap's nights skip the
     /// 20-minute quiet margin, exactly as the ring's do on this wake (`sleepFinalized`). The run logs
     /// itself ("helio strap: …", kind `sleepFocus`); the alert passes follow a finished sync.
-    private static func runStrap(container: ModelContainer) async {
+    private static func runStrap(store: LocalStore) async {
         let scheduler = BackgroundRefreshScheduler()
-        // `container:` keeps a fallback-built container alive for as long as the store.
-        let store = LocalStore(container: container)
         let run = await HelioBackgroundSyncService.live(store: store).run(
             kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: true)
         guard !Task.isCancelled else { return }

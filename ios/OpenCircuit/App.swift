@@ -687,6 +687,29 @@ struct OpenCircuitApp: App {
         }
     }
 
+    /// The process-wide container for a site that runs without the App's views (the BGTask handler,
+    /// the Sleep Focus filter, a restoration relaunch, the intents): `sharedContainer`, else a
+    /// NON-destructive `makeContainerOrThrow()` build that is then PUBLISHED as `sharedContainer`, so
+    /// every later site reuses it instead of opening a second container over the same SQLite file
+    /// (#222 review Q2 + U2). Throws, touching nothing, when the store can't be opened (before the
+    /// first unlock); the caller aborts and a later wake retries. Never `makeContainer()` (#131).
+    ///
+    /// `storeURL` is a test-only seam, as for `makeContainerOrThrow`.
+    @MainActor
+    static func sharedOrFallbackContainer(storeURL: URL? = nil) throws -> ModelContainer {
+        if let sharedContainer { return sharedContainer }
+        let container = try makeContainerOrThrow(storeURL: storeURL)
+        sharedContainer = container
+        return container
+    }
+
+    /// A store over `sharedOrFallbackContainer()` that keeps its container alive (`LocalStore(container:)`):
+    /// a `ModelContext` alone does not, and a fetch through a context whose container was released traps.
+    @MainActor
+    static func backgroundStore() throws -> LocalStore {
+        LocalStore(container: try sharedOrFallbackContainer())
+    }
+
     /// The destructive FOREGROUND-ONLY recovery: back up durable rollups, wipe the store files,
     /// rebuild a fresh store, restore the rollups, and raise `historyResetDefaultsKey`. Only reached
     /// from `resolveContainer` when `isBackground == false`. (#40/#131)
