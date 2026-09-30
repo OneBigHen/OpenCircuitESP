@@ -401,10 +401,112 @@ struct OpenCircuitApp: App {
     /// four defaulted columns without a schema version and deleted every raw history row on upgrade;
     /// build 45 was the hotfix. A migration in this area gets a device rehearsal.
     ///
-    /// V7 is the CURRENT version and therefore the ONLY one that may name live types. When V8 is
-    /// added, V7 must first be pinned to snapshots of whatever the live shapes are the day V7 ships.
+    /// ⚠️ V7 IS NOW FROZEN — it shipped in builds 47 through 56 (measured: the stored properties of
+    /// every live `@Model` are byte-identical at `v1.0-b47` … `v1.0-b56`), so its shape is the shape
+    /// on real phones. V8 adds `deviceID` to `StoredSample` and `StoredCursor`, so V7 names FROZEN
+    /// snapshots only: the V7 `StoredSample` / `StoredCursor` are exactly `FrozenModels`' (unchanged
+    /// b1 → b56), and `StoredSleepSummary` / `StoredNap` — which V7 itself widened — are pinned to
+    /// nested snapshots of the b47–b56 shape below. Same discipline as V4, V5 and V6.
     enum SchemaV7: VersionedSchema {
         static var versionIdentifier = Schema.Version(7, 0, 0)
+        static var models: [any PersistentModel.Type] {
+            // `StoredSleepSummary` and `StoredNap` here resolve to the nested snapshots below —
+            // deliberately. Every other entry is a FROZEN snapshot (`Store/FrozenSchemas.swift`).
+            [FrozenModels.StoredSample.self, FrozenModels.StoredCursor.self,
+             StoredSleepSummary.self, FrozenModels.StoredDaily.self,
+             StoredNap.self, FrozenModels.StoredPeriodEntry.self,
+             FrozenModels.StoredDaytimeTemp.self, FrozenModels.StoredStepSample.self,
+             FrozenModels.StoredHeadacheEntry.self, FrozenModels.StoredHeadacheRisk.self]
+        }
+
+        /// `StoredSleepSummary` EXACTLY as builds 47–56 wrote it — V6's snapshot + the reversibility /
+        /// provenance block. Same rules as the V4…V6 snapshots: nothing reads or writes through it,
+        /// keep it byte-for-byte, and do NOT add to it — a new column belongs on the live type plus a
+        /// new schema version.
+        @Model final class StoredSleepSummary {
+            @Attribute(.unique) var night: Date = Date.distantPast
+            var asleepMin: Int = 0
+            var deepMin: Int = 0
+            var lightMin: Int = 0
+            var remMin: Int = 0
+            var awakeMin: Int = 0
+            var efficiency: Double = 0
+            var inBedStart: Date = Date.distantPast
+            var inBedEnd: Date = Date.distantPast
+            var sleepOnset: Date = Date.distantPast
+            var sleepWake: Date = Date.distantPast
+            var updatedAt: Date = Date.distantPast
+            var skinTempC: Double = 0
+            var sleepScore: Int = 0
+            var stressScore: Int = 0
+            var feelScore: Int = 0
+            var hrDeep: Int = 0
+            var hrLight: Int = 0
+            var hrRem: Int = 0
+            var hrAwake: Int = 0
+            var movementLevels: [Int] = []
+            var hypnogramData: Data = Data()
+            var osaAvgSpO2: Double = 0
+            var osaMinSpO2: Double = 0
+            var osaTimeBelow90Sec: Double = 0
+            var osaODI: Double = 0
+            var osaValidWindows: Int = 0
+            var editedInBedStart: Date = Date.distantPast
+            var editedInBedEnd: Date = Date.distantPast
+            var isManuallyEdited: Bool = false
+            var widenedRecordedInBedStart: Date = Date.distantPast
+            var widenedRecordedInBedEnd: Date = Date.distantPast
+            var widenedRecordedOnset: Date = Date.distantPast
+            var widenedRecordedWake: Date = Date.distantPast
+            var recordedHypnogramData: Data = Data()
+            var measuredAsleepSeconds: Double = -1
+            var assertedAsleepSeconds: Double = -1
+            var coverageFraction: Double = -1
+            var longestGapSeconds: Double = -1
+            var measuredEfficiency: Double = -1
+            var sleepBasis: String = ""
+            init() {}
+        }
+
+        /// `StoredNap` EXACTLY as builds 47–56 wrote it: V6's snapshot + `recordedNapSegmentsData` /
+        /// `healthWrittenStart` / `healthWrittenEnd`. Same rules as the snapshot above.
+        @Model final class StoredNap {
+            @Attribute(.unique) var start: Date = Date.distantPast
+            var end: Date = Date.distantPast
+            var asleepMin: Int = 0
+            var isLongNap: Bool = false
+            var healthWritten: Bool = false
+            var updatedAt: Date = Date.distantPast
+            var isManuallyEdited: Bool = false
+            var isManuallyAdded: Bool = false
+            var napSegmentsData: Data? = nil
+            var editedStart: Date? = nil
+            var editedEnd: Date? = nil
+            var recordedNapSegmentsData: Data? = nil
+            var healthWrittenStart: Date = Date.distantPast
+            var healthWrittenEnd: Date = Date.distantPast
+            init() {}
+        }
+    }
+
+    /// Adds `deviceID` to `StoredSample` and `StoredCursor` (#214, docs/DEVICE_SEAM.md §3): which
+    /// device's timeline a raw sample and a sync cursor belong to, so a second wearable's backfill is
+    /// judged against its own watermark instead of being dropped as older than the ring's.
+    ///
+    /// ADDITIVE ONLY: two defaulted String columns, a lightweight stage exactly like V6→V7. Every
+    /// existing row takes the column default, `"ringconn"` (`SyncDeviceID.ringConn`), and NO row is
+    /// read, rewritten or re-keyed by the migration: the ring's cursor keys are the pre-V8 keys
+    /// unchanged (`SyncCursorKey`), which is what makes the stage lightweight. The uniqueness rule
+    /// stays the single `@Attribute(.unique)` string on `StoredCursor.kindRaw`, now the (device, name)
+    /// key — `#Unique` is iOS 18 and this target is iOS 17.
+    ///
+    /// ⚠️ Gate A (`-only-testing:OpenCircuitTests/ShippedStoreMigrationTests`, executed count checked)
+    /// and Gate B (an on-device upgrade from a pre-45 build) of the migration runbook apply.
+    ///
+    /// V8 is the CURRENT version and therefore the ONLY one that may name live types. When V9 is
+    /// added, V8 must first be pinned to snapshots of whatever the live shapes are the day V8 ships.
+    enum SchemaV8: VersionedSchema {
+        static var versionIdentifier = Schema.Version(8, 0, 0)
         static var models: [any PersistentModel.Type] {
             [StoredSample.self, StoredCursor.self, StoredSleepSummary.self, StoredDaily.self,
              StoredNap.self, StoredPeriodEntry.self, StoredDaytimeTemp.self, StoredStepSample.self,
@@ -415,7 +517,7 @@ struct OpenCircuitApp: App {
     enum MigrationPlan: SchemaMigrationPlan {
         static var schemas: [any VersionedSchema.Type] {
             [SchemaV1.self, SchemaV2.self, SchemaV3.self, SchemaV4.self, SchemaV5.self,
-             SchemaV6.self, SchemaV7.self]
+             SchemaV6.self, SchemaV7.self, SchemaV8.self]
         }
         static var stages: [MigrationStage] {
             [.lightweight(fromVersion: SchemaV1.self, toVersion: SchemaV2.self),
@@ -423,7 +525,8 @@ struct OpenCircuitApp: App {
              .lightweight(fromVersion: SchemaV3.self, toVersion: SchemaV4.self),
              .lightweight(fromVersion: SchemaV4.self, toVersion: SchemaV5.self),
              .lightweight(fromVersion: SchemaV5.self, toVersion: SchemaV6.self),
-             .lightweight(fromVersion: SchemaV6.self, toVersion: SchemaV7.self)]
+             .lightweight(fromVersion: SchemaV6.self, toVersion: SchemaV7.self),
+             .lightweight(fromVersion: SchemaV7.self, toVersion: SchemaV8.self)]
         }
     }
 
@@ -459,7 +562,7 @@ struct OpenCircuitApp: App {
     /// The schema + default configuration shared by BOTH container builders, so the foreground
     /// (recovering) and background (non-destructive) paths can never drift apart. (#131)
     private static func makeSchemaAndConfig() -> (Schema, ModelConfiguration) {
-        // Must list exactly `SchemaV7.models` (the CURRENT version) — the container is built from
+        // Must list exactly `SchemaV8.models` (the CURRENT version) — the container is built from
         // THIS array, so a model present only in the versioned schema enum would migrate in and then
         // be unreachable. Every type here is the LIVE one, never a frozen snapshot; the current
         // version is the ONLY place a live type may appear. (`ShippedStoreMigrationTests` asserts

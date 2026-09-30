@@ -18,6 +18,11 @@ final class StoredSample {
     // default fails lightweight migration and traps at ModelContainer init on launch.
     var isDelta: Bool = false
     var dailyTotal: Double?
+    /// Which device's timeline this sample belongs to (`SyncDeviceID`, #214). SchemaV8. The default
+    /// is what every pre-V8 row migrates to and MUST equal `SyncDeviceID.ringConn.rawValue` — a
+    /// literal because it is the column default the migration writes (pinned by
+    /// `ShippedStoreMigrationTests.testABuild56StoreMigratesToPerDeviceCursorsWithZeroRowsLost`).
+    var deviceID: String = "ringconn"
 
     init(
         kindRaw: String,
@@ -26,7 +31,8 @@ final class StoredSample {
         value: Double,
         rawValue: Double? = nil,
         isDelta: Bool = false,
-        dailyTotal: Double? = nil
+        dailyTotal: Double? = nil,
+        deviceID: String = SyncDeviceID.ringConn.rawValue
     ) {
         self.kindRaw = kindRaw
         self.start = start
@@ -35,13 +41,15 @@ final class StoredSample {
         self.rawValue = rawValue
         self.isDelta = isDelta
         self.dailyTotal = dailyTotal
+        self.deviceID = deviceID
     }
 
     convenience init(
         _ s: QuantitySample,
         rawValue: Double? = nil,
         isDelta: Bool = false,
-        dailyTotal: Double? = nil
+        dailyTotal: Double? = nil,
+        device: SyncDeviceID = .ringConn
     ) {
         self.init(
             kindRaw: s.kind.rawValue,
@@ -50,7 +58,8 @@ final class StoredSample {
             value: s.value,
             rawValue: rawValue,
             isDelta: isDelta,
-            dailyTotal: dailyTotal
+            dailyTotal: dailyTotal,
+            deviceID: device.rawValue
         )
     }
 
@@ -60,14 +69,21 @@ final class StoredSample {
     }
 }
 
+/// A named watermark. Since SchemaV8 (#214) a row belongs to one device's timeline: `kindRaw` is
+/// the unique (device, name) KEY — `SyncCursorKey.key(name, device:)` — and `deviceID` names the
+/// device. The ring's keys are the pre-V8 keys unchanged (the bare kind, `hk:<kind>`, `export:…`),
+/// so no migrated row was rewritten; another device's key carries its id as a suffix.
 @Model
 final class StoredCursor {
     @Attribute(.unique) var kindRaw: String
     var last: Date
+    /// SchemaV8. Same default rule as `StoredSample.deviceID`.
+    var deviceID: String = "ringconn"
 
-    init(kindRaw: String, last: Date) {
+    init(kindRaw: String, last: Date, deviceID: String = SyncDeviceID.ringConn.rawValue) {
         self.kindRaw = kindRaw
         self.last = last
+        self.deviceID = deviceID
     }
 }
 
@@ -888,17 +904,26 @@ struct LocalStore {
     /// context). Skips the `hk:`-prefixed HealthKit-watermark rows (see `pendingHealthSamples`)
     /// and the `export:`-prefixed export watermark — they live in the same table but track
     /// separate concerns and must not pollute the store-ingest cursor.
-    private func storeCursorRows() throws -> [StoredCursor] {
+    ///
+    /// Only `device`'s rows (#214): another device's watermark must never judge this device's
+    /// samples. With only the ring in the store this is every row it returned before V8.
+    private func storeCursorRows(device: SyncDeviceID = .ringConn) throws -> [StoredCursor] {
         try context.fetch(FetchDescriptor<StoredCursor>())
-            .filter { !$0.kindRaw.hasPrefix(Self.healthCursorPrefix)
+            .filter { $0.deviceID == device.rawValue
+                && !$0.kindRaw.hasPrefix(Self.healthCursorPrefix)
                 && !$0.kindRaw.hasPrefix(Self.exportCursorPrefix) }
+    }
+
+    /// `device`'s cursor from its rows, keyed by bare cursor name (`SyncCursor.forDevice`).
+    private func syncCursor(from rows: [StoredCursor], device: SyncDeviceID) -> SyncCursor {
+        SyncCursor.forDevice(device, rows: rows.map { ($0.kindRaw, $0.deviceID, $0.last) })
     }
 
     /// Dry-run of `ingest(_:)` for logging/observability. Lets the caller tell whether a captured
     /// sample would be rejected as implausible or duplicate before the real write runs.
-    func previewIngest(_ samples: [QuantitySample], now: Date = Date()) throws -> IngestPreview {
-        let rows = try storeCursorRows()
-        let cursor = SyncCursor(lastByKind: Dictionary(uniqueKeysWithValues: rows.map { ($0.kindRaw, $0.last) }))
+    func previewIngest(_ samples: [QuantitySample], device: SyncDeviceID = .ringConn,
+                       now: Date = Date()) throws -> IngestPreview {
+        let cursor = syncCursor(from: try storeCursorRows(device: device), device: device)
 
         var preview = IngestPreview()
         preview.inputCount = samples.count
@@ -925,11 +950,9 @@ struct LocalStore {
         return preview
     }
 
-    /// Rebuild the in-memory SyncCursor from persisted rows.
-    func loadCursor() throws -> SyncCursor {
-        var map: [String: Date] = [:]
-        for r in try storeCursorRows() { map[r.kindRaw] = r.last }
-        return SyncCursor(lastByKind: map)
+    /// Rebuild `device`'s in-memory SyncCursor from its persisted rows (the ring's by default).
+    func loadCursor(device: SyncDeviceID = .ringConn) throws -> SyncCursor {
+        syncCursor(from: try storeCursorRows(device: device), device: device)
     }
 
     /// Persist new samples and advance the cursor in one step.
@@ -938,13 +961,18 @@ struct LocalStore {
     /// actually moved are written, then samples + cursor commit together in a single
     /// `context.save()`. On a save failure we roll back, so the persisted cursor never moves
     /// ahead of un-stored samples — they're retried on the next ingest instead of being lost.
-    func ingest(_ samples: [QuantitySample]) throws -> [QuantitySample] {
+    ///
+    /// Per device (#214): `device`'s samples are judged against `device`'s cursor only, and stored
+    /// and watermarked under it — so a second device's backfill that is OLDER than the ring's
+    /// watermark is kept instead of silently dropped. The ring (the default) reads and writes
+    /// exactly the rows and keys it did before.
+    func ingest(_ samples: [QuantitySample], device: SyncDeviceID = .ringConn) throws -> [QuantitySample] {
         // Fetch the cursor rows ONCE and reuse them for both the in-memory cursor and the
         // post-insert upsert — no per-`MetricKind` fetch loop (#33).
-        let rows = try storeCursorRows()
-        var rowByKind: [String: StoredCursor] = [:]
-        for r in rows { rowByKind[r.kindRaw] = r }
-        let cursor = SyncCursor(lastByKind: rowByKind.mapValues(\.last))
+        let rows = try storeCursorRows(device: device)
+        var rowByKey: [String: StoredCursor] = [:]
+        for r in rows { rowByKey[r.kindRaw] = r }
+        let cursor = syncCursor(from: rows, device: device)
 
         // Plausibility BEFORE the cursor ever sees these samples. A SyncCursor only moves
         // FORWARD (never resets), so a single corrupted-timestamp sample (e.g. a misaligned
@@ -966,7 +994,7 @@ struct LocalStore {
 
         for s in fresh {
             guard s.kind.isCumulativeCounter else {
-                context.insert(StoredSample(s))
+                context.insert(StoredSample(s, device: device))
                 ingested.append(s)
                 continue
             }
@@ -985,7 +1013,7 @@ struct LocalStore {
                 // First sample of this kind in the batch: the ONLY DB hit for cumulative state.
                 // Subsequent samples of the same kind reuse the in-memory `cumulativeStates`
                 // cache above, so no further per-sample lookups occur this ingest (#33).
-                state = try cumulativeState(for: s.kind, before: s.start)
+                state = try cumulativeState(for: s.kind, before: s.start, device: device)
             }
 
             let result = CumulativeMetricAccumulator.accumulate(s, state: state)
@@ -994,7 +1022,8 @@ struct LocalStore {
                 deltaSample,
                 rawValue: result.rawValue,
                 isDelta: true,
-                dailyTotal: result.dailyTotal
+                dailyTotal: result.dailyTotal,
+                device: device
             ))
             cumulativeStates[s.kind] = CumulativeMetricState(
                 previousRawValue: result.rawValue,
@@ -1010,10 +1039,11 @@ struct LocalStore {
         // fetched above — no fetch-per-`MetricKind.allCases` loop (#33).
         for kind in advanced.advancedKinds(since: cursor) {
             guard let last = advanced.last(kind) else { continue }
-            if let existing = rowByKind[kind.rawValue] {
+            let key = SyncCursorKey.key(kind.rawValue, device: device)
+            if let existing = rowByKey[key] {
                 existing.last = last
             } else {
-                context.insert(StoredCursor(kindRaw: kind.rawValue, last: last))
+                context.insert(StoredCursor(kindRaw: key, last: last, deviceID: device.rawValue))
             }
         }
         do {
@@ -1152,11 +1182,16 @@ struct LocalStore {
         let stuckKinds = stuck.map(\.kindRaw)
 
         for row in stuck {
-            let bareKind = row.kindRaw.hasPrefix(Self.healthCursorPrefix)
-                ? String(row.kindRaw.dropFirst(Self.healthCursorPrefix.count))
-                : row.kindRaw
+            // Per device (#214): the row's name comes off its device's key, and the reset target is
+            // that device's own latest sample. A ring row's key IS its name, so this is unchanged.
+            let deviceID = row.deviceID
+            let name = SyncCursorKey.name(fromKey: row.kindRaw, device: SyncDeviceID(rawValue: deviceID))
+                ?? row.kindRaw
+            let bareKind = name.hasPrefix(Self.healthCursorPrefix)
+                ? String(name.dropFirst(Self.healthCursorPrefix.count))
+                : name
             var latestDescriptor = FetchDescriptor<StoredSample>(
-                predicate: #Predicate { $0.kindRaw == bareKind && $0.start <= now },
+                predicate: #Predicate { $0.kindRaw == bareKind && $0.deviceID == deviceID && $0.start <= now },
                 sortBy: [SortDescriptor(\.start, order: .reverse)]
             )
             latestDescriptor.fetchLimit = 1
@@ -1218,14 +1253,21 @@ struct LocalStore {
     /// Stored samples of the Health-mirrored kinds newer than the Health watermark,
     /// oldest→newest — everything synced to the store but not yet written to Apple Health.
     /// Does NOT advance the watermark (call `markHealthWritten` after a successful write).
-    func pendingHealthSamples() throws -> [QuantitySample] {
-        let cursor = try loadHealthCursor()
+    ///
+    /// Per device (#214): `device`'s samples against `device`'s `hk:` watermark, so a second
+    /// device's backfill older than the ring's watermark still reaches Health. The ring (the
+    /// default) owns every pre-V8 row, so its pending set is exactly what it was.
+    func pendingHealthSamples(device: SyncDeviceID = .ringConn) throws -> [QuantitySample] {
+        let cursor = try loadHealthCursor(device: device)
+        let deviceID = device.rawValue
         var out: [QuantitySample] = []
         for kind in Self.healthMirroredKinds {
             let kindRaw = kind.rawValue
             let last = cursor.last(kind) ?? .distantPast
             let descriptor = FetchDescriptor<StoredSample>(
-                predicate: #Predicate { $0.kindRaw == kindRaw && $0.start > last && $0.value > 0 },
+                predicate: #Predicate {
+                    $0.kindRaw == kindRaw && $0.deviceID == deviceID && $0.start > last && $0.value > 0
+                },
                 sortBy: [SortDescriptor(\.start, order: .forward)])
             out += try context.fetch(descriptor).compactMap(\.sample)
         }
@@ -1354,24 +1396,28 @@ struct LocalStore {
         }
     }
 
-    /// Advance the Health watermark past the newest written sample per kind.
-    func markHealthWritten(_ samples: [QuantitySample]) throws {
+    /// Advance `device`'s Health watermark past the newest written sample per kind. `samples` must
+    /// all be `device`'s — the ones `pendingHealthSamples(device:)` returned.
+    func markHealthWritten(_ samples: [QuantitySample], device: SyncDeviceID = .ringConn) throws {
         guard !samples.isEmpty else { return }
-        var cursor = try loadHealthCursor()
+        var cursor = try loadHealthCursor(device: device)
         _ = cursor.selectNew(samples)   // advances per kind to the newest start
         for kind in Self.healthMirroredKinds {
             guard let last = cursor.last(kind) else { continue }
-            upsertCursor(kind: Self.healthCursorPrefix + kind.rawValue, last: last)
+            upsertCursor(kind: SyncCursorKey.key(Self.healthCursorPrefix + kind.rawValue, device: device),
+                         last: last, device: device)
         }
         try context.save()
     }
 
-    /// Health watermark, read from the `hk:`-prefixed cursor rows (keyed by bare kind).
-    private func loadHealthCursor() throws -> SyncCursor {
+    /// `device`'s Health watermark, read from its `hk:`-prefixed cursor rows (keyed by bare kind).
+    private func loadHealthCursor(device: SyncDeviceID = .ringConn) throws -> SyncCursor {
         let rows = try context.fetch(FetchDescriptor<StoredCursor>())
         var map: [String: Date] = [:]
-        for r in rows where r.kindRaw.hasPrefix(Self.healthCursorPrefix) {
-            map[String(r.kindRaw.dropFirst(Self.healthCursorPrefix.count))] = r.last
+        for r in rows where r.deviceID == device.rawValue {
+            guard let name = SyncCursorKey.name(fromKey: r.kindRaw, device: device),
+                  name.hasPrefix(Self.healthCursorPrefix) else { continue }
+            map[String(name.dropFirst(Self.healthCursorPrefix.count))] = r.last
         }
         return SyncCursor(lastByKind: map)
     }
@@ -3123,20 +3169,27 @@ struct LocalStore {
         return try context.fetch(descriptor)
     }
 
-    private func upsertCursor(kind: String, last: Date) {
+    /// Upsert the cursor row whose KEY is `kind`. `device` only labels a newly inserted row; the key
+    /// already names the device (`SyncCursorKey`), and it is the unique column.
+    private func upsertCursor(kind: String, last: Date, device: SyncDeviceID = .ringConn) {
         let descriptor = FetchDescriptor<StoredCursor>(
             predicate: #Predicate { $0.kindRaw == kind })
         if let existing = try? context.fetch(descriptor).first {
             existing.last = last
         } else {
-            context.insert(StoredCursor(kindRaw: kind, last: last))
+            context.insert(StoredCursor(kindRaw: kind, last: last, deviceID: device.rawValue))
         }
     }
 
-    private func cumulativeState(for kind: MetricKind, before date: Date) throws -> CumulativeMetricState {
+    /// `device`'s running counter state: two devices' raw step counters are unrelated numbers, so a
+    /// delta must never be taken across them (#214). The ring's rows are all its own, so for the ring
+    /// the predicates below select exactly what they did before V8.
+    private func cumulativeState(for kind: MetricKind, before date: Date,
+                                 device: SyncDeviceID = .ringConn) throws -> CumulativeMetricState {
         let kindRaw = kind.rawValue
+        let deviceID = device.rawValue
         var previousDescriptor = FetchDescriptor<StoredSample>(
-            predicate: #Predicate { $0.kindRaw == kindRaw && $0.start < date },
+            predicate: #Predicate { $0.kindRaw == kindRaw && $0.deviceID == deviceID && $0.start < date },
             sortBy: [SortDescriptor(\.start, order: .reverse)]
         )
         previousDescriptor.fetchLimit = 1
@@ -3148,7 +3201,8 @@ struct LocalStore {
         let nextDay = dayInterval?.end ?? date
         var dayDescriptor = FetchDescriptor<StoredSample>(
             predicate: #Predicate {
-                $0.kindRaw == kindRaw && $0.start >= dayStart && $0.start < nextDay && $0.start < date
+                $0.kindRaw == kindRaw && $0.deviceID == deviceID
+                    && $0.start >= dayStart && $0.start < nextDay && $0.start < date
             },
             sortBy: [SortDescriptor(\.start, order: .reverse)]
         )
