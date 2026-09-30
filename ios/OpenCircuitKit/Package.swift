@@ -36,5 +36,7 @@ let package = Package(
         // macOS CoreBluetooth verifier for a real strap: `swift run HelioVerify --help`.
         // Thin BLE glue only; every decision lives in ZeppKit.
         .executableTarget(name: "HelioVerify", dependencies: ["ZeppKit"]),
+        // HelioVerify's command-line parsing (write gating), without Bluetooth.
+        .testTarget(name: "HelioVerifyTests", dependencies: ["HelioVerify"]),
     ]
 )
