@@ -611,7 +611,7 @@ Worked example D (constructed, made-up readings): fetch HRV since 2026-09-29 00:
 The two records decode (§6.5) to 42 ms at 1790633100 (2026-09-28T22:05:00Z) and 57 ms at
 1790633400 (22:10:00Z).
 
-Example E (from hardware, control bytes and lengths only, `HW:2026-09-30 (hw 0.132.27.2)`): a 30-minute activity
+**Trace T1** (a hardware trace, not a constructed example; control bytes and lengths only, `HW:2026-09-30 (hw 0.132.27.2)`): a 30-minute activity
 window at UTC−4. The length field counts **records**: 30 minutes × 8 bytes = 240 data bytes.
 
 ```
