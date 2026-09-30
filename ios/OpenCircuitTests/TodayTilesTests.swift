@@ -89,12 +89,56 @@ final class TodayTilesTests: XCTestCase {
         XCTAssertEqual(t.values[t.values.count - 2], 12_000)
     }
 
+    /// Review #220 S2 (the reviewer's probe, asserting the fix). Yesterday has no step total (the
+    /// ring was charging), so the last complete day the trend judges is the day BEFORE yesterday.
+    /// Under today's partial 1,200 the tile printed "+4,000 vs usual" with an up arrow, and VoiceOver
+    /// said 1,200 steps was "above your usual range". Now: no delta, no arrow, no verdict; the usual
+    /// range is still shown and spoken.
+    func testStepsStateNoVerdictWhenYesterdayIsMissing() {
+        var pts = (-8 ... -3).map { TrendsEngine.DailyPoint(date: day($0), steps: 8_000) }
+        pts.append(TrendsEngine.DailyPoint(date: day(-2), steps: 12_000))
+        pts.append(TrendsEngine.DailyPoint(date: day(0), steps: 1_200))
+        let t = tile(.steps, pts)
+        XCTAssertEqual(t.valueText, 1_200.formatted(.number))
+        XCTAssertEqual(t.qualifier, "so far today")
+        XCTAssertEqual(t.trend?.latest.date, day(-2))
+        XCTAssertFalse(t.trendIsYesterday)
+        XCTAssertNil(t.statedTrend)
+        XCTAssertNil(t.deltaText, "no delta, and so no arrow, under today's number")
+        XCTAssertTrue(t.rangeText.hasPrefix("Usual "), "the band and its label still show")
+        XCTAssertFalse(t.accessibilityLabel.contains("above"), t.accessibilityLabel)
+        XCTAssertFalse(t.accessibilityLabel.contains("That's"), t.accessibilityLabel)
+        XCTAssertTrue(t.accessibilityLabel.contains("Your usual range is"), t.accessibilityLabel)
+        XCTAssertFalse(t.accessibilityLabel.contains("still learning"), t.accessibilityLabel)
+
+        // The same with no step total today either: the headline is the day before yesterday's, and
+        // the rule is the same — a steps verdict is stated about yesterday or not at all.
+        let stale = tile(.steps, Array(pts.dropLast()))
+        XCTAssertEqual(stale.qualifier, "latest day")
+        XCTAssertNil(stale.deltaText)
+    }
+
     func testRestingHRUsesTheDerivedSeries() {
         let rhr = (0..<6).map { RestingHR.DailyValue(day: day($0 - 5), bpm: $0 == 5 ? 58 : 52) }
         let t = tile(.restingHR, [], restingHR: rhr)
         XCTAssertEqual(t.valueText, "58")
         XCTAssertEqual(t.freshnessText(now: now, calendar: cal), "today")
         XCTAssertEqual(t.trend?.direction, .above)
+    }
+
+    /// Review #220 F2. The detail screen said resting HR was "the day's lowest 5-minute average";
+    /// on a day of spot reads 10 minutes apart (the auto-measure cadence) no 5-minute window holds
+    /// two readings, so the value is the single lowest READING. The copy now says exactly that.
+    func testTheRestingHRCopyDescribesTheSparseReadingFallback() {
+        let bpms = [64, 61, 48, 63, 62, 60]
+        let hr = bpms.enumerated().map { i, b in
+            HRSample(bpm: b, start: now.addingTimeInterval(Double(i) * 600),
+                     end: now.addingTimeInterval(Double(i) * 600 + 60))
+        }
+        XCTAssertEqual(RestingHR.dailyValues(hr: hr, calendar: cal).map(\.bpm), [48])
+        let copy = MetricDetailView.what(.restingHR)
+        XCTAssertTrue(copy.contains("lowest reading when readings are sparse"), copy)
+        XCTAssertFalse(copy.contains("5-minute average"), copy)
     }
 
     func testThirtyDayWindow() {
@@ -110,6 +154,29 @@ final class TodayTilesTests: XCTestCase {
         trends.newestSampleAt = now.addingTimeInterval(-3600)
         let input = TodaySynthesis.input(trends: trends, tiles: tiles, readiness: nil, lastSyncAt: nil, now: now)
         XCTAssertNil(input.hrv, "a two-day-old night must not be reported as today's HRV")
+    }
+
+    /// Review #220 S3: the fever pairing is Vitals Status's verdict, passed through untouched — never
+    /// derived from the tiles. Two tiles above their usual, no Vitals Status fever: no pairing.
+    func testSynthesisTakesFeverSignsFromVitalsStatusOnly() {
+        let hot = [33.5, 33.5, 33.5, 33.5, 33.5, 33.9].enumerated().map { i, v in
+            TrendsEngine.DailyPoint(date: day(i - 5), skinTempC: v)
+        }
+        let rhr = (0..<6).map { RestingHR.DailyValue(day: day($0 - 5), bpm: $0 == 5 ? 61 : 58) }
+        let tiles = [tile(.skinTemp, hot), tile(.restingHR, [], restingHR: rhr)]
+        XCTAssertEqual(tiles.map { $0.trend?.direction }, [.above, .above])
+        var trends = TrendsData()
+        trends.newestSampleAt = now.addingTimeInterval(-3600)
+
+        let quiet = TodaySynthesis.input(trends: trends, tiles: tiles, readiness: nil, lastSyncAt: now, now: now)
+        XCTAssertFalse(quiet.feverSuspected)
+        XCTAssertFalse(TodaySynthesis.sentence(quiet).contains("gently"))
+
+        let flagged = TodaySynthesis.input(trends: trends, tiles: tiles, readiness: nil, feverSuspected: true,
+                                           lastSyncAt: now, now: now)
+        XCTAssertTrue(flagged.feverSuspected)
+        XCTAssertEqual(TodaySynthesis.sentence(flagged),
+                       "Skin temperature and resting heart rate are both above your usual, so take today gently.")
     }
 
     func testSynthesisNeverClaimsNoDataAfterASync() {

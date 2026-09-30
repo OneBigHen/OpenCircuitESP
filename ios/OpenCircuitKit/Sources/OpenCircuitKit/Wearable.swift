@@ -200,7 +200,19 @@ public enum HealthDeviceAttribution {
                                   hardwareVersion: identity.hardwareVersion,
                                   firmwareVersion: identity.firmwareVersion,
                                   softwareVersion: nil,
-                                  localIdentifier: WearableIdentity.clean(identity.id),
+                                  localIdentifier: localIdentifier(for: identity),
                                   udiDeviceIdentifier: nil)
+    }
+
+    /// A device family's `HKDevice.localIdentifier` is its sync timeline id
+    /// (`SyncDeviceID.timeline(for:identityID:)`), so Apple Health names the same device the store
+    /// keys by. Every RingConn ring is therefore "ringconn" — multi-ring is one merged timeline, so
+    /// a backlog flushed after a ring swap can't be labelled with the wrong ring's id. A Zepp OS
+    /// device gets its own `zeppos:<id>`. Only the id is shared: name and versions still come from
+    /// the identity, which `ActiveWearable` persists per peripheral. nil when the identity has no id.
+    static func localIdentifier(for identity: WearableIdentity) -> String? {
+        WearableIdentity.clean(identity.id).map {
+            SyncDeviceID.timeline(for: identity.kind, identityID: $0).rawValue
+        }
     }
 }

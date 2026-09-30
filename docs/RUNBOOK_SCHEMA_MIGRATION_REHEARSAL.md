@@ -28,8 +28,10 @@ grep -c "ShippedStoreMigrationTests .*' failed" /tmp/migration-gate.log   # must
 ```
 
 The two counts must be **equal**, and the failure count must be **0**. Measured on
-2026-08-20: **11 and 11, 0 failed, 0 crashed, 0 restarts, `xcodebuild` exit 0.** If the executed
-count is lower than the declared count, the gate did **not** pass — some of it did not run.
+2026-09-30, after the #218 review added the V8 SQL-column, b33/b43/b45→V8 and forward-only tests:
+**23 and 23, 0 failed, 0 crashed, 0 restarts, `xcodebuild` exit 0** (iPhone 17 simulator, Xcode 26.6;
+it was 11 and 11 on 2026-08-20). If the executed count is lower than the declared count, the gate
+did **not** pass — some of it did not run.
 
 ### Why it is a separate invocation and not "the app-target suite is green"
 
@@ -173,3 +175,13 @@ Do not "fix forward" on TestFlight. Expire the build the same day, as was done w
 re-open the question in `ShippedStoreMigrationTests`: a device failure that the simulator suite
 passes means the suite's transcribed shapes have drifted from what actually shipped, and the
 transcription — not the migration plan — is the first thing to re-measure against the git tag.
+
+**V8 is forward-only, so "expire the build" never means "go back to an older one".** Once a build
+carrying SchemaV8 has shipped, recovery is forward-only. Any later build, including a revert of
+#218, must keep `SchemaV8` and the V7→V8 stage in `MigrationPlan`. To drop `deviceID`, add a V9 and
+never remove V8. Never tell testers to reinstall a build ≤ 56. A build that doesn't know V8 can't
+open a V8 store: its staged migration throws `134504` ("unknown model version"), `resolveContainer`
+sends that to `wipeAndRecoverForeground`, and raw history is deleted on every phone that ever
+launched a V8 build. The same holds for every later schema version: never ship a build whose
+`MigrationPlan` ends before the newest version that has already shipped.
+`ShippedStoreMigrationTests.testABuild56PlanCannotOpenAMigratedStore` pins the throw.

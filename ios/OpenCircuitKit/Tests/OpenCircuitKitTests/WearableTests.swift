@@ -167,8 +167,49 @@ final class WearableTests: XCTestCase {
                                                   hardwareVersion: "00010001",
                                                   firmwareVersion: "FR02.018",
                                                   softwareVersion: nil,
-                                                  localIdentifier: ringID,
+                                                  localIdentifier: "ringconn",
                                                   udiDeviceIdentifier: nil))
+    }
+
+    /// Juan's decision (review #217 S1): every RingConn ring is ONE device in Apple Health — the
+    /// family's sync timeline id, the same "ringconn" the store keys every ring's rows by. Each ring
+    /// still reports its own name and versions.
+    func testEveryRingConnRingSharesOneLocalIdentifierButKeepsItsOwnFirmware() throws {
+        let ringA = WearableIdentity.ringConn(id: ringID, modelFamily: "RingConn Gen2",
+                                              firmware: firmware("FR02.018"))
+        let ringB = WearableIdentity.ringConn(id: "0D4C1B7E-0000-4000-8000-00000000B0B0",
+                                              modelFamily: "RingConn Gen3",
+                                              firmware: FirmwareInfo(version: "FR05.011", hardwareRevision: "00030002"))
+        let a = try XCTUnwrap(HealthDeviceAttribution.fields(for: ringA, origin: .device))
+        let b = try XCTUnwrap(HealthDeviceAttribution.fields(for: ringB, origin: .device))
+        XCTAssertEqual(a.localIdentifier, "ringconn")
+        XCTAssertEqual(b.localIdentifier, a.localIdentifier)
+        XCTAssertEqual(a.localIdentifier, SyncDeviceID.ringConn.rawValue)
+        XCTAssertEqual(a.firmwareVersion, "FR02.018")
+        XCTAssertEqual(b.firmwareVersion, "FR05.011")
+        XCTAssertEqual(a.hardwareVersion, "00010001")
+        XCTAssertEqual(b.hardwareVersion, "00030002")
+        XCTAssertEqual(a.name, "RingConn Gen2")
+        XCTAssertEqual(b.name, "RingConn Gen3")
+    }
+
+    /// The same rule with no special case: a Zepp OS device's id is its own timeline, `zeppos:<id>`,
+    /// so two straps stay two devices and never collide with the ring.
+    func testTheLocalIdentifierIsTheFamilysSyncTimelineForEveryFamily() throws {
+        let strap = WearableIdentity(id: "STRAP-1", kind: .zeppOS(model: "Helio Strap"), firmwareVersion: "3.0.1")
+        let other = WearableIdentity(id: "STRAP-2", kind: .zeppOS(model: "Helio Strap"))
+        let s = try XCTUnwrap(HealthDeviceAttribution.fields(for: strap, origin: .device))
+        let o = try XCTUnwrap(HealthDeviceAttribution.fields(for: other, origin: .device))
+        XCTAssertEqual(s.localIdentifier, "zeppos:STRAP-1")
+        XCTAssertEqual(o.localIdentifier, "zeppos:STRAP-2")
+        for identity in [strap, other, WearableIdentity.ringConn(id: ringID, modelFamily: "RingConn Gen2",
+                                                                 firmware: firmware("FR02.018"))] {
+            XCTAssertEqual(HealthDeviceAttribution.fields(for: identity, origin: .device)?.localIdentifier,
+                           SyncDeviceID.timeline(for: identity.kind, identityID: identity.id).rawValue)
+        }
+        // No id, no identifier — never a bare "zeppos:".
+        XCTAssertNil(HealthDeviceAttribution.fields(
+            for: WearableIdentity(id: " ", kind: .zeppOS(model: "Helio Strap")), origin: .device)?.localIdentifier)
     }
 
     /// Unknown fields map to nil, never to "" — Health would show an empty row otherwise.
@@ -180,7 +221,7 @@ final class WearableTests: XCTestCase {
         XCTAssertNil(fields.model)
         XCTAssertNil(fields.hardwareVersion)
         XCTAssertNil(fields.firmwareVersion)
-        XCTAssertEqual(fields.localIdentifier, ringID)
+        XCTAssertEqual(fields.localIdentifier, "ringconn")
     }
 
     /// A value the person entered names no device, and no device known means no attribution —

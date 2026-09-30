@@ -14,8 +14,8 @@ struct LiveVitalReadout: View {
     let tint: Color
     /// Beat the heart glyph at `value` bpm (HR only).
     var pulses = false
-    /// Readings received so far in this measurement (display units), for the low / high line.
-    var sessionValues: [Double] = []
+    /// Low / high of every reading so far in this measurement (display units).
+    var sessionRange = LiveSessionRange()
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .largeTitle) private var size: CGFloat = 72
@@ -36,8 +36,8 @@ struct LiveVitalReadout: View {
                 .lineLimit(1).minimumScaleFactor(0.6)
             VStack(alignment: .leading, spacing: 2) {
                 Text(unit).font(.title3.weight(.medium)).foregroundStyle(.secondary)
-                if let lo = sessionValues.min(), let hi = sessionValues.max(), sessionValues.count > 1 {
-                    Text("\(Int(lo.rounded()))–\(Int(hi.rounded())) so far")
+                if let r = sessionRange.range {
+                    Text("\(Int(r.lowerBound.rounded()))–\(Int(r.upperBound.rounded())) so far")
                         .font(.caption).monospacedDigit().foregroundStyle(.secondary)
                 }
             }
@@ -51,10 +51,34 @@ struct LiveVitalReadout: View {
     private var accessibilityText: String {
         guard let value else { return "Waiting for a reading" }
         var s = "\(value) \(unit == "%" ? "percent" : unit == "bpm" ? "beats per minute" : unit)"
-        if let lo = sessionValues.min(), let hi = sessionValues.max(), sessionValues.count > 1 {
-            s += ", \(Int(lo.rounded())) to \(Int(hi.rounded())) so far"
+        if let r = sessionRange.range {
+            s += ", \(Int(r.lowerBound.rounded())) to \(Int(r.upperBound.rounded())) so far"
         }
         return s
+    }
+}
+
+/// The low and high of EVERY reading in the current measurement. The chart's `LiveBuffer` keeps only
+/// its last 120 points, so a low–high taken from it would quietly become "over the last 120
+/// readings" on a long measurement. Nothing here is trimmed. Reset it wherever the buffer is reset.
+struct LiveSessionRange: Equatable {
+    private(set) var low: Double?
+    private(set) var high: Double?
+    private(set) var count = 0
+
+    mutating func include(_ value: Double) {
+        guard value.isFinite else { return }
+        low = min(low ?? value, value)
+        high = max(high ?? value, value)
+        count += 1
+    }
+
+    mutating func reset() { self = LiveSessionRange() }
+
+    /// low…high once there are two readings to span, nil before.
+    var range: ClosedRange<Double>? {
+        guard count > 1, let low, let high else { return nil }
+        return low...high
     }
 }
 

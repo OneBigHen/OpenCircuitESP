@@ -2,8 +2,9 @@
 // usual range as a band, the headline value and its delta, min / average / max, and plain notes on
 // what the number is and how "usual" is worked out.
 //
-// Loads its own window through `TrendsData.loadAsync(lookbackDays:)` — the same off-main loader the
-// tabs use — so the 14-day view here is built from exactly the rows the Today tile was.
+// Loads its own window through `TrendsData.loadAsync(lookbackDays:)` (the same off-main loader the
+// tabs use) when it opens, and each range the first time it is picked, so it shows the store as of
+// that moment. That can be newer than the Today tile behind it, if data arrived after the tab's last load.
 
 import SwiftUI
 import SwiftData
@@ -134,17 +135,18 @@ struct MetricDetailView: View {
 
     private func notes(_ tile: TodayTile) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(what(tile.metric)).font(.footnote).foregroundStyle(.secondary)
+            Text(Self.what(tile.metric)).font(.footnote).foregroundStyle(.secondary)
             Text("Your usual range is the average of the earlier days in this window, widened by half their day-to-day spread (and never narrower than a small fixed margin). A value inside it counts as usual. It needs \(BaselineTrend.defaultMinBaselineDays) earlier days before it's shown. On-device estimate — not a medical device.")
                 .font(.caption).foregroundStyle(.tertiary)
         }
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func what(_ m: TodayTile.Metric) -> String {
+    /// What the metric's number is, in plain words. Internal so a test can hold it to the math.
+    static func what(_ m: TodayTile.Metric) -> String {
         switch m {
         case .hrv:             return "The average of the ring's heart-rate-variability readings while you slept, one value per night."
-        case .restingHR:       return "A daily resting heart rate: the day's lowest 5-minute average heart rate — the same estimate Vitals Status uses."
+        case .restingHR:       return "A daily resting heart rate: the day's lowest sustained heart rate (or its lowest reading when readings are sparse), the same estimate Vitals Status uses."
         case .spo2:            return "The average of the ring's blood-oxygen readings while you slept, one value per night."
         case .respiratoryRate: return "The average of the ring's breathing-rate readings while you slept, one value per night."
         case .skinTemp:        return "The ring's skin temperature for each night. Skin temperature runs below core body temperature; what matters is the change from your usual."
