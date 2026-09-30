@@ -3,68 +3,72 @@
 // ZeppKit's transport, so a phone ⇄ device run checks the two sides against the spec rather than
 // against themselves. It reuses only the primitives that have their own oracles: B163 (OpenSSL
 // vectors), ZeppAES (NIST vectors) and ZeppCRC32 (check value).
+//
+// A library of its own (`ZeppKitTesting`, #215 phase 3) so the ZeppKit tests and the app's tests
+// drive the same simulated strap: the app target compiles this one file into OpenCircuitTests
+// (ios/project.yml), so it uses ZeppKit's PUBLIC API only. Test-only: nothing ships it.
 
 import Foundation
-@testable import ZeppKit
+import ZeppKit
 
-final class FakeZeppDevice {
+public final class FakeZeppDevice {
 
-    struct Notification: Equatable {
-        let characteristic: ZeppCharacteristic
-        let bytes: [UInt8]
+    public struct Notification: Equatable {
+        public let characteristic: ZeppCharacteristic
+        public let bytes: [UInt8]
     }
 
     // Configuration
-    let authKey: [UInt8]
-    let privateKey: [UInt8]
-    let random: [UInt8]
-    var writeLength: Int
-    var services: [(endpoint: UInt16, flag: UInt8)] = [
+    public let authKey: [UInt8]
+    public let privateKey: [UInt8]
+    public let random: [UInt8]
+    public var writeLength: Int
+    public var services: [(endpoint: UInt16, flag: UInt8)] = [
         (0x0000, 0), (0x000A, 1), (0x0029, 1), (0x0043, 0), (0x0047, 0), (0x004B, 1), (0x0082, 0),
     ]
-    var batteryReply = hex("04 00 57 01 00 00 00 00 00 00 00 ea 07 09 1d 08 00 00 08 00 64")
-    var configReply: [UInt8] = hex("04 01 08 03 00 02 01 10 ff 13 0b 00")
+    public var batteryReply = hex("04 00 57 01 00 00 00 00 00 00 00 ea 07 09 1d 08 00 00 08 00 64")
+    public var configReply: [UInt8] = hex("04 01 08 03 00 02 01 10 ff 13 0b 00")
     /// Fetch data per type: the start reply's first-record time bytes (8) and the data.
-    var fetchData: [ZeppFetchType: (start: [UInt8], data: [UInt8])] = [:]
+    public var fetchData: [ZeppFetchType: (start: [UInt8], data: [UInt8])] = [:]
     /// Data packet size (counter byte included).
-    var dataPacketLength = 20
-    var includeCRC = true
-    var corruptCRC = false
-    var skipPacketIndex: Int?
-    var refuseTypes: Set<ZeppFetchType> = []
+    public var dataPacketLength = 20
+    public var includeCRC = true
+    public var corruptCRC = false
+    public var skipPacketIndex: Int?
+    public var refuseTypes: Set<ZeppFetchType> = []
     /// Start replies in the 16-byte form, with a trailing `00` (§6.2).
-    var startReplyTrailingZero = false
+    public var startReplyTrailingZero = false
     /// An empty type answers with an all-zero start instead of echoing the *since* (§6.2).
-    var emptyStartAllZero = false
+    public var emptyStartAllZero = false
 
     // Device controls (§11–§13). Only reachable when a test lists their endpoints in `services`.
     /// The find-device capabilities reply (§11.2); nil = the strap never answers `01`.
-    var findCapabilitiesReply: [UInt8]? = hex("02 01 02")
+    public var findCapabilitiesReply: [UInt8]? = hex("02 01 02")
     /// Alarm slot → the 10-byte record as the strap returns it (byte [8] = 01, §12.3).
-    var alarmRecords: [UInt8: [UInt8]] = [:]
+    public var alarmRecords: [UInt8: [UInt8]] = [:]
     /// Status byte of the alarm create/delete acks; anything but 01 leaves the alarms unchanged.
-    var alarmAckStatus: UInt8 = 0x01
+    public var alarmAckStatus: UInt8 = 0x01
     /// Send `0f` (alarms changed) after each accepted alarm write.
-    var announcesAlarmChanges = false
-    var configCapabilitiesReply = hex("02 03 01 08")
+    public var announcesAlarmChanges = false
+    public var configCapabilitiesReply = hex("02 03 01 08")
     /// Config read replies by exact request payload; any other read gets `configReply`.
-    var configReplies: [[UInt8]: [UInt8]] = [:]
+    public var configReplies: [[UInt8]: [UInt8]] = [:]
 
     // Observed state
-    private(set) var sessionKey: [UInt8]?
-    private(set) var authenticated = false
-    private(set) var receivedAcks: [[UInt8]] = []
-    private(set) var receivedEndpoints: [UInt16] = []
-    private(set) var fetchAcks: [UInt8] = []
-    private(set) var fetchStarts: [[UInt8]] = []
-    private(set) var failures: [String] = []
+    public private(set) var sessionKey: [UInt8]?
+    public private(set) var authenticated = false
+    public private(set) var receivedAcks: [[UInt8]] = []
+    public private(set) var receivedEndpoints: [UInt16] = []
+    public private(set) var fetchAcks: [UInt8] = []
+    public private(set) var fetchStarts: [[UInt8]] = []
+    public private(set) var failures: [String] = []
     /// Opcodes received on the find-device endpoint, in order.
-    private(set) var findOpcodes: [UInt8] = []
-    private(set) var isBuzzing = false
+    public private(set) var findOpcodes: [UInt8] = []
+    public private(set) var isBuzzing = false
     /// Every payload received on the alarms endpoint, in order.
-    private(set) var alarmCommands: [[UInt8]] = []
-    private(set) var timeSetCount = 0
-    private(set) var configWrites: [[UInt8]] = []
+    public private(set) var alarmCommands: [[UInt8]] = []
+    public private(set) var timeSetCount = 0
+    public private(set) var configWrites: [[UInt8]] = []
 
     private var expectedPhoneSequence: UInt32 = 0
     private var deviceSequence: UInt32 = 0
@@ -72,18 +76,18 @@ final class FakeZeppDevice {
     private var inbox: (endpoint: UInt16, handle: UInt8, encrypted: Bool, declared: Int, body: [UInt8], next: Int)?
     private var currentFetch: ZeppFetchType?
 
-    init(authKey: [UInt8], privateKey: [UInt8], random: [UInt8], writeLength: Int = 20) {
+    public init(authKey: [UInt8], privateKey: [UInt8], random: [UInt8], writeLength: Int = 20) {
         self.authKey = authKey
         self.privateKey = privateKey
         self.random = random
         self.writeLength = writeLength
     }
 
-    var publicKey: [UInt8] { try! B163.publicKey(forPrivateKey: privateKey) }
+    public var publicKey: [UInt8] { try! B163.publicKey(forPrivateKey: privateKey) }
 
     // MARK: Phone → device
 
-    func phoneWrote(_ write: ZeppWrite) -> [Notification] {
+    public func phoneWrote(_ write: ZeppWrite) -> [Notification] {
         switch write.characteristic {
         case .chunkedWrite: return receiveChunk(write.bytes)
         case .chunkedRead:
@@ -225,7 +229,7 @@ final class FakeZeppDevice {
     }
 
     /// A strap-originated message (find device `07`, find phone `11`, alarms changed `0f`, …).
-    func unsolicited(endpoint: UInt16, _ payload: [UInt8]) -> [Notification] {
+    public func unsolicited(endpoint: UInt16, _ payload: [UInt8]) -> [Notification] {
         send(endpoint: endpoint, payload)
     }
 
@@ -314,7 +318,7 @@ final class FakeZeppDevice {
 }
 
 /// Shuttles bytes between a `ZeppLink` and a `FakeZeppDevice` until nothing more happens.
-func pump(_ link: inout ZeppLink, _ device: FakeZeppDevice, _ writes: [ZeppWrite]) -> [ZeppLink.Event] {
+public func pump(_ link: inout ZeppLink, _ device: FakeZeppDevice, _ writes: [ZeppWrite]) -> [ZeppLink.Event] {
     var pending = writes
     var events = [ZeppLink.Event]()
     var guardCount = 0
@@ -328,4 +332,25 @@ func pump(_ link: inout ZeppLink, _ device: FakeZeppDevice, _ writes: [ZeppWrite
         }
     }
     return events
+}
+
+// MARK: - Byte helpers (file-private: the test targets keep their own)
+
+private func hex(_ text: String) -> [UInt8] {
+    guard let bytes = ZeppHex.bytes(text) else { fatalError("bad hex fixture: \(text)") }
+    return bytes
+}
+
+private func le16(_ v: UInt16) -> [UInt8] { [UInt8(v & 0xFF), UInt8(v >> 8)] }
+private func le32(_ v: UInt32) -> [UInt8] { (0..<4).map { UInt8((v >> (8 * UInt32($0))) & 0xFF) } }
+
+/// u32 little-endian at `offset`, assembled in a loop (a long shift-or chain times out the
+/// type-checker on this project's CI host).
+private func readLE32(_ bytes: [UInt8], _ offset: Int) -> UInt32 {
+    var value: UInt32 = 0
+    for i in 0..<4 {
+        let byte = UInt32(bytes[offset + i])
+        value |= byte << UInt32(8 * i)
+    }
+    return value
 }

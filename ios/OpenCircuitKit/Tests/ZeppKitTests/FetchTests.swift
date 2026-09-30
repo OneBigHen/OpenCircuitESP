@@ -3,6 +3,7 @@
 
 import XCTest
 @testable import ZeppKit
+import ZeppKitTesting
 
 final class FetchTests: XCTestCase {
 
