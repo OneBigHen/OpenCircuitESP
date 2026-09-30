@@ -365,7 +365,8 @@ public struct ZeppHistoryFetch {
             let expected = reader.u32() ?? 0
             let computed = ZeppCRC32.checksum(buffer)
             // Checked for every type. Gadgetbridge skips the check for activity (0x01) without saying
-            // why, but on the Helio the activity CRC matches like every other type's: 60 records
+            // why, but on the Helio the activity CRC matches like every type that has delivered data
+            // (0x02, 0x12 and 0x3d have only answered empty, so theirs was never seen): 60 records
             // (480 B) and a full 12 h round of 720 records (5760 B) (§6.5, §10.1, HW 2026-09-30
             // 13:35). A mismatch keeps the data on the strap, and the failure carries the
             // announced and the computed CRC.
