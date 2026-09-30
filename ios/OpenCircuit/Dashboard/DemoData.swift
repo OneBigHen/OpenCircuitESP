@@ -44,13 +44,13 @@ enum DemoData {
             let bed = bedDay.addingTimeInterval((23 * 60 + 5 + 20 * wiggle(i, 0.3)) * 60)
             let wake = wakeDay.addingTimeInterval((6 * 60 + 50 + 15 * wiggle(i, 1.1)) * 60)
             let inBedMin = Int(wake.timeIntervalSince(bed) / 60)
-            let awake = 28 + Int(8 * wiggle(i, 2.0))
+            let awake = 42 + Int(8 * wiggle(i, 2.0))
             let asleep = inBedMin - awake
             let deep = Int(Double(asleep) * 0.19), rem = Int(Double(asleep) * 0.23)
             // A gentle upward recovery trend over the fortnight, so the tiles have something to say.
             let progress = Double(i) / Double(nights - 1)
             let summary = StoredSleepSummary(
-                night: cal.startOfDay(for: bed),
+                night: SleepNightKey.night(inBedStart: bed, inBedEnd: wake, calendar: cal),
                 asleepMin: asleep, deepMin: deep, lightMin: asleep - deep - rem, remMin: rem,
                 awakeMin: awake, efficiency: Double(asleep) / Double(inBedMin),
                 inBedStart: bed, inBedEnd: wake,
@@ -150,6 +150,72 @@ enum DemoData {
            s.contentSize.height > s.bounds.height + 1, s.bounds.width > 200 { return s }
         for sub in view.subviews { if let s = firstVerticalScrollView(in: sub) { return s } }
         return nil
+    }
+}
+#endif
+
+#if DEBUG
+import SwiftUI
+
+/// DEBUG-only: `-OCDemoScreen metric-hrv | pastNights | liveHR` presents that screen full-screen on
+/// launch, so a screenshot run can reach it without UI automation. `liveHR` renders the live-measure
+/// card's composition over a SYNTHETIC buffer — a simulator has no ring to measure.
+struct DemoScreenModifier: ViewModifier {
+    @State private var screen: String?
+    @AppStorage("units.temperature") private var tempUnitRaw = TemperatureUnit.localeDefault.rawValue
+
+    func body(content: Content) -> some View {
+        content
+            .fullScreenCover(item: Binding(get: { screen.map(DemoScreenID.init) },
+                                           set: { screen = $0?.id })) { id in
+                NavigationStack { destination(id.id) }
+            }
+            .task {
+                guard DemoData.isRequested, let s = UserDefaults.standard.string(forKey: "OCDemoScreen") else { return }
+                try? await Task.sleep(for: .seconds(1.5))
+                screen = s
+            }
+    }
+
+    @ViewBuilder
+    private func destination(_ id: String) -> some View {
+        if id.hasPrefix("metric-"), let m = TodayTile.Metric(rawValue: String(id.dropFirst(7))) {
+            MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw)
+        } else if id == "pastNights" {
+            SleepNightsBrowserView()
+        } else {
+            DemoLiveCard()
+        }
+    }
+}
+
+private struct DemoScreenID: Identifiable { let id: String }
+
+private struct DemoLiveCard: View {
+    @State private var buffer: LiveBuffer = {
+        var b = LiveBuffer()
+        let now = Date().timeIntervalSince1970
+        for k in 0..<45 {
+            let t = Double(k) * 2
+            b.append(value: (62 + 4 * sin(t / 9) + 2 * sin(t / 3.1)).rounded(), at: now - 90 + t)
+        }
+        return b
+    }()
+
+    var body: some View {
+        ScrollView {
+            OCCard {
+                OCSectionHeader("Live Heart Rate", systemImage: "heart.fill", tint: Theme.hr)
+                LiveVitalReadout(value: Int(buffer.latest), unit: "bpm", tint: Theme.hr,
+                                 pulses: true, sessionValues: buffer.points.map(\.value))
+                LiveVitalsChart(buffer: buffer, color: Theme.hr, window: 90, unit: "bpm",
+                                emptyText: "Hold still — getting a reading…")
+                    .frame(height: 150)
+            }
+            .padding(16)
+        }
+        .background(Theme.pageBackground)
+        .navigationTitle("Today")
     }
 }
 #endif

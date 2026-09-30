@@ -212,9 +212,12 @@ private struct NightDetail: View {
         .ocCardSurface()
     }
 
-    /// "Night of Mon, Sep 28" — keyed on the night's bedtime day, as the Sleep card is.
+    /// "Tue, Sep 29 → Wed, Sep 30" from the in-bed window; without one, the night key — which is
+    /// the day the night ENDED (`SleepNightKey`) — as "Night to Wed, Sep 30".
     private var title: String {
-        "Night of " + night.night.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+        let f = Date.FormatStyle.dateTime.weekday(.abbreviated).month(.abbreviated).day()
+        if hasClock { return night.inBedStart.formatted(f) + " → " + night.inBedEnd.formatted(f) }
+        return "Night to " + night.night.formatted(f)
     }
 
     private var totals: some View {

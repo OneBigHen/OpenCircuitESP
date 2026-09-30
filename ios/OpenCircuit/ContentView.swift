@@ -165,6 +165,9 @@ struct ContentView: View {
                 .tag(Tab.profile)
         }
         .tint(Theme.accent)
+#if DEBUG
+        .modifier(DemoScreenModifier())   // screenshot harness (#216); inert without -OCDemoData
+#endif
             // Shared trends cache: load once, then refresh on foreground return and after each sync.
             // Every hook goes through `TrendsRefreshPolicy` — at a cold launch `.task` and
             // `scenePhase == .active` both fire within a frame or two of each other, and one load

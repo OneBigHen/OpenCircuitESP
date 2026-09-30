@@ -46,7 +46,8 @@ struct TodayTile: Identifiable {
     let trendIsYesterday: Bool
     /// Day of the headline value.
     let valueDate: Date?
-    /// Nightly metrics say "last night" rather than "today"/"yesterday".
+    /// Nightly metrics are keyed on the day the night ENDED (`SleepNightKey`), so "last night" is
+    /// the one keyed today, and they say "last night" rather than "today".
     let isNightly: Bool
     /// Spoken form of the unit, for VoiceOver.
     let spokenUnit: String
@@ -65,17 +66,21 @@ struct TodayTile: Identifiable {
         let today = calendar.startOfDay(for: now)
         let yesterday = calendar.date(byAdding: .day, value: -1, to: today) ?? today
         let d = calendar.startOfDay(for: valueDate)
-        if isNightly, d >= yesterday { return "last night" }
+        if isNightly {
+            return d >= today ? "last night" : "night to \(d.formatted(.dateTime.weekday(.abbreviated).day()))"
+        }
         if d == today { return "today" }
         if d == yesterday { return "yesterday" }
         return "as of \(d.formatted(.dateTime.weekday(.abbreviated).day()))"
     }
 
-    /// True when the headline value is older than the most recent day it could be from.
+    /// True when the headline value is older than the most recent day it could be from: for a
+    /// nightly metric, anything but last night (keyed today); otherwise, older than yesterday.
     func isStale(now: Date = Date(), calendar: Calendar = .current) -> Bool {
         guard let valueDate else { return false }
-        let yesterday = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: now)) ?? now
-        return calendar.startOfDay(for: valueDate) < yesterday
+        let today = calendar.startOfDay(for: now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today) ?? now
+        return calendar.startOfDay(for: valueDate) < (isNightly ? today : yesterday)
     }
 
     /// "+6 ms vs usual" / "yesterday −1,240 vs usual" — nil while there's no judged baseline.
@@ -99,7 +104,7 @@ struct TodayTile: Identifiable {
         var parts = [title]
         if let valueText {
             parts.append("\(valueText) \(spokenUnit), \(qualifier)")
-            if let f = freshnessText(), f.hasPrefix("as of") { parts.append(f) }
+            if isStale(), let f = freshnessText() { parts.append(f) }
         } else {
             parts.append("no data yet")
         }
