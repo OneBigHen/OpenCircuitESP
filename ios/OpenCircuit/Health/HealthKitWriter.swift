@@ -601,7 +601,7 @@ final class HealthKitWriter {
                 writtenKinds.insert(.steps)
                 // Steps landed and the rows are now marked written → safe to write/commit distance.
                 if !distanceSamples.isEmpty {
-                    let distanceOutcome = await write(distanceSamples)
+                    let distanceOutcome = await write(distanceSamples, timeline: Self.distanceTimeline)
                     if Self.distanceMayWrite(stepsFailed: false,
                                              distanceFailed: distanceOutcome.failed.contains(.distance)) {
                         for commit in gpsCommits { Self.commitDistanceGPSCredit(commit.reduction, day: commit.day) }
@@ -1942,6 +1942,11 @@ final class HealthKitWriter {
         guard let start = segments.map(\.start).min() else { return wearableDevice(ownerAt: Date()) }
         return wearableDevice(ownerAt: start)
     }
+
+    /// Whose device the distance estimate names: the ring's, always. It is the ring's per-step constant
+    /// over ring-owned rows, and its sample starts at midnight, which after a morning switch back
+    /// belongs to the strap (review-224b). A ring-only install: the connected ring, as before.
+    static let distanceTimeline: SyncDeviceID = .ringConn
 
     /// The step rows the ring's per-step distance estimate is derived from: those the ring owned at
     /// their start (decision 28, review-224 N1). Every row for a ring-only install.

@@ -91,8 +91,9 @@ stores and writes what it measured for time it owned:
 - every write names the device of its ROW: a timeline's rows name that timeline's device, untagged
   rows (steps, sleep, naps, derived values) name the device that owned their start (a night: the
   device it belongs to, above). A strap sync flushed after a switch back to the ring still names the
-  strap, or writes nothing when the strap never passed the first-write guard. BP estimates are the
-  ring's (its PPG calibration) and always name the ring.
+  strap, or writes nothing when the strap never passed the first-write guard. BP estimates (its PPG
+  calibration) and the distance estimate (its per-step constant, a sample starting at midnight) are
+  the ring's and always name the ring.
 - **Known limit (v1 is one strap):** untagged rows in strap-owned time name the CURRENTLY saved strap
   (`HelioConnection.savedPeripheralID`). Pairing a second strap before the first one's untagged rows
   (steps, sleep, derived values) are flushed would name the new strap for them. Tagged rows (heart

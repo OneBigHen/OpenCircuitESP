@@ -568,6 +568,10 @@ final class DeviceOwnershipAppTests: XCTestCase {
                        SyncDeviceID.ringConn.rawValue)
         XCTAssertEqual(HealthKitWriter.distanceRows(rows, ownership: log).map(\.delta), [120],
                        "distance from the ring's row only")
+        // The day's distance sample starts at midnight, which the strap owned: it still names the ring.
+        XCTAssertEqual(log.owner(at: Calendar.current.startOfDay(for: ringRow.end)), .zeppOS)
+        XCTAssertEqual(HealthKitWriter.wearableDevice(forTimeline: HealthKitWriter.distanceTimeline, wearable: active)?.localIdentifier,
+                       SyncDeviceID.ringConn.rawValue)
     }
 
     /// The mirror (28b for the strap): the minute a ring→strap switch lands in counts for the strap,
