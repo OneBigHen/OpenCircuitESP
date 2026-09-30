@@ -999,6 +999,54 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(Set(device.fetchAcks), [0x09])
     }
 
+    // MARK: decision 28: the background run fetches and keeps only the strap's own time
+
+    func testABackgroundRunStoresAndOffersHealthOnlyTheTimeTheStrapOwns() async throws {
+        // The person switched to the strap at 23:30; before that the ring owned the time. The fake
+        // strap still offers everything from 23:00 (activity, temperature, the night's session).
+        let switchedAt = Date(timeIntervalSince1970: midnight - 1800)
+        ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: switchedAt)]))
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let run = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(run.ending, .synced)
+
+        // The fetch never asks for anything before the switch: the foreground's own `notBefore` bound.
+        XCTAssertFalse(device.fetchStarts.isEmpty)
+        for start in device.fetchStarts {
+            let since = try XCTUnwrap(ZeppFetchTimestamp.decode(start[2..<10]))
+            XCTAssertGreaterThanOrEqual(since, switchedAt, "type 0x\(String(format: "%02x", start[1]))")
+        }
+        XCTAssertEqual(Set(device.fetchAcks), [0x09], "decision 8: what the strap delivered from before stays on it")
+        XCTAssertEqual(device.fetchAcks.count, device.fetchStarts.count)
+
+        // Stored: only the strap's time. 23:30–23:59 of activity carries heart rate and steps.
+        let timeline = try XCTUnwrap(link.strapTimeline)
+        let samples = try store.context.fetch(FetchDescriptor<StoredSample>())
+        XCTAssertFalse(samples.isEmpty)
+        XCTAssertTrue(samples.allSatisfy { $0.start >= switchedAt })
+        XCTAssertEqual(samples.filter { $0.kindRaw == "heartRate" }.count, 30)
+        let steps = try store.context.fetch(FetchDescriptor<StoredStepSample>())
+        XCTAssertEqual(steps.count, 30)
+        XCTAssertTrue(steps.allSatisfy { $0.start >= switchedAt })
+
+        // Pending for Apple Health: the same, nothing from the ring's time.
+        let pending = try store.pendingHealthSamples(device: timeline, kinds: HelioHealthPolicy.healthMirroredKinds())
+        XCTAssertFalse(pending.isEmpty)
+        XCTAssertTrue(pending.allSatisfy { $0.start >= switchedAt })
+        XCTAssertTrue(try store.pendingStepSamples().allSatisfy { $0.start >= switchedAt })
+
+        // The flush is the shared one, for the strap's timeline and with the strap's own identity
+        // (attribution from the row, not from the current choice).
+        XCTAssertEqual(flushes.count, 1)
+        XCTAssertEqual(flushes.first?.timeline, timeline)
+        XCTAssertEqual(flushes.first?.identity?.id, "5B1E4C2A-0000-4000-8000-0000000000C3")
+        XCTAssertEqual(flushes.first?.identity?.kind, .zeppOS(model: "Helio Strap"))
+    }
+
     // MARK: expiration mid-round → 03 09, committed rows kept, next run resumes, no duplicates
 
     func testExpiryMidRoundAcksKeepKeepsCommittedRowsAndTheNextRunResumesWithoutDuplicates() async throws {
