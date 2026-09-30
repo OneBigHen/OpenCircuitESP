@@ -47,6 +47,9 @@ public enum ZeppRoundFailure: Equatable {
     case startRefused(status: UInt8)
     /// The start reply was not 15 or 16 bytes, or it announced data with an invalid timestamp.
     case malformedStartReply
+    /// The start reply announced more bytes (length × the type's unit) than
+    /// `Configuration.maxRoundBytes` allows. Rejected before any data is buffered.
+    case announcedLengthTooLarge(announced: Int, limit: Int)
     /// A data packet counter was skipped or repeated (§9 #9).
     case packetCounterGap(expected: UInt8, got: UInt8)
     /// More data than the start reply announced. Both counts are bytes: for activity, `expected`
@@ -71,6 +74,8 @@ extension ZeppRoundFailure: CustomStringConvertible {
         switch self {
         case .startRefused(let status): return String(format: "start refused, status %02x", status)
         case .malformedStartReply: return "malformed start reply"
+        case .announcedLengthTooLarge(let announced, let limit):
+            return "announced length too large, announced \(announced) B, limit \(limit) B"
         case .packetCounterGap(let expected, let got):
             return String(format: "packet counter gap, expected %02x, got %02x", expected, got)
         case .dataOverflow(let expected, let received):
@@ -138,13 +143,20 @@ public struct ZeppHistoryFetch {
         /// SPEC-GAP: §9 says "retry" without a count; one retry, then the type is left for next time.
         public var maxRetriesPerType = 1
         public var timeZone: TimeZone = .current
+        /// Upper bound on one round's announced size in bytes (length × the type's unit). The strap
+        /// controls the announced length (any u32), and the round is buffered in memory, so a larger
+        /// announcement fails the round before any data is kept. 4 MiB is well above the largest
+        /// real round: a 100-day activity backlog is 144,000 records × 8 B = 1,152,000 B, and the
+        /// real 12 h activity round was 5760 B (§10.1).
+        public var maxRoundBytes = 4 << 20
 
         public init(ackPolicy: ZeppAckPolicy = .keepOnDevice, maxRoundsPerType: Int = 11,
-                    maxRetriesPerType: Int = 1, timeZone: TimeZone = .current) {
+                    maxRetriesPerType: Int = 1, timeZone: TimeZone = .current, maxRoundBytes: Int = 4 << 20) {
             self.ackPolicy = ackPolicy
             self.maxRoundsPerType = maxRoundsPerType
             self.maxRetriesPerType = maxRetriesPerType
             self.timeZone = timeZone
+            self.maxRoundBytes = maxRoundBytes
         }
     }
 
@@ -282,12 +294,18 @@ public struct ZeppHistoryFetch {
             phase = .awaitingAckReply
             return [.noData(type: type), .sendControl(ZeppFetchCommand.ack(.keep))]
         }
+        // Checked in bytes from here on: activity announces records (§6.2). The cap bounds the
+        // memory a strap can make us hold for one round; the round is kept on the strap.
+        let (announced, overflow) = Int(length).multipliedReportingOverflow(by: type.startReplyLengthUnit)
+        guard !overflow, announced <= configuration.maxRoundBytes else {
+            return failRound(type, .announcedLengthTooLarge(announced: overflow ? .max : announced,
+                                                            limit: configuration.maxRoundBytes))
+        }
         guard let start = ZeppFetchTimestamp.decode(bytes[7..<15]) else {
             return failRound(type, .malformedStartReply)
         }
         roundStart = start
-        // Checked in bytes from here on: activity announces records (§6.2).
-        expectedLength = Int(length) * type.startReplyLengthUnit
+        expectedLength = announced
         phase = .receivingData
         return [.sendControl(ZeppFetchCommand.fetchData)]
     }
