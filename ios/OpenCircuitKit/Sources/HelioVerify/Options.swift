@@ -61,7 +61,8 @@ OPTIONS
   --trace             Print every history-fetch control message both ways as hex, and each data
                       packet's length and counter byte (never its payload).
   --out <path>        Append each fetched round (raw hex + metadata, JSON lines) to this file and
-                      fsync it. The file holds REAL HEALTH DATA: keep it out of git.
+                      flush it to the drive (F_FULLFSYNC). Must be a regular file (not /dev/null).
+                      The file holds REAL HEALTH DATA: keep it out of git.
   --allow-delete      DESTRUCTIVE. Ack 03 01 ("saved, drop it from the strap") for each round
                       whose CRC matched, but only after it is durably written to --out. A round
                       without a CRC is kept (03 09). Requires --key-file and --out.

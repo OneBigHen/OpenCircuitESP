@@ -5,7 +5,8 @@
 // logged, nor are the strap's serial number and PnP ID. `--trace` prints the history fetch's
 // control bytes and each data packet's length and counter, never a data payload. The history fetch acks `03 09` (keep on strap) unless
 // `--allow-delete` AND `--out` are both given; then a round is delete-acked only if its transfer
-// done carried a matching CRC, and only after its raw bytes are written and fsynced to `--out`.
+// done carried a matching CRC, and only after its raw bytes are written to `--out` (a regular file)
+// and flushed to the drive with F_FULLFSYNC.
 //
 // Device controls (`--find`, `--vibrate`, `--alarms`, `--set-alarm`, `--delete-alarm`, `--alerts`)
 // live in Controls.swift. Alarm writes need `--allow-write`; nothing else writes strap state
@@ -89,12 +90,10 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         self.key = key
         super.init()
         if let path = options.outPath {
-            if !FileManager.default.fileExists(atPath: path) {
-                FileManager.default.createFile(atPath: path, contents: nil)
+            switch OutFile.open(path) {
+            case .success(let handle): outHandle = handle
+            case .failure(let problem): fail(problem.description)
             }
-            guard let handle = FileHandle(forWritingAtPath: path) else { fail("cannot open --out for writing") }
-            handle.seekToEndOfFile()
-            outHandle = handle
         }
         central = CBCentralManager(delegate: self, queue: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + options.timeoutSeconds) { [weak self] in
@@ -509,7 +508,8 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         }
     }
 
-    /// Appends the round to --out and fsyncs. Returns true only when that succeeded.
+    /// Appends the round to --out and flushes it to the drive (F_FULLFSYNC). Returns true only when
+    /// both succeeded.
     func persist(_ round: ZeppFetchRound) -> Bool {
         guard let handle = outHandle else { return false }
         let line: [String: Any] = [
@@ -523,7 +523,7 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             var data = try JSONSerialization.data(withJSONObject: line, options: [.sortedKeys])
             data.append(0x0A)
             try handle.write(contentsOf: data)
-            try handle.synchronize()
+            try OutFile.synchronize(handle)
             return true
         } catch {
             log("  could not persist the round (\(error)); it stays on the strap")
