@@ -122,11 +122,47 @@ final class WearableSeamTests: XCTestCase {
 
         let ringB = FakeWearable(identity: ring(firmware: FirmwareInfo(modelName: "RingConn Gen2-11FF"),
                                                 id: "OTHER-RING"))
-        let identity = ActiveWearable(session: { ringB }, fallbackDeviceID: { nil }, identityStore: store)
-            .identityForHealthWrite()
+        let active = ActiveWearable(session: { ringB }, fallbackDeviceID: { nil }, identityStore: store)
+        XCTAssertNil(active.identityForHealthWrite(), "ring B hasn't identified itself and must not borrow A's fields")
+        XCTAssertNil(store.load(id: "OTHER-RING"))
+
+        ringB.identity = ring(firmware: FirmwareInfo(version: "FR02.020", modelName: "RingConn Gen2-11FF"),
+                              id: "OTHER-RING")
+        let identity = active.identityForHealthWrite()
         XCTAssertEqual(identity?.id, "OTHER-RING")
-        XCTAssertNil(identity?.firmwareVersion)
-        XCTAssertNil(identity?.hardwareVersion)
+        XCTAssertEqual(identity?.firmwareVersion, "FR02.020")
+        XCTAssertNil(identity?.hardwareVersion, "never ring A's hardware version")
+    }
+
+    /// Review #217 N1 (the reviewer's probe, now asserting the fix). On a ring's first connection
+    /// nothing is persisted, and a flush can land before the DIS firmware read. That write must name
+    /// NO device — exactly as before the seam — rather than a sparser one than every later write,
+    /// which Apple Health would list as a second device.
+    func testAWriteBeforeTheRingHasIdentifiedItselfNamesNoDevice() throws {
+        let store = WearableIdentityStore(defaults)
+        let fake = FakeWearable(identity: ring(firmware: FirmwareInfo(modelName: "RingConn Gen2-03AD")))
+        let active = ActiveWearable(session: { fake }, fallbackDeviceID: { nil }, identityStore: store)
+        XCTAssertNil(active.identityForHealthWrite())
+        XCTAssertNil(store.load(id: ringID), "a sparse identity is never recorded")
+        XCTAssertNil(HealthKitWriter.hkDevice(HealthDeviceAttribution.fields(for: active.identityForHealthWrite(),
+                                                                             origin: .device)))
+        XCTAssertNil(ActiveWearable(session: { nil }, fallbackDeviceID: { self.ringID }, identityStore: store)
+            .identityForHealthWrite(), "nor does a disconnected flush find one")
+
+        fake.identity = ring(firmware: fullFirmware)   // the DIS reads landed
+        let identified = try XCTUnwrap(HealthDeviceAttribution.fields(for: active.identityForHealthWrite(),
+                                                                      origin: .device))
+        XCTAssertEqual(identified.model, "Gen 2")
+        XCTAssertEqual(identified.hardwareVersion, "00010001")
+        XCTAssertEqual(identified.firmwareVersion, "FR02.018")
+
+        // From here on every write names that same device, even one before a reconnect's DIS reads.
+        fake.identity = ring(firmware: FirmwareInfo(modelName: "RingConn Gen2-03AD"))
+        XCTAssertEqual(HealthDeviceAttribution.fields(for: active.identityForHealthWrite(), origin: .device),
+                       identified)
+        XCTAssertEqual(HealthDeviceAttribution.fields(
+            for: ActiveWearable(session: { nil }, fallbackDeviceID: { self.ringID }, identityStore: store)
+                .identityForHealthWrite(), origin: .device), identified)
     }
 
     /// Review #217 S1 (Juan's decision): two RingConn rings are ONE device in Apple Health — the

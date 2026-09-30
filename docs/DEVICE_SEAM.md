@@ -112,6 +112,12 @@ of the active ring (`RingScanner.activeRingID`) is used, falling back to the las
 id in `RingMetadataStore`. The store stays keyed per peripheral even though every ring shares the
 `localIdentifier` "ringconn": one ring must never report another's firmware.
 
+**Before the ring has identified itself, a write names no device.** With nothing persisted for a
+ring and no firmware version read yet (the DIS read is still in flight on its first connection),
+`identityForHealthWrite()` returns nil and records nothing. The sample is written device-less,
+exactly as before the seam, instead of naming the ring with its name only. Without this, Health
+would list one ring twice: once as that sparse first identity and once in full.
+
 **Which samples carry the device.** Everything the wearable measured or that is derived from its
 data: HR, HRV, SpO₂, RR, temperature, steps, distance, resting HR, active and basal energy,
 measured sleep, and the BP estimate (the correlation and both components). **Not attributed:**

@@ -45,6 +45,8 @@ final class ActiveWearable {
     func identityForHealthWrite() -> WearableIdentity? {
         if let live = session?.identity {
             let previous = identityStore.load(id: live.id)
+            // Nothing persisted and the firmware read not landed: name no device, not a sparse one.
+            if previous == nil, live.firmwareVersion == nil { return nil }
             let merged = live.merging(previous: previous)
             if merged != previous { identityStore.save(merged) }
             return merged
