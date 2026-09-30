@@ -443,10 +443,10 @@ final class HealthKitWriter {
         // staging. `mirrorSettledNight` fixes that: it delete-and-replaces the night whenever the
         // current staging differs from what was last mirrored (a no-op when nothing changed), so
         // Apple Health tracks the card up AND down.
-        // Decision 28 (#215): these are the RING's segments; a night whose in-bed midpoint the strap
-        // owned is the strap's, and the ring's catch-up of it must not replace it in Health.
-        // (`ringOwnsNight` is always true for a ring-only install.)
-        if Self.ringOwnsNight(sleepSegments),
+        // Decision 28a (#215): these are the RING's segments; a night the ring doesn't keep (the strap
+        // was chosen at bedtime, or keeps a stored night here) must not be replaced in Health by the
+        // ring's catch-up. (`ringOwnsNight` is always true for a ring-only install.)
+        if Self.ringOwnsNight(sleepSegments, store: store),
            SleepHealthGate.isReadyToWrite(latestSegmentEnd: sleepSegments.map(\.end).max(),
                                           now: Date(), finalized: sleepFinalized) {
             switch await mirrorSettledNight(local: store, segments: sleepSegments) {
@@ -575,8 +575,7 @@ final class HealthKitWriter {
             var gpsCommits: [(reduction: Double, day: Date)] = []
             // Decision 28 / review-224 N1: the distance estimate is the RING's per-step constant, so it
             // is derived only from step rows the ring owned (every row, for a ring-only install).
-            let ownership = LocalStore.ownershipLog()
-            let ringRows = ownership.isEmpty ? pending : pending.filter { ownership.owner(at: $0.start) == .ringConn }
+            let ringRows = Self.distanceRows(pending, ownership: LocalStore.ownershipLog())
             let byDay = Dictionary(grouping: ringRows) { Calendar.current.startOfDay(for: $0.end) }
             for (day, rows) in byDay {
                 let dayDelta = rows.reduce(0) { $0 + $1.delta }
@@ -604,7 +603,7 @@ final class HealthKitWriter {
                 writtenKinds.insert(.steps)
                 // Steps landed and the rows are now marked written → safe to write/commit distance.
                 if !distanceSamples.isEmpty {
-                    let distanceOutcome = await write(distanceSamples)
+                    let distanceOutcome = await write(distanceSamples, timeline: Self.distanceTimeline)
                     if Self.distanceMayWrite(stepsFailed: false,
                                              distanceFailed: distanceOutcome.failed.contains(.distance)) {
                         for commit in gpsCommits { Self.commitDistanceGPSCredit(commit.reduction, day: commit.day) }
@@ -1938,19 +1937,30 @@ final class HealthKitWriter {
         return samples.map { $0.uuid.uuidString }
     }
 
-    /// The device a night's samples name: the owner at the midpoint of its span (decision 28). For a
-    /// ring-only install, the connected ring, as before.
+    /// The device a night's samples name: its owner, the device chosen when it began (decision 28a;
+    /// a kept night is atomic, named its owner even where it covers the other device's minutes). For
+    /// a ring-only install, the connected ring, as before.
     private func nightDevice(_ segments: [SleepSegment]) -> HKDevice? {
-        guard let start = segments.map(\.start).min(), let end = segments.map(\.end).max() else {
-            return wearableDevice(ownerAt: Date())
-        }
-        return wearableDevice(ownerAt: DeviceOwnershipLog.midpoint(start, end))
+        guard let start = segments.map(\.start).min() else { return wearableDevice(ownerAt: Date()) }
+        return wearableDevice(ownerAt: start)
     }
 
-    /// Whether the ring owned the midpoint of these segments' span (always true for an empty log).
-    static func ringOwnsNight(_ segments: [SleepSegment]) -> Bool {
+    /// Whose device the distance estimate names: the ring's, always. It is the ring's per-step constant
+    /// over ring-owned rows, and its sample starts at midnight, which after a morning switch back
+    /// belongs to the strap (review-224b). A ring-only install: the connected ring, as before.
+    static let distanceTimeline: SyncDeviceID = .ringConn
+
+    /// The step rows the ring's per-step distance estimate is derived from: those the ring owned at
+    /// their start (decision 28, review-224 N1). Every row for a ring-only install.
+    static func distanceRows(_ rows: [StoredStepSample], ownership: DeviceOwnershipLog) -> [StoredStepSample] {
+        ownership.isEmpty ? rows : rows.filter { ownership.owner(at: $0.start) == .ringConn }
+    }
+
+    /// Whether the ring keeps the night these segments span (decision 28a, `LocalStore.nightKeeping`).
+    /// Always true for an empty log.
+    static func ringOwnsNight(_ segments: [SleepSegment], store: LocalStore) -> Bool {
         guard let start = segments.map(\.start).min(), let end = segments.map(\.end).max() else { return true }
-        return LocalStore.ownershipLog().owner(ofNightFrom: start, to: end) == .ringConn
+        return store.nightKeeping(.ringConn, inBedStart: start, inBedEnd: end).keep
     }
 
     /// Build the category samples for one night from the publication split — the ONE place the
@@ -2348,6 +2358,11 @@ final class HealthKitWriter {
         // the hour). `LocalStore.rederiveEditedNightProvenance` upgrades the stored LABELS and
         // queues a reconcile, so the edit stays authoritative here and the correction still lands.
         if row?.isManuallyEdited == true { return .unchanged }
+        // Decision 28a (review-224b S-C): never mirror, and so never union-delete over, a night the
+        // other device keeps. The segments' device is the one chosen when they began. Every caller is
+        // covered here, not only the ring's guard. Always passes with an empty log.
+        let family = LocalStore.ownershipLog().owner(ofNightFrom: start, to: end)
+        guard local.nightKeeping(family, inBedStart: start, inBedEnd: end, night: row?.night).keep else { return .unchanged }
         // Don't let a thinner drain fragment shrink Health below the merge-protected card: if the card
         // (summary) is fuller than this staging, `SleepSummaryMerge` kept the older, fuller night — so
         // this staging is a partial re-drain, not a correction. Skip it (a hair of epoch tolerance
@@ -2394,7 +2409,10 @@ final class HealthKitWriter {
         //    cleared), nap-safe and excluding the fresh write.
         let cleanStart = min(start, last?.spanStart ?? start, row?.inBedStart ?? start)
         let cleanEnd = max(end, last?.spanEnd ?? end, row?.inBedEnd ?? end)
+        // The other device's kept nights are excluded like naps (decision 28a): the union span can reach
+        // past this night (a prior mirror record, the recorded span), never into theirs. Empty log: none.
         let napWindows = local.healthWrittenNapWindows(overlapping: cleanStart, to: cleanEnd)
+            + local.otherDevicesNightWindows(family, overlapping: cleanStart, to: cleanEnd)
         // Record the signature regardless of the delete's outcome: the correct night is already in
         // Health (write-first), so recording avoids re-writing it every flush. A delete failure leaves
         // a duplicate that Health de-overlaps in the asleep total and that the next re-stage's union
@@ -2480,7 +2498,9 @@ final class HealthKitWriter {
     func writeBPEstimate(sbp: Double, dbp: Double, at date: Date) async -> Bool {
         let metadata: [String: Any] = ["OpenCircuitBPSource": "RingPPGCalibration"]
         let mmHg = HKUnit.millimeterOfMercury()
-        let device = wearableDevice(ownerAt: date)
+        // BP is ring-only (its PPG calibration): name the ring, never the owner at the estimate's date
+        // (review-224b N-2). A ring-only install: exactly the connected ring, as before.
+        let device = wearableDevice(forTimeline: .ringConn)
         let systolic = HKQuantitySample(
             type: Self.systolicType,
             quantity: HKQuantity(unit: mmHg, doubleValue: sbp),

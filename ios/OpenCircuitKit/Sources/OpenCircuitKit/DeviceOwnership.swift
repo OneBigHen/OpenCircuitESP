@@ -6,7 +6,8 @@
 //   • the owner of a moment is the family of the latest entry with `since <= t`;
 //   • the RING owns all time before the first entry, so for a ring-only user (empty log) every rule
 //     built on this is a no-op;
-//   • a device only ingests, stores and writes to Apple Health what it recorded for time it owns.
+//   • a device only ingests, stores and writes to Apple Health what it recorded for time it owns;
+//   • a night belongs to the device you went to bed with (28a, `owner(ofNightFrom:to:)`).
 //
 // Pure value type: persisted by the app (UserDefaults), tested here.
 
@@ -69,9 +70,21 @@ public struct DeviceOwnershipLog: Codable, Equatable, Sendable {
         owner(at: t) == Family(timeline: timeline)
     }
 
-    /// A night belongs to the owner at the midpoint of its in-bed window.
+    /// The start of the ownership stretch that contains `t`: the latest entry's `since` at or before
+    /// `t`, or `.distantPast` before the first entry. Decision 28b clamps a step row to it, so the row
+    /// lies wholly in its device's time (with an empty log: `.distantPast`, no clamp).
+    public func ownershipStart(at t: Date) -> Date {
+        entries.last(where: { $0.since <= t })?.since ?? .distantPast
+    }
+
+    /// Decision 28a (review-224b S-C): the device you went to bed with keeps the night. A window with
+    /// a switch inside belongs to the owner just before the first switch; one without belongs to its
+    /// single owner. Both are the owner at the in-bed START. A switch at exactly that instant counts as
+    /// made before bed (`owner(at:)`'s `since <= t`). One instant both devices' windows can share
+    /// would still disagree between two different windows, so the store also never lets one device's
+    /// night replace the other's (`LocalStore.nightKeeping`).
     public func owner(ofNightFrom inBedStart: Date, to inBedEnd: Date) -> Family {
-        owner(at: Self.midpoint(inBedStart, inBedEnd))
+        owner(at: inBedStart)
     }
 
     public static func midpoint(_ start: Date, _ end: Date) -> Date {

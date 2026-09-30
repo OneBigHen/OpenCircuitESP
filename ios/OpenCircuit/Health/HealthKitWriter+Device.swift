@@ -21,25 +21,27 @@ extension HealthKitWriter {
                         udiDeviceIdentifier: fields.udiDeviceIdentifier)
     }
 
-    /// The active wearable as an `HKDevice`, for a sample it measured. Resolved at write time, not
-    /// when the writer is created: `ContentView` holds one writer from before the ring connects.
-    func activeWearableDevice() -> HKDevice? {
-        Self.hkDevice(HealthDeviceAttribution.fields(for: ActiveWearable.shared.identityForHealthWrite(),
-                                                     origin: .device))
-    }
-
     /// The `HKDevice` for rows on `timeline` (decision 28, #215: attribution follows the row, never
-    /// the current choice).
+    /// the current choice). Resolved at write time, not when the writer is created: `ContentView`
+    /// holds one writer from before the device connects.
     func wearableDevice(forTimeline timeline: SyncDeviceID) -> HKDevice? {
-        Self.hkDevice(HealthDeviceAttribution.fields(for: ActiveWearable.shared.identityForHealthWrite(timeline: timeline),
-                                                     origin: .device))
+        Self.wearableDevice(forTimeline: timeline, wearable: .shared)
     }
 
     /// The `HKDevice` for an untagged row at `date`: the device that owned `date`. For a ring-only
-    /// install, identical to `activeWearableDevice()` with the ring chosen.
+    /// install, the connected (or last) ring.
     func wearableDevice(ownerAt date: Date) -> HKDevice? {
-        Self.hkDevice(HealthDeviceAttribution.fields(for: ActiveWearable.shared.identityForHealthWrite(at: date),
-                                                     origin: .device))
+        Self.wearableDevice(ownerAt: date, wearable: .shared)
+    }
+
+    /// The two resolvers over an explicit `ActiveWearable`, so the first-write guard's tests (#222)
+    /// exercise exactly what production writes call (review-224b N-1).
+    static func wearableDevice(forTimeline timeline: SyncDeviceID, wearable: ActiveWearable) -> HKDevice? {
+        hkDevice(HealthDeviceAttribution.fields(for: wearable.identityForHealthWrite(timeline: timeline), origin: .device))
+    }
+
+    static func wearableDevice(ownerAt date: Date, wearable: ActiveWearable) -> HKDevice? {
+        hkDevice(HealthDeviceAttribution.fields(for: wearable.identityForHealthWrite(at: date), origin: .device))
     }
 
     /// Resolves owners once per family for a batch of untagged rows (a flush can carry thousands).

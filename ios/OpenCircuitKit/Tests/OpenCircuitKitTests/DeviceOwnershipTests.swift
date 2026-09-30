@@ -47,6 +47,16 @@ final class DeviceOwnershipTests: XCTestCase {
         XCTAssertEqual(log.entries.count, 1)
     }
 
+    func testTheOwnershipStartIsTheStretchContainingT() {
+        XCTAssertEqual(DeviceOwnershipLog().ownershipStart(at: t0), .distantPast, "an empty log clamps nothing")
+        let log = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: t0), .init(family: .ringConn, since: t0 + 3600)])
+        XCTAssertEqual(log.ownershipStart(at: t0 - 1), .distantPast)
+        XCTAssertEqual(log.ownershipStart(at: t0), t0)
+        XCTAssertEqual(log.ownershipStart(at: t0 + 3599), t0)
+        XCTAssertEqual(log.ownershipStart(at: t0 + 3600), t0 + 3600)
+        XCTAssertEqual(log.ownershipStart(at: .distantFuture), t0 + 3600)
+    }
+
     func testAClockThatMovedBackIsClampedToTheLastEntry() {
         var log = DeviceOwnershipLog()
         log.record(.zeppOS, since: t0)
@@ -67,12 +77,20 @@ final class DeviceOwnershipTests: XCTestCase {
         XCTAssertTrue(log.intervals(of: .ringConn).isEmpty)
     }
 
-    func testANightBelongsToTheOwnerAtItsMidpoint() {
+    /// Decision 28a: the device you went to bed with keeps the night, however late the switch.
+    func testANightBelongsToTheDeviceYouWentToBedWith() {
         var log = DeviceOwnershipLog()
         log.record(.zeppOS, since: t0)   // switched at t0
-        XCTAssertEqual(log.owner(ofNightFrom: t0 - 3600, to: t0 + 7 * 3600), .zeppOS, "midpoint after the switch")
-        XCTAssertEqual(log.owner(ofNightFrom: t0 - 7 * 3600, to: t0 + 3600), .ringConn, "midpoint before it")
-        XCTAssertEqual(DeviceOwnershipLog.midpoint(t0, t0), t0)
+        XCTAssertEqual(log.owner(ofNightFrom: t0 - 3600, to: t0 + 7 * 3600), .ringConn,
+                       "a switch an hour into the night leaves it the ring's (the midpoint rule said strap)")
+        XCTAssertEqual(log.owner(ofNightFrom: t0 - 7 * 3600, to: t0 + 3600), .ringConn)
+        XCTAssertEqual(log.owner(ofNightFrom: t0 + 60, to: t0 + 8 * 3600), .zeppOS, "switched before bed")
+        XCTAssertEqual(log.owner(ofNightFrom: t0, to: t0 + 8 * 3600), .zeppOS, "a switch at the in-bed instant is before bed")
+        log.record(.ringConn, since: t0 + 3 * 3600)   // and back, mid-night
+        XCTAssertEqual(log.owner(ofNightFrom: t0 - 3600, to: t0 + 7 * 3600), .ringConn,
+                       "two switches inside: the owner just before the first")
+        XCTAssertEqual(log.owner(ofNightFrom: t0 + 3600, to: t0 + 7 * 3600), .zeppOS)
+        XCTAssertEqual(DeviceOwnershipLog.midpoint(t0, t0), t0, "naps keep the midpoint rule")
     }
 
     func testFamiliesMapFromTimelines() {
@@ -87,5 +105,15 @@ final class DeviceOwnershipTests: XCTestCase {
         XCTAssertTrue(SleepPersistOutcome.ownedByOtherDevice.nightIsStored)
         XCTAssertFalse(SleepPersistOutcome.ownedByOtherDevice.isSilentLoss)
         XCTAssertEqual(SleepPersistOutcome.ownedByOtherDevice.rawValue, "ownedByOtherDevice")
+    }
+
+    /// Review-224b N-3: when the other device owns the night but stored none, the wearer has no night.
+    func testAnOwnedNightWithNoStoredRowIsNotStored() {
+        let o = SleepPersistOutcome.ownedByOtherDeviceNoRow
+        XCTAssertFalse(o.wroteRow)
+        XCTAssertFalse(o.nightIsStored)
+        XCTAssertTrue(o.isSilentLoss, "the card must not hide the gap")
+        XCTAssertFalse(o.isRecoverableByRetry, "this device syncing again can't store it")
+        XCTAssertEqual(o.rawValue, "ownedByOtherDeviceNoRow")
     }
 }
