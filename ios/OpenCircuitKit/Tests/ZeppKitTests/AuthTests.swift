@@ -191,6 +191,12 @@ final class SimulatedHandshakeTests: XCTestCase {
         XCTAssertFalse(device.authenticated)
         XCTAssertEqual(device.failures, [])
         XCTAssertEqual(link.authenticator.state, .failed(.wrongAuthKey))
+        // The session parameters were installed at the 04 reply, but nothing encrypted may go out.
+        XCTAssertNotNil(link.transport.session)
+        XCTAssertThrowsError(try link.send(endpoint: ZeppEndpoint.battery, payload: ZeppBatteryStatus.request)) {
+            XCTAssertEqual($0 as? ZeppChunkedTransport.Error, .notAuthenticated(endpoint: ZeppEndpoint.battery))
+        }
+        XCTAssertNoThrow(try link.send(endpoint: ZeppEndpoint.servicesList, payload: ZeppServicesList.request))
         // A retry resets the transport: no session, handle counter back to 1.
         let retry = link.startAuthentication()
         XCTAssertNil(link.transport.session)

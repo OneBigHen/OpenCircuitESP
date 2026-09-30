@@ -62,8 +62,17 @@ public struct ZeppLink {
         transport.apply(servicesList: servicesList)
     }
 
-    /// Chunks for one message; encrypted when the endpoint requires it.
+    /// Chunks for one message; encrypted when the endpoint requires it. Encrypted endpoints are
+    /// refused until the strap has confirmed the session (`10 05 01`): the session parameters exist
+    /// from the `04` reply on (§4.4), but a failed or unfinished handshake must not use them.
     public mutating func send(endpoint: UInt16, payload: [UInt8]) throws -> [ZeppWrite] {
+        if transport.isEncrypted(endpoint: endpoint), !isAuthenticated {
+            throw ZeppChunkedTransport.Error.notAuthenticated(endpoint: endpoint)
+        }
+        return try sendUnchecked(endpoint: endpoint, payload: payload)
+    }
+
+    private mutating func sendUnchecked(endpoint: UInt16, payload: [UInt8]) throws -> [ZeppWrite] {
         try transport.encode(endpoint: endpoint, payload: payload).map { ZeppWrite(.chunkedWrite, $0) }
     }
 
@@ -102,7 +111,7 @@ public struct ZeppLink {
         if let session = step.session { transport.install(session: session) }
         guard let payload = step.send else { return }
         do {
-            out.writes += try send(endpoint: ZeppEndpoint.authentication, payload: payload)
+            out.writes += try sendUnchecked(endpoint: ZeppEndpoint.authentication, payload: payload)
         } catch {
             // Only reachable with a write length too small to chunk anything.
             out.events.append(.authenticationFailed(.localCryptoFailure))

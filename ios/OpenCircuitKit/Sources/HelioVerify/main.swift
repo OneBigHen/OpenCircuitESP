@@ -373,6 +373,10 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
                 String(format: "%04x", e.endpoint) + (e.encrypted == true ? "*" : "")
             }
             log("services (* = encrypted): \(described.joined(separator: " "))")
+            guard list.contains(ZeppEndpoint.battery) else {
+                log("battery (endpoint): 0x0029 not in the services list; skipped")
+                return afterBattery()
+            }
             step = .battery
             send(ZeppEndpoint.battery, ZeppBatteryStatus.request)
         case (.battery, ZeppEndpoint.battery):
@@ -422,6 +426,10 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     }
 
     func readConfig() {
+        guard services?.contains(ZeppEndpoint.config) == true else {
+            log("HEALTH settings: config endpoint 0x000A not in the services list; skipped")
+            return startAuthedHR()
+        }
         step = .config
         send(ZeppEndpoint.config, ZeppConfig.readRequest(group: ZeppConfig.healthGroup,
                                                           arguments: ZeppConfig.recordingArguments))
@@ -430,6 +438,10 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     func startAuthedHR() {
         step = .authedHR
         guard options.hrSeconds > 0, characteristics[.heartRateMeasurement] != nil else { return enableFetch() }
+        guard services?.contains(ZeppEndpoint.heartRate) == true else {
+            log("HR endpoint 0x001D not in the services list; listening to 0x2A37 without starting it")
+            return listenToStandardHR { [weak self] in self?.enableFetch() }
+        }
         send(ZeppEndpoint.heartRate, ZeppHeartRateControl.start)
         hrTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.send(ZeppEndpoint.heartRate, ZeppHeartRateControl.keepRunning)
