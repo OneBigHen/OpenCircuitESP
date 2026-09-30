@@ -818,6 +818,8 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
     private(set) var disconnects = 0
     /// Flushes `HelioConnection`'s own post-sync hook would run: syncs no background run owns.
     private(set) var hookFlushes = 0
+    /// The `nightsFinalized` each of those hook flushes passed to `healthFlush`, in order.
+    private(set) var hookFinalized: [Bool] = []
     /// What that hook's flush does, when a test needs it to write (`GuardedHealthWriter`).
     var hookAction: (@MainActor (HelioSyncResult) async -> Void)?
 
@@ -843,6 +845,7 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
                                    onSyncFinished: { [weak self] result, _ in
                                        guard let self, !result.endedInBackgroundRun else { return }
                                        self.hookFlushes += 1
+                                       self.hookFinalized.append(result.nightsFinalized)
                                        await self.hookAction?(result)
                                    },
                                    clock: clock, autoTick: false)
@@ -1221,9 +1224,17 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(session.lastSyncResult?.interrupted, false)
         XCTAssertEqual(session.lastSyncResult?.endedInBackgroundRun, false)
         XCTAssertEqual(link.hookFlushes, 1)
+        XCTAssertEqual(link.hookFinalized, [true], "review-225b S-B: the Focus run's finalization went with the sync")
         XCTAssertTrue(flushes.isEmpty)
         XCTAssertEqual(Set(device.fetchAcks), [0x09])
         XCTAssertEqual(device.fetchAcks.count, device.fetchStarts.count)
+
+        // A later foreground sync on the same session doesn't inherit it.
+        session.syncHistory(manual: true)
+        link.transport?.drain()
+        for _ in 0..<200 where link.hookFlushes < 2 { await Task.yield() }
+        XCTAssertEqual(session.syncsFinished, 2)
+        XCTAssertEqual(link.hookFinalized, [true, false])
     }
 
     // MARK: review-225b S-A: a session made after the watch loop owns its own syncs

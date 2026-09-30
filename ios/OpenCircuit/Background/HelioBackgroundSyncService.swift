@@ -263,6 +263,12 @@ struct HelioBackgroundSyncService {
             // still exactly one flush, and nothing is sent to the strap here.
             watched?.backgroundRunOwnsSyncs = false
             link.session?.backgroundRunOwnsSyncs = false   // one made during the loop's last turn, not yet watched
+            // Review-225b S-B: the Sleep Focus run's "the night is over" goes with the sync, so the
+            // hook's flush writes the night without the 20-minute margin, as this run would have.
+            if nightsFinalized {
+                watched?.finalizeNightsOnHandOff = true
+                link.session?.finalizeNightsOnHandOff = true
+            }
             run.ending = .handedToApp
             return record(run, kind: kind)
         case .synced:

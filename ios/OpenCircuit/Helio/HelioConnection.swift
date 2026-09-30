@@ -285,7 +285,8 @@ final class HelioConnection: NSObject {
                                         detail: "helio: \(result.roundsStored) round(s) stored, \(result.roundsFailed) failed, \(result.nights.count) night(s)")
         guard let store else { return }
         guard let flush = await healthFlush(timeline: timeline, store: store, nights: result.nights,
-                                            identity: result.identity) else { return }
+                                            identity: result.identity,
+                                            nightsFinalized: result.nightsFinalized) else { return }
         if flush.wroteAnything { observability.recordHealthWrite() }
     }
 

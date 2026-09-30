@@ -59,6 +59,9 @@ struct HelioSyncResult: Equatable {
     /// The strap's identity when the sync ended, so its Health flush names the strap even if the
     /// person switched devices meanwhile (review-224 S3: attribution follows the row).
     var identity: WearableIdentity?
+    /// The sync was handed over by a Sleep Focus run (review-225b S-B): its nights skip the 20-minute
+    /// quiet margin in the post-sync hook's flush, as they would have in the run's own.
+    var nightsFinalized = false
 }
 
 /// Where fetched rounds go. `HelioStoreSink` is the `LocalStore` implementation.
@@ -186,6 +189,9 @@ final class HelioSession: WearableSession {
     private(set) var syncsFinished = 0
     /// Set by a background run while it owns this connection's syncs (`HelioSyncResult.endedInBackgroundRun`).
     @ObservationIgnored var backgroundRunOwnsSyncs = false
+    /// Set by a Sleep Focus run that hands its sync to the app (review-225b S-B); carried into the
+    /// next `HelioSyncResult.nightsFinalized`, then cleared, so later syncs don't inherit it.
+    @ObservationIgnored var finalizeNightsOnHandOff = false
 
     // MARK: Collaborators
 
@@ -790,6 +796,8 @@ final class HelioSession: WearableSession {
         result.interrupted = interrupted
         result.endedInBackgroundRun = backgroundRunOwnsSyncs
         result.identity = identity
+        result.nightsFinalized = finalizeNightsOnHandOff
+        finalizeNightsOnHandOff = false
         let now = clock()
         lastSyncResult = result
         syncsFinished += 1
