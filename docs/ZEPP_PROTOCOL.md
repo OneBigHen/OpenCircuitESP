@@ -482,7 +482,10 @@ and flags as described; the Helio's list is in §3.5.
   serial number (NUL-terminated UTF-8), bit2 = hardware version (NUL-terminated), bit3 =
   firmware version (NUL-terminated), bit4 = 7-byte PnP ID. If the services list lacks
   `0x0043`, read DIS `0x180A`. 🟡 `SVC/DeviceInfo:77-141`. The serial number is a personal
-  identifier: never log it or commit it.
+  identifier: never log it or commit it. 🔴 **the width of bit 0's length prefix is not given**,
+  and the Helio's flags set bit 0 (§1), so the fields after it can't be located with certainty.
+  The Helio lists `0x0043` but has no DIS firmware revision (§10.1), so this endpoint is the only
+  BLE route to its firmware version. The next hardware run records which width parses.
 - **Battery** (endpoint `0x0029`, encrypted by default): request `03`. Reply `04` + 20 bytes
   (21 total). Payload byte `[2]` = level in %, byte `[3]` = `00` not charging / `01`
   charging; bytes `[11..18]` hold a last-charge date (u16 year, month, day, h, m, s, i8
@@ -1009,7 +1012,8 @@ lengths are recorded here; no health value, serial number, MAC or setting value 
 **Still untested** (keep their tags): wrong-key auth (`10 05 25`); ack `01` (delete); Tier 0
 live HR without auth; Zepp-app coexistence; time set (`0x0047`, `06 01`); the HRV statistic
 (RMSSD vs SDNN). Also not yet observed: the activity CRC; a full 12-hour activity round;
-the firmware version over BLE (endpoint `0x0043`); the advertisement; chunk acks; write types;
+the firmware version over BLE (endpoint `0x0043`, and the width of its bit-0 prefix, §5.3);
+the advertisement; chunk acks; write types;
 Path B (`0x004B`); arg `0x05` vs "Heart Rate Push"; the device's sequence numbers; any value
 compared against Zepp (HRV unknown byte, temperature constants, sleep-session minute base);
 the `0x26` layout. Controls (items 13–21): find device before auth; how long a lone `03`
