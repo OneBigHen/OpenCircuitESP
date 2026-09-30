@@ -304,7 +304,7 @@ public enum ZeppConfig {
     public static let informationalArguments: [UInt8] = [HealthArgument.heartRateDuringActivity]
 
     /// What to read from HEALTH after auth: the recording switches plus the informational settings,
-    /// in the order of the request already run on hardware (§10.1).
+    /// in the order HelioVerify already sent on hardware (§10.1 item 8).
     public static let healthReadArguments: [UInt8] = [
         HealthArgument.heartRateMonitoring, HealthArgument.heartRateDuringActivity,
         HealthArgument.heartRateSharing, HealthArgument.highAccuracySleep,
