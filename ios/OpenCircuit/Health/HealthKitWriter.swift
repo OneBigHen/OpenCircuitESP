@@ -2491,7 +2491,9 @@ final class HealthKitWriter {
     func writeBPEstimate(sbp: Double, dbp: Double, at date: Date) async -> Bool {
         let metadata: [String: Any] = ["OpenCircuitBPSource": "RingPPGCalibration"]
         let mmHg = HKUnit.millimeterOfMercury()
-        let device = wearableDevice(ownerAt: date)
+        // BP is ring-only (its PPG calibration): name the ring, never the owner at the estimate's date
+        // (review-224b N-2). A ring-only install: exactly the connected ring, as before.
+        let device = wearableDevice(forTimeline: .ringConn)
         let systolic = HKQuantitySample(
             type: Self.systolicType,
             quantity: HKQuantity(unit: mmHg, doubleValue: sbp),

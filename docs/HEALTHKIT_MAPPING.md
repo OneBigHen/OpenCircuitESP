@@ -71,7 +71,17 @@ switch is recorded (`DeviceOwnershipLog`, persisted by `DeviceOwnershipStore`), 
 stores and writes what it measured for time it owned:
 
 - the ring owns everything before the first switch, so a ring-only install is unchanged;
-- a night belongs to the device that owned the midpoint of its in-bed window;
+- a night belongs to the device you went to bed with (decision 28a): the device chosen when its
+  in-bed window began, however late a switch lands inside it. A stored night is never replaced or
+  merged by the other device's night, whichever syncs first, so every sleep period has exactly one
+  night; the other device's is skipped (`ownedByOtherDevice`, or `ownedByOtherDeviceNoRow` when the
+  owner stored none, which the Sleep card shows as unsaved). A kept night goes to Health named its
+  owner, even where it covers the other device's minutes; the mirror's delete never reaches the other
+  device's kept night. **Don't switch while asleep** anyway: the night stays with the device you went
+  to bed with, and the new device's reading of it is not kept;
+- step rows lie wholly in their device's time (decision 28b): the ring's first quarter-hour bucket
+  after a switch back is clamped to the switch, its delta kept, so it is named the ring and gets
+  distance. At most the pre-switch part of that one bucket can be counted by both devices;
 - the strap fetches nothing older than the start of its current ownership (`HelioFetchPlan`'s
   `notBefore`), except on an install that never had a ring, where its first ownership starts in the
   distant past and the first sync is the normal backfill;
@@ -79,9 +89,14 @@ stores and writes what it measured for time it owned:
   of them is pending for Apple Health and no night is saved from them;
 - resting HR, active/basal energy and exercise minutes use only HR from the device that owned it;
 - every write names the device of its ROW: a timeline's rows name that timeline's device, untagged
-  rows (steps, sleep, naps, derived values) name the device that owned their start (a night: its
-  midpoint). A strap sync flushed after a switch back to the ring still names the strap, or writes
-  nothing when the strap never passed the first-write guard.
+  rows (steps, sleep, naps, derived values) name the device that owned their start (a night: the
+  device it belongs to, above). A strap sync flushed after a switch back to the ring still names the
+  strap, or writes nothing when the strap never passed the first-write guard. BP estimates are the
+  ring's (its PPG calibration) and always name the ring.
+- **Known limit (v1 is one strap):** untagged rows in strap-owned time name the CURRENTLY saved strap
+  (`HelioConnection.savedPeripheralID`). Pairing a second strap before the first one's untagged rows
+  (steps, sleep, derived values) are flushed would name the new strap for them. Tagged rows (heart
+  rate, SpO₂, respiratory rate, temperature) always name their own strap.
 
 ## User-entered logs
 
