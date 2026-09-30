@@ -75,7 +75,8 @@ DEVICE CONTROLS (Helio Strap only; all need --key-file)
   services list is printed with each endpoint's encryption, then which controls it supports. A
   control the strap does not list is reported as unsupported and nothing is sent for it.
   --find [n]          Find my strap: start "find device", stop it after n seconds (default 10,
-                      max 60). A stop is also sent on Ctrl-C, on timeout and before exiting.
+                      max 60). A stop is also sent on Ctrl-C, SIGTERM or SIGHUP (a closed
+                      terminal), on timeout and before exiting.
   --vibrate           One short buzz: find-device start, then stop 500 ms later. There is no
                       dedicated vibrate opcode (ZEPP_PROTOCOL.md §13.2).
   --alerts            Read-only: the config capabilities and the strap's haptic alert settings
@@ -96,7 +97,7 @@ DEVICE CONTROLS (Helio Strap only; all need --key-file)
 
 EXIT CODES
   0 ok · 1 usage · 2 Bluetooth unavailable · 3 timeout · 4 auth failed · 5 no device found
-  130 interrupted (Ctrl-C)
+  129 hung up (SIGHUP) · 130 interrupted (Ctrl-C) · 143 terminated (SIGTERM)
 """
 
 /// Why the command line was not accepted; main.swift prints it and exits.

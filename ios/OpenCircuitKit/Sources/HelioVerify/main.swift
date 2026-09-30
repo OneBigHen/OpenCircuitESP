@@ -643,12 +643,11 @@ if options.writesAlarms {
 }
 if #available(macOS 10.15.4, *) {
     let verifier = HelioVerifier(options: options, key: key)
-    // Ctrl-C must not leave the strap buzzing: finish() sends the stop first.
-    signal(SIGINT, SIG_IGN)
-    let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-    interrupt.setEventHandler { verifier.finish("interrupted", code: 130) }
-    interrupt.resume()
-    withExtendedLifetime((verifier, interrupt)) { dispatchMain() }
+    // Ctrl-C, SIGTERM and SIGHUP must not leave the strap buzzing: finish() sends the stop first.
+    let stopSources = StopSignals.install { number in
+        verifier.finish(StopSignals.reason(number), code: StopSignals.exitCode(number))
+    }
+    withExtendedLifetime((verifier, stopSources)) { dispatchMain() }
 } else {
     fail("HelioVerify needs macOS 10.15.4 or newer")
 }
