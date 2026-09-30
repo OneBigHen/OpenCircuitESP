@@ -11,6 +11,7 @@ let package = Package(
     name: "OpenCircuitKit",
     products: [
         .library(name: "OpenCircuitKit", targets: ["OpenCircuitKit"]),
+        .library(name: "ZeppKit", targets: ["ZeppKit"]),
     ],
     targets: [
         .target(name: "OpenCircuitKit"),
@@ -23,5 +24,17 @@ let package = Package(
         // CLT-friendly verifier: `swift run RingKitVerify` works without Xcode,
         // asserting the same real-capture fixtures. Stopgap until Xcode is present.
         .executableTarget(name: "RingKitVerify", dependencies: ["OpenCircuitKit"]),
+        // Zepp OS (Amazfit Helio Strap) protocol core, #215. Built ONLY from docs/ZEPP_PROTOCOL.md
+        // plus public standards; the B-163 maths is ported from public-domain tiny-ECDH-c. Pure
+        // Swift + CommonCrypto (Security for the CSPRNG): no CoreBluetooth, no app code.
+        .target(name: "ZeppKit", dependencies: ["OpenCircuitKit"]),
+        .testTarget(
+            name: "ZeppKitTests",
+            dependencies: ["ZeppKit", "OpenCircuitKit"],
+            exclude: ["make_b163_vectors.sh"]
+        ),
+        // macOS CoreBluetooth verifier for a real strap: `swift run HelioVerify --help`.
+        // Thin BLE glue only; every decision lives in ZeppKit.
+        .executableTarget(name: "HelioVerify", dependencies: ["ZeppKit"]),
     ]
 )
