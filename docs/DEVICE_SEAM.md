@@ -221,3 +221,16 @@ timeline only, because its call sites are unchanged. The Helio PR adds its devic
 1. User-entered samples (headache, menstrual flow, asserted/typed sleep) are **not** given the
    ring's `HKDevice` (§2). OK, or do you want literally every sample attributed?
 2. `manufacturer` = brand ("RingConn") rather than the DIS string (`JZ_Tech`). OK?
+
+## 6. The second device (Helio Strap, #215 phase 3)
+
+- `ActiveWearable.session` now reads the device `ActiveDeviceChoiceStore` names:
+  `RingScanner.shared.session` or `HelioConnection.shared.session`. Only the chosen driver is read,
+  so the other is never constructed by it. The ring stays the default.
+- `HealthKitWriter.flushToHealth` gained the strap's pass (`device:`, `mirroredKinds:`,
+  `strapNights:`); `LocalStore.pendingHealthSamples` gained a `kinds:` filter. Their defaults are
+  the ring's pass, byte for byte.
+- No view was retyped to `(any WearableSession)?`: the strap got its own screens
+  (`ios/OpenCircuit/Helio/`), and `ContentView` hides the ring-only surfaces while the strap is
+  chosen (its `session` is nil then). Follow-up §4 item 1 still stands for the ring's views.
+

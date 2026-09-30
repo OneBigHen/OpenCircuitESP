@@ -17,11 +17,12 @@ device's own timestamps (so historical sync backfills correctly).
 | Sleep stages | `HKCategoryType(.sleepAnalysis)` | Category | — | values: `inBed`, `asleepCore`, `asleepDeep`, `asleepREM`, `awake` |
 | Workout / strain | `HKWorkout` | Workout | — | openwhoop "strain" has no native type; store as workout + metadata |
 
-## Amazfit Helio Strap (Zepp OS), proposed (#215)
+## Amazfit Helio Strap (Zepp OS) (#215)
 
 The strap's metrics land on the **same `MetricKind`s and HealthKit types as the ring**. Wire
-layouts are in `ZEPP_PROTOCOL.md` §6.5. Nothing below is implemented yet, and every wire
-claim is 🟡 until checked on a real strap.
+layouts are in `ZEPP_PROTOCOL.md` §6.5. The table below was the proposal; what the app does
+(phase 3, the decisions of record) is in "What the app writes" right after it. Wire claims keep
+their spec tags until checked on a real strap.
 
 | Helio fetch type | `MetricKind` → HealthKit type | Conversion | Gap / decision needed |
 |---|---|---|---|
@@ -42,6 +43,25 @@ claim is 🟡 until checked on a real strap.
 Cross-device rules (plan of record §4): attach an `HKDevice` naming the strap to every write,
 and allow **one active device at a time** in v1, because Apple Health can't dedupe two
 devices writing under the same source app.
+
+### What the app writes (phase 3)
+
+Everything is stored on the strap's own timeline (`zeppos:<peripheral id>`) and reaches Apple
+Health through the ring's `LocalStore` → `HealthKitWriter` path, carrying the strap's `HKDevice`
+(name "Helio Strap", manufacturer "Amazfit", hardware/firmware from the strap's reads). The pure
+rules are in `ZeppKit/HelioSyncPolicy.swift`, tested by `HelioSyncPolicyTests`.
+
+| Metric | Stored | Apple Health |
+|---|---|---|
+| Heart rate (activity per-minute HR) | `.heartRate` | yes, per reading |
+| SpO₂ (`0x25`), respiratory rate (`0x38`) | `.spo2`, `.respiratoryRate` | yes |
+| Skin temperature (`0x2e`) | `.temperature`, **gated**: 30–42 °C, the minute's activity record known and not `0x73`/`0x76`, inside the strap's own sleep window | yes, as the ring's nightly readings (`.bodyTemperature`); the night's mean goes to the Sleep summary via the ring's `SkinTempBaseline.nightlyVerdict` |
+| Steps (activity per-minute) | `StoredStepSample` per minute + `StoredDaily` | yes, additive deltas over their real minute, through the ring's step writer (watermark advances only after the save) |
+| Active / basal energy, resting HR, exercise minutes | derived from the stored HR, as for the ring | yes, the ring's derived writers |
+| Resting HR (`0x3a`, strap-reported) | `.restingHeartRate` (local only) | no: the ring's derived daily writer already writes one per day, and writing both would double it |
+| HRV (`0x49`) | `.hrvSDNN` (local only) | **no** (`HelioHealthPolicy.writesHRV = false`): the statistic is unverified |
+| Sleep (`0x48`) | the strap's own stages → Sleep summary + hypnogram; no invented in-bed span | yes, through `mirrorSettledNight`; a manually edited night is never overwritten. No `SleepStaging` fallback yet (DECISION-GAP, see `HelioSleepSelection`) |
+| Stress (`0x13`), PAI (`0x0d`) | shown in the app only | no Health type |
 
 ## User-entered logs
 
