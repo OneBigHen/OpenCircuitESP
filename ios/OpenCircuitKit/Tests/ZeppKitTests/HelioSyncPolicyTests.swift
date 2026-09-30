@@ -188,6 +188,14 @@ final class HelioSkinTemperatureGateTests: XCTestCase {
         XCTAssertEqual(kept.map(\.start), [date(midnight - 3600)], "only 23:00, the window's first minute")
     }
 
+    func testTheEarliestMinuteWithoutAWearRecordIsFound() throws {
+        let temps = try temperatures([2900, 3350, 3350, 3350], from: midnight)   // the first is out of range
+        let acts = try activity([0x01, 0x01], from: midnight + 120)              // minutes 2 and 3 only
+        XCTAssertEqual(HelioSkinTemperatureGate.earliestWearUnknown(temperatures: temps, activity: acts),
+                       date(midnight + 60), "minute 0 has no usable reading, minute 1 has no wear record")
+        XCTAssertNil(HelioSkinTemperatureGate.earliestWearUnknown(temperatures: Array(temps.suffix(2)), activity: acts))
+    }
+
     func testWithoutASleepWindowNothingIsKept() throws {
         let temps = try temperatures(Array(repeating: 3350, count: 10), from: midnight)
         let acts = try activity(Array(repeating: 0x01, count: 10), from: midnight)
@@ -355,5 +363,33 @@ final class HelioFetchPlanTests: XCTestCase {
                        nowMinute, "never past now")
         XCTAssertEqual(HelioFetchPlan.advancedCursor(previous: previous, round: round(nextSince: previous.addingTimeInterval(-7200)), now: now),
                        previous, "a re-delivered older round never moves it back")
+    }
+
+    func testTheTemperatureWatermarkWaitsForTheNight() {
+        let proposed = nowMinute
+        // A sync at 03:00-ish: the night isn't recorded, the last known night ended two days ago.
+        let oldNightEnd = now.addingTimeInterval(-2 * 86_400)
+        let held = HelioFetchPlan.temperatureCursor(proposed: proposed, previous: nil, earliestWearUnknown: nil,
+                                                    latestNightEnd: oldNightEnd, now: now)
+        XCTAssertEqual(held, HelioFetchPlan.floorToMinute(now.addingTimeInterval(-36 * 3600)),
+                       "held at the settle window, so tonight's minutes are fetched again once the night exists")
+        // Last night is known and ended at 07:00: the watermark may go up to its end.
+        let lastNightEnd = now.addingTimeInterval(-5 * 3600)
+        XCTAssertEqual(HelioFetchPlan.temperatureCursor(proposed: proposed, previous: nil, earliestWearUnknown: nil,
+                                                        latestNightEnd: lastNightEnd, now: now), lastNightEnd)
+        // A minute whose wear state wasn't known holds it there.
+        let unknown = now.addingTimeInterval(-40 * 3600)
+        XCTAssertEqual(HelioFetchPlan.temperatureCursor(proposed: proposed, previous: nil, earliestWearUnknown: unknown,
+                                                        latestNightEnd: lastNightEnd, now: now),
+                       HelioFetchPlan.floorToMinute(unknown))
+        // Never behind the previous watermark, never past the proposed one; nil proposed keeps previous.
+        let previous = now.addingTimeInterval(-3600)
+        XCTAssertEqual(HelioFetchPlan.temperatureCursor(proposed: proposed, previous: previous, earliestWearUnknown: nil,
+                                                        latestNightEnd: lastNightEnd, now: now), previous)
+        let early = now.addingTimeInterval(-50 * 3600)
+        XCTAssertEqual(HelioFetchPlan.temperatureCursor(proposed: early, previous: nil, earliestWearUnknown: nil,
+                                                        latestNightEnd: lastNightEnd, now: now), early)
+        XCTAssertEqual(HelioFetchPlan.temperatureCursor(proposed: nil, previous: previous, earliestWearUnknown: nil,
+                                                        latestNightEnd: nil, now: now), previous)
     }
 }

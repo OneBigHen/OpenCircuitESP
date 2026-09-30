@@ -188,6 +188,16 @@ final class HelioStoreSink: HelioHistorySink {
                 let windows = HelioSleepSelection.nights(from: sessions, now: now).map(\.window)
                 let gated = HelioSkinTemperatureGate.samples(temperatures: minutes, activity: activity, sleepWindows: windows)
                 _ = try store.ingest(gated, device: timeline)
+                // Hold the watermark where a minute may still pass the gate later (no night yet, or
+                // no wear record this sync), so it is fetched again instead of skipped for good.
+                let previous = store.helioFetchCursors(device: timeline)[.temperature]
+                let held = HelioFetchPlan.temperatureCursor(
+                    proposed: HelioFetchPlan.advancedCursor(previous: previous, round: round, now: now),
+                    previous: previous,
+                    earliestWearUnknown: HelioSkinTemperatureGate.earliestWearUnknown(temperatures: minutes, activity: activity),
+                    latestNightEnd: windows.map(\.end).max(), now: now)
+                if let held, held != previous { try store.setHelioFetchCursor(.temperature, to: held, device: timeline) }
+                return true
             case .autoStress(let minutes):
                 if let last = minutes.last(where: { $0.level != nil }), let level = last.level {
                     latestStress = HelioReading(value: Double(level), at: last.time)

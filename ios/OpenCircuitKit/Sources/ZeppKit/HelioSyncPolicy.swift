@@ -126,6 +126,17 @@ public enum HelioSkinTemperatureGate {
         return nil
     }
 
+    /// The earliest minute with a reading in range whose activity record isn't in `activity`: it may
+    /// still pass once that record arrives (`HelioFetchPlan.temperatureCursor` waits for it).
+    public static func earliestWearUnknown(temperatures: [ZeppTemperatureMinute],
+                                           activity: [ZeppActivityMinute]) -> Date? {
+        let known = Set(activity.map { minuteKey($0.time) })
+        return temperatures
+            .filter { exclusion(for: $0, activityKind: known.contains(minuteKey($0.time)) ? 0x01 : nil,
+                                sleepWindows: [DateInterval(start: .distantPast, end: .distantFuture)]) == .wearUnknown }
+            .map(\.time).min()
+    }
+
     /// The kept minutes as `.temperature` samples, oldest first.
     public static func samples(temperatures: [ZeppTemperatureMinute], activity: [ZeppActivityMinute],
                                sleepWindows: [DateInterval]) -> [QuantitySample] {
@@ -323,5 +334,30 @@ public enum HelioFetchPlan {
         let clamped = min(next, floorToMinute(now))
         guard let previous else { return clamped }
         return max(previous, clamped)
+    }
+
+    /// How far back a temperature minute may still be waiting for its night: a night's session is
+    /// written when the strap sees the wake, so a sync during (or just after) the night comes before it.
+    public static let temperatureSettleWindow: TimeInterval = 36 * 3600
+
+    /// The temperature watermark after a round, held back so no minute that may still pass the gate
+    /// (decision 12) is skipped for good. `proposed` is `advancedCursor`'s value.
+    ///
+    /// A minute excluded only because its night isn't recorded yet, or its activity record wasn't
+    /// fetched, becomes gateable later, but nothing re-fetches temperature behind its own watermark.
+    /// So the watermark never passes:
+    /// - the earliest minute of this round excluded as `wearUnknown`;
+    /// - the end of the latest night known this sync, or `now − temperatureSettleWindow` if that is
+    ///   later (a night can only arrive for minutes after the last known one; older minutes are final).
+    /// It never moves behind `previous`. The cost is re-fetching up to a day and a half of
+    /// temperature and activity per sync; the store's cursors deduplicate them.
+    public static func temperatureCursor(proposed: Date?, previous: Date?, earliestWearUnknown: Date?,
+                                         latestNightEnd: Date?, now: Date) -> Date? {
+        guard let proposed else { return previous }
+        var limit = max(latestNightEnd ?? .distantPast, floorToMinute(now.addingTimeInterval(-temperatureSettleWindow)))
+        if let wearUnknown = earliestWearUnknown { limit = min(limit, floorToMinute(wearUnknown)) }
+        let held = min(proposed, limit)
+        guard let previous else { return held }
+        return max(previous, held)
     }
 }

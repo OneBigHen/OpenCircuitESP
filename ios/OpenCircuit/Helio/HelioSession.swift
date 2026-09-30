@@ -307,7 +307,9 @@ final class HelioSession: WearableSession {
 
     /// CoreBluetooth reported a notification state change.
     func notificationStateChanged(_ characteristic: ZeppCharacteristic, enabled: Bool, failed: Bool) {
-        guard pendingNotify.contains(characteristic) else { return }
+        // Only an ENABLE (or a failure) settles a pending entry: a late "off" from the previous
+        // sync's teardown must not start the next fetch before notify is back on.
+        guard pendingNotify.contains(characteristic), enabled || failed else { return }
         if failed {
             pendingNotify.removeAll()
             switch notifyPurpose {
@@ -388,6 +390,15 @@ final class HelioSession: WearableSession {
         tickTask?.cancel()
         tickTask = nil
         helioLog.notice("helio: link lost")
+    }
+
+    /// A user disconnect mid-sync: ack the open round `03 09` while the link is still up (the strap
+    /// keeps the data either way), then let `linkLost` finish the sync as interrupted.
+    func abortSync() {
+        guard var fetch else { return }
+        let actions = fetch.abort()
+        self.fetch = fetch
+        perform(actions)
     }
 
     /// Decision 18: backgrounding stops a find; the live heart-rate stream stops too.

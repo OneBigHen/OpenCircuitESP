@@ -15,7 +15,8 @@ struct HelioDeviceInfoView: View {
     private var status: HelioStatus {
         HelioStatus.from(connection: connection.state, phase: session?.phase,
                          hasKey: HelioKeyStore.shared.hasKey, keyRejected: HelioKeyStore.shared.isRejected,
-                         hasSavedStrap: HelioConnection.hasSavedStrap)
+                         hasSavedStrap: HelioConnection.hasSavedStrap,
+                         endedBusy: connection.endedBusy)
     }
 
     var body: some View {

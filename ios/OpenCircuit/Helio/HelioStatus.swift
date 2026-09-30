@@ -32,7 +32,7 @@ struct HelioStatus: Equatable {
     ///   - hasKey / keyRejected: from the key store.
     ///   - hasSavedStrap: a strap was connected on this phone before.
     static func from(connection: HelioConnection.State, phase: HelioSession.Phase?, hasKey: Bool,
-                     keyRejected: Bool, hasSavedStrap: Bool) -> HelioStatus {
+                     keyRejected: Bool, hasSavedStrap: Bool, endedBusy: Bool = false) -> HelioStatus {
         switch connection {
         case .bluetoothOff:
             return .init(kind: .bluetoothOff, title: "Bluetooth is off",
@@ -55,6 +55,7 @@ struct HelioStatus: Equatable {
             }
             if keyRejected { return rejected }
             if !hasKey { return keyNeeded }
+            if endedBusy { return busy }
             return .init(kind: .disconnected, title: "Not connected", detail: nil, tone: .neutral)
         case .connected:
             break
@@ -69,8 +70,7 @@ struct HelioStatus: Equatable {
         case .authenticating?:
             return .init(kind: .authenticating, title: "Checking the key…", detail: nil, tone: .working)
         case .strapBusy?:
-            return .init(kind: .strapBusy, title: "Strap busy",
-                         detail: "Another phone or app seems to hold the strap. " + zeppBluetoothCopy, tone: .attention)
+            return busy
         case .unsupported?:
             return .init(kind: .unsupported, title: "Not supported",
                          detail: "This device doesn't offer what OpenCircuit needs.", tone: .attention)
@@ -82,6 +82,10 @@ struct HelioStatus: Equatable {
             return .init(kind: .ready, title: "Connected", detail: nil, tone: .good)
         }
     }
+
+    static let busy = HelioStatus(
+        kind: .strapBusy, title: "Strap busy",
+        detail: "Another phone or app seems to hold the strap. " + zeppBluetoothCopy, tone: .attention)
 
     static let keyNeeded = HelioStatus(
         kind: .keyNeeded, title: "Key needed",

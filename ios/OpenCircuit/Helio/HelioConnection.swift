@@ -40,6 +40,10 @@ final class HelioConnection: NSObject {
     private(set) var session: HelioSession?
     /// The link's signal strength while the find screen polls it.
     private(set) var rssi: Int?
+    /// The last connection ended with the strap refusing auth in a way that looks like another
+    /// phone or app holds it. No automatic reconnect follows (no retry loop, decision 7); the next
+    /// explicit connect clears it.
+    private(set) var endedBusy = false
 
     @ObservationIgnored let keyStore: any HelioKeyStoring
     @ObservationIgnored private var central: CBCentralManager?
@@ -55,7 +59,7 @@ final class HelioConnection: NSObject {
     @ObservationIgnored private var rssiTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundObserver: NSObjectProtocol?
 
-    private enum PendingAction { case scan, reconnect }
+    private enum PendingAction { case scan, reconnect, resumeRestored }
 
     init(keyStore: (any HelioKeyStoring)? = nil) {
         self.keyStore = keyStore ?? HelioKeyStore.shared
@@ -89,6 +93,7 @@ final class HelioConnection: NSObject {
 
     /// Connect: to the saved strap by identifier, else by a foreground search.
     func connect() {
+        endedBusy = false
         wantConnection = true
         if Self.hasSavedStrap, reconnectKnown() { return }
         scan()
@@ -119,9 +124,16 @@ final class HelioConnection: NSObject {
     /// A standing connect to the saved strap (no scan). false when there is none to reconnect to.
     @discardableResult
     func reconnectKnown() -> Bool {
+        endedBusy = false
         guard ActiveDeviceChoiceStore.persisted() == .helioStrap,
               let id = Self.savedPeripheralID, let uuid = UUID(uuidString: id) else { return false }
-        if state == .connected || state == .connecting { return true }
+        if state == .connecting || (state == .connected && session != nil) { return true }
+        if state == .connected, let peripheral, peripheral.state == .connected, central?.state == .poweredOn {
+            // Linked but no session (a discovery that never finished): discover again.
+            characteristics = [:]
+            peripheral.discoverServices(nil)
+            return true
+        }
         wantConnection = true
         ensureCentral()
         guard central?.state == .poweredOn else {
@@ -144,9 +156,11 @@ final class HelioConnection: NSObject {
         stopRSSIUpdates()
         // Never leave the strap buzzing (§15.4): the stop goes out, and gets half a second to leave
         // the radio (HelioVerify's margin), before the link is cancelled.
-        let wasFinding = session?.isFinding == true
+        // A sync in progress gets its `03 09` before the link goes (the strap keeps the data either way).
+        let wasBusy = session?.isFinding == true || session?.syncing == true
         session?.stopFind()
         session?.stopLiveHeartRate()
+        session?.abortSync()
         session?.linkLost()
         session = nil
         state = .idle
@@ -160,7 +174,7 @@ final class HelioConnection: NSObject {
             self?.characteristics = [:]
             self?.writeQueue = []
         }
-        if wasFinding {
+        if wasBusy {
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(500))
                 cancel()
@@ -179,7 +193,7 @@ final class HelioConnection: NSObject {
 
     /// Drop and re-open the link: a fresh auth with the key saved now.
     func reconnectNow() {
-        let wasFinding = session?.isFinding == true
+        let wasFinding = session?.isFinding == true || session?.syncing == true
         disconnect()
         let reopen = { [weak self] in
             guard let self else { return }
@@ -321,10 +335,8 @@ extension HelioConnection: CBCentralManagerDelegate {
                 switch pendingAction {
                 case .scan?: scan()
                 case .reconnect?: reconnectKnown()
-                case nil:
-                    // A restored standing connect needs nothing; a restored live link is re-adopted
-                    // in `willRestoreState` and discovered on connect.
-                    break
+                case .resumeRestored?: resumeRestored()
+                case nil: break
                 }
             case .poweredOff:
                 state = .bluetoothOff
@@ -338,20 +350,30 @@ extension HelioConnection: CBCentralManagerDelegate {
 
     nonisolated func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
         MainActor.assumeIsolated {
-            // Minimal restoration: re-adopt the saved strap's peripheral so its delegate callbacks
-            // land here. If the link is already up, rediscover and start a fresh session.
+            // Minimal restoration: re-adopt the saved strap's peripheral so its callbacks land here.
+            // Nothing is sent to the radio yet (CoreBluetooth ignores calls before power-on); the
+            // `.poweredOn` update resumes it (`resumeRestored`).
             guard let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
                   let saved = Self.savedPeripheralID,
                   let restored = peripherals.first(where: { $0.identifier.uuidString == saved }) else { return }
             adopt(restored)
             wantConnection = true
+            pendingAction = .resumeRestored
+            state = restored.state == .connected ? .connected : .connecting
             helioLog.notice("helio: restored the strap's peripheral (state \(restored.state.rawValue, privacy: .public))")
-            if restored.state == .connected {
-                state = .connected
-                restored.discoverServices(nil)
-            } else {
-                state = .connecting
-            }
+        }
+    }
+
+    /// After restoration and power-on: discover a live link, or re-issue the standing connect.
+    private func resumeRestored() {
+        pendingAction = nil
+        guard let peripheral, wantConnection, central?.state == .poweredOn else { return }
+        if peripheral.state == .connected {
+            state = .connected
+            if session == nil { characteristics = [:]; peripheral.discoverServices(nil) }
+        } else {
+            state = .connecting
+            central?.connect(peripheral, options: nil)
         }
     }
 
@@ -403,6 +425,12 @@ extension HelioConnection: CBCentralManagerDelegate {
                                     error: Error?) {
         MainActor.assumeIsolated {
             guard peripheral === self.peripheral else { return }
+            // Auth refused as "busy" on this connection: don't reconnect by itself, or a strap held
+            // by another app would be re-authenticated in a loop.
+            if session?.phase == .strapBusy {
+                endedBusy = true
+                wantConnection = false
+            }
             session?.linkLost()
             session = nil
             characteristics = [:]
@@ -424,6 +452,13 @@ extension HelioConnection: CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         MainActor.assumeIsolated {
             let services = peripheral.services ?? []
+            guard error == nil, !services.isEmpty else {
+                // A discovery that failed would leave "connected" with no session: drop the link
+                // instead, so the standing reconnect starts over.
+                helioLog.error("helio: service discovery failed; reconnecting")
+                central?.cancelPeripheralConnection(peripheral)
+                return
+            }
             pendingServices = services.count
             for service in services { peripheral.discoverCharacteristics(nil, for: service) }
         }
