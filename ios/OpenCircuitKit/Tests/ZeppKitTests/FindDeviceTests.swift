@@ -266,6 +266,20 @@ final class FindDeviceTests: XCTestCase {
         XCTAssertEqual(machine.state, .stopped(.linkLost))
     }
 
+    func testAStopOwedFromAnEarlierProcessGoesOutOnTheFirstSupportingConnection() {
+        // #215 phase 4: the app persists "a find may be running" and seeds a new machine with it, so a
+        // process the system ended mid-find still stops the strap.
+        var machine = ZeppFindDevice(stopOwed: true)
+        XCTAssertTrue(machine.isStopOwed)
+        XCTAssertEqual(machine.state, .idle)
+        XCTAssertEqual(machine.connected(ControlsFixtures.strapCapabilities(ControlsFixtures.bareServices)), .init())
+        XCTAssertTrue(machine.isStopOwed, "a connection without find device can't carry it")
+        XCTAssertEqual(machine.connected(ControlsFixtures.strapCapabilities()),
+                       .init(messages: [find([0x06]), find([0x01])], events: [.owedStopSent]))
+        XCTAssertFalse(machine.isStopOwed)
+        XCTAssertFalse(ZeppFindDevice().isStopOwed, "nothing is owed by default")
+    }
+
     func testFindPhoneIsAnsweredAndEnded() {
         var machine = connectedMachine(version: 2)
         XCTAssertEqual(machine.receive([0x15, 0x01], now: t0), .init())      // no request yet

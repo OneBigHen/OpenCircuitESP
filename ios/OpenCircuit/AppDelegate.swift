@@ -55,8 +55,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // ring implies a restorable central, so a state-restoration relaunch is covered by this gate.
         // #215: only the CHOSEN device's central is re-created. With the Helio Strap active the ring's
         // scanner is never constructed (decision 1); the strap's own central is re-created instead,
-        // with its own restore identifier, so iOS can hand back its state (Phase 3 only re-adopts the
-        // peripheral; background syncing is Phase 4).
+        // with its own restore identifier, so iOS can hand back its state; a restored or reconnected
+        // strap syncs on connect, and the BGTask / Sleep Focus wakes drive it too (#215 phase 4).
         let helioActive = ActiveDeviceChoiceStore.persisted() == .helioStrap
         if helioActive, HelioConnection.hasSavedStrap {
             MainActor.assumeIsolated {
@@ -164,6 +164,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         scheduler.scheduleProcessing()
         observability.recordScheduled()
 
+        // #215 phase 4, decision 1: the chosen device's drain only, decided from UserDefaults before
+        // either driver is touched. The strap's branch never constructs the ring's scanner; the ring's
+        // (the rest of this function) never touches the strap's connection.
+        if BackgroundDrain(ActiveDeviceChoiceStore.persisted()) == .strap {
+            handleStrap(task, kind: kind, timeout: timeout)
+            return
+        }
+
         let operation = Task { @MainActor in
             do {
                 // #131: NEVER build the container via the destructive `makeContainer()` here — its
@@ -177,11 +185,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 // the store is never touched.
                 let container = try OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()
                 // #215: the ring's background drain runs only while the ring is the chosen device; it
-                // is what constructs the ring's scanner and central. The Helio Strap's background
-                // sync is Phase 4, so its wake only runs the store-based alert pass below.
+                // is what constructs the ring's scanner and central. The strap's wake took the branch
+                // above; this catches a switch to the strap between that check and this task running.
                 guard ActiveDeviceChoiceStore.persisted() == .ringConn else {
                     observability.recordSyncOutcome(kind: kind, success: false,
-                                                    detail: "helio strap active: background sync not in this build")
+                                                    detail: "device switched to the Helio Strap; ring drain skipped")
                     await Self.evaluateAlerts()
                     scheduler.schedule()
                     scheduler.scheduleProcessing()
@@ -246,6 +254,71 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    /// How long after iOS expires a strap run the task is completed anyway, if the run hasn't done it
+    /// (a Health save still in flight). The run's own teardown needs about `teardownGrace`.
+    private static let strapExpiryGrace: TimeInterval = 2
+
+    /// The Helio Strap's BGTask run (#215 phase 4): `HelioBackgroundSyncService` (connect, auth with
+    /// the Keychain key, clock, fetch acked `03 09`, commit, Health flush, one "helio strap:" line in
+    /// the run log), then the same alert passes as the ring's run. The task is completed only after
+    /// the run has flushed, or has abandoned the sync (open round acked `03 09`, link dropped) because
+    /// iOS expired it; never before.
+    private static func handleStrap(_ task: BGTask, kind: TaskRecord.Kind, timeout: TimeInterval) {
+        let scheduler = BackgroundRefreshScheduler()
+        let observability = ObservabilityStore()
+        let completion = BackgroundTaskCompletion(task)
+
+        let operation = Task { @MainActor in
+            do {
+                // #131: never the destructive `makeContainer()`; `container:` keeps a fallback-built
+                // container alive for as long as the store.
+                let container = try OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()
+                let store = LocalStore(container: container)
+                let run = await HelioBackgroundSyncService.live(store: store).run(kind: kind, timeout: timeout)
+                if run.ending != .expired {
+                    await Self.evaluateAlerts()
+                    if run.ending == .synced { await Self.evaluateBodyAlerts(store: store) }
+                }
+                scheduler.schedule()
+                scheduler.scheduleProcessing()
+                completion.complete(success: run.success)
+            } catch {
+                observability.recordSyncOutcome(kind: kind, success: false,
+                                                detail: "helio strap: error: \(error.localizedDescription)")
+                await Self.evaluateAlerts()
+                scheduler.schedule()
+                scheduler.scheduleProcessing()
+                completion.complete(success: false)
+            }
+        }
+
+        task.expirationHandler = {
+            // The cancelled run acks an open round `03 09`, drops the link, logs why, then completes the
+            // task (above). Only if it hasn't within the grace is the task completed here.
+            operation.cancel()
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(Self.strapExpiryGrace))
+                guard completion.complete(success: false) else { return }
+                observability.recordSyncOutcome(kind: kind, success: false, detail: "helio strap: iOS ended the task early")
+                scheduler.schedule()
+                scheduler.scheduleProcessing()
+            }
+        }
+    }
+
+    /// The ring run's post-sync alert passes (#73/#85, #183), for the strap's store: freeze today's
+    /// overnight-signals row (opted-in only), then the body-vital alerts from persisted samples.
+    @MainActor
+    private static func evaluateBodyAlerts(store: LocalStore) async {
+        let alerts = HealthNotificationCenter()
+        let restingHRDaily = UserDefaults.standard.bool(forKey: HeadacheDefaults.enabled)
+            ? alerts.restingHRDailySeries(store: store) : nil
+        if let restingHRDaily {
+            await HeadacheEngine().refreshToday(store: store, restingHR: restingHRDaily)
+        }
+        await alerts.evaluate(store: store, session: nil, restingHRDaily: restingHRDaily)
+    }
+
     /// Present locally-posted notifications as a banner+sound+list entry while the app is in the
     /// foreground (default iOS behavior is to suppress them). Health alerts and reminders are
     /// evaluated mostly in the foreground, so this is what makes them actually visible.
@@ -262,5 +335,23 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     private static func evaluateAlerts() async {
         let healthAuthorized = await MainActor.run { HealthKitWriter().isShareAuthorized }
         await LocalAlertCenter().evaluate(batteryPercent: nil, healthAuthorized: healthAuthorized)
+    }
+}
+
+/// Completes a BGTask exactly once: whichever of the run and the expiry grace gets there first.
+@MainActor
+final class BackgroundTaskCompletion {
+    private let task: BGTask
+    private(set) var isDone = false
+
+    init(_ task: BGTask) { self.task = task }
+
+    /// false when the task was already completed.
+    @discardableResult
+    func complete(success: Bool) -> Bool {
+        guard !isDone else { return false }
+        isDone = true
+        task.setTaskCompleted(success: success)
+        return true
     }
 }

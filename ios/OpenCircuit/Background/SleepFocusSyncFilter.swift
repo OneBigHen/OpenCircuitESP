@@ -1,5 +1,6 @@
 import AppIntents
 import Foundation
+import SwiftData
 
 /// Opt-in Focus Filter shown by iOS under Settings > Focus > Sleep > Add Filter.
 ///
@@ -88,11 +89,10 @@ private enum SleepFocusSyncRunner {
             // non-destructive builder and retry on a later trigger if protected data is unavailable.
             let container = try OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()
             let store = LocalStore(container.mainContext)
-            // #215: this drains the RING. With the Helio Strap chosen the ring's scanner is never
-            // constructed; the strap's background sync is Phase 4.
-            guard ActiveDeviceChoiceStore.persisted() == .ringConn else {
-                observability.recordSyncOutcome(kind: .sleepFocus, success: false,
-                                                detail: "helio strap active: background sync not in this build")
+            // #215 phase 4, decision 1: the chosen device's drain only. With the Helio Strap chosen the
+            // ring's scanner is never constructed; the strap's drain runs instead.
+            if BackgroundDrain(ActiveDeviceChoiceStore.persisted()) == .strap {
+                await runStrap(container: container)
                 return
             }
             let service = RingBackgroundSyncService(store: store, health: HealthKitWriter())
@@ -149,6 +149,31 @@ private enum SleepFocusSyncRunner {
             scheduler.schedule()
             scheduler.scheduleProcessing()
         }
+    }
+
+    /// The Helio Strap's Focus-off run (#215 phase 4): the same bounded, short window as the ring's.
+    /// Focus ending is the authoritative "the night is over" signal, so the strap's nights skip the
+    /// 20-minute quiet margin, exactly as the ring's do on this wake (`sleepFinalized`). The run logs
+    /// itself ("helio strap: …", kind `sleepFocus`); the alert passes follow a finished sync.
+    private static func runStrap(container: ModelContainer) async {
+        let scheduler = BackgroundRefreshScheduler()
+        // `container:` keeps a fallback-built container alive for as long as the store.
+        let store = LocalStore(container: container)
+        let run = await HelioBackgroundSyncService.live(store: store).run(
+            kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: true)
+        guard !Task.isCancelled else { return }
+        await evaluateAlerts()
+        if run.ending == .synced {
+            let alerts = HealthNotificationCenter()
+            let restingHRDaily = UserDefaults.standard.bool(forKey: HeadacheDefaults.enabled)
+                ? alerts.restingHRDailySeries(store: store) : nil
+            if let restingHRDaily {
+                await HeadacheEngine().refreshToday(store: store, restingHR: restingHRDaily)
+            }
+            await alerts.evaluate(store: store, session: nil, restingHRDaily: restingHRDaily)
+        }
+        scheduler.schedule()
+        scheduler.scheduleProcessing()
     }
 
     private static func evaluateAlerts() async {

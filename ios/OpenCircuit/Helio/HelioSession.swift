@@ -53,6 +53,9 @@ struct HelioSyncResult: Equatable {
     var latestPAI: HelioReading?
     /// The sync ended early (link lost, or no progress for too long).
     var interrupted = false
+    /// A background run owned this sync (#215 phase 4): the run flushes Apple Health and logs it, so
+    /// the connection doesn't do it a second time.
+    var endedInBackgroundRun = false
 }
 
 /// Where fetched rounds go. `HelioStoreSink` is the `LocalStore` implementation.
@@ -76,9 +79,24 @@ final class HelioFindState {
 
     /// Decision 18: the app stops a find after 60 s. Decision 19: a buzz is 2 s.
     static let configuration = ZeppFindDevice.Configuration(maxDuration: 60, buzzLength: 2)
+    /// "A find may still be running on the strap" (#215 phase 4). The machine's owed stop lives in
+    /// memory, so a process the system ends (in the background, or killed while suspended) would
+    /// forget it; this flag hands it to the next process, whose first connection sends the `06`.
+    nonisolated static let stopOwedKey = "helio.findStopOwed.v1"
 
-    init(configuration: ZeppFindDevice.Configuration? = nil) {
-        machine = ZeppFindDevice(configuration: configuration ?? Self.configuration)
+    /// nil `defaults`: nothing persisted (the tests' default).
+    private let defaults: UserDefaults?
+
+    init(configuration: ZeppFindDevice.Configuration? = nil, defaults: UserDefaults? = nil) {
+        self.defaults = defaults
+        machine = ZeppFindDevice(configuration: configuration ?? Self.configuration,
+                                 stopOwed: defaults?.bool(forKey: Self.stopOwedKey) ?? false)
+    }
+
+    /// Record whether a stop may be owed: set while a find runs or after a link loss mid-find,
+    /// cleared once the `06` went out.
+    func persist() {
+        defaults?.set(machine.isBuzzing || machine.isStopOwed, forKey: Self.stopOwedKey)
     }
 }
 
@@ -158,6 +176,11 @@ final class HelioSession: WearableSession {
     private(set) var findVersion: UInt8?
     /// Every acknowledgement byte sent for a fetch round on this connection, in order (always `09`).
     private(set) var fetchAcksSent: [UInt8] = []
+    /// Syncs that ended on this connection, finished or interrupted (`lastSyncResult` is the latest).
+    /// The background run waits on it (#215 phase 4).
+    private(set) var syncsFinished = 0
+    /// Set by a background run while it owns this connection's syncs (`HelioSyncResult.endedInBackgroundRun`).
+    @ObservationIgnored var backgroundRunOwnsSyncs = false
 
     // MARK: Collaborators
 
@@ -380,6 +403,7 @@ final class HelioSession: WearableSession {
     func linkLost() {
         isLinkConnected = false
         findState.machine.connectionLost()
+        findState.persist()
         findPhase = findState.machine.state
         if fetch != nil || phase == .syncing { finishFetch(interrupted: true) }
         liveHeartRateRunning = false
@@ -750,8 +774,10 @@ final class HelioSession: WearableSession {
         result.roundsFailed = syncCounts.failed
         result.typesEmpty = syncCounts.empty
         result.interrupted = interrupted
+        result.endedInBackgroundRun = backgroundRunOwnsSyncs
         let now = clock()
         lastSyncResult = result
+        syncsFinished += 1
         if let today = result.todaySteps { steps = today }
         if !interrupted { lastSyncAt = now }
         if phase == .syncing { phase = .ready }
@@ -854,6 +880,7 @@ final class HelioSession: WearableSession {
 
     private func performFind(_ out: ZeppFindDevice.Output) {
         send(out.messages)
+        findState.persist()
         findPhase = findState.machine.state
         for event in out.events {
             switch event {

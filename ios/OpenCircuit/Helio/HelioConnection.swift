@@ -12,7 +12,8 @@ import ZeppKit
 // Its OWN central with its own restore identifier, so the ring's central (`RingScanner`) and this one
 // never share state (decision 1: the inactive device is never scanned for or connected). Created
 // lazily, like the ring's (#142), so merely constructing this object never prompts for Bluetooth.
-// State restoration only re-adopts the strap's peripheral here; background syncing is Phase 4.
+// State restoration re-adopts the strap's peripheral; a session that connects then syncs on its own.
+// The BGTask and Sleep Focus wakes drive it through `HelioBackgroundLink` (#215 phase 4).
 
 @Observable
 @MainActor
@@ -52,12 +53,14 @@ final class HelioConnection: NSObject {
     @ObservationIgnored private var pendingServices = 0
     @ObservationIgnored private var writeQueue: [ZeppWrite] = []
     @ObservationIgnored private var localStore: LocalStore?
-    @ObservationIgnored private let findState = HelioFindState()
+    @ObservationIgnored private let findState = HelioFindState(defaults: .standard)
     @ObservationIgnored private var wantConnection = false
     @ObservationIgnored private var pendingAction: PendingAction?
     @ObservationIgnored private var scanTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var rssiTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundObserver: NSObjectProtocol?
+    /// A background run owns the syncs of the sessions created meanwhile (`HelioBackgroundLink`).
+    @ObservationIgnored var backgroundRunActive = false
 
     private enum PendingAction { case scan, reconnect, resumeRestored }
 
@@ -88,6 +91,10 @@ final class HelioConnection: NSObject {
     func setLocalStore(_ store: LocalStore) {
         localStore = store
     }
+
+    /// This connection has created its central (decision 1's tests: the strap's central exists only
+    /// while the strap is the chosen device).
+    var hasCentral: Bool { central != nil }
 
     // MARK: User actions
 
@@ -253,24 +260,40 @@ final class HelioConnection: NSObject {
             key: keyStore.load(), keyStore: keyStore, sink: store.map { HelioStoreSink(store: $0) },
             findState: findState,
             onSyncFinished: { result, timeline in
+                // A background run flushes and logs the syncs it owns itself (#215 phase 4).
+                guard !result.endedInBackgroundRun else { return }
                 await HelioConnection.flushToHealth(result: result, timeline: timeline, store: store)
             })
+        session.backgroundRunOwnsSyncs = backgroundRunActive
         self.session = session
         session.start()
     }
 
-    /// After every sync: the strap's timeline and nights through the ring's Health writer, carrying
-    /// the strap's `HKDevice` (decisions 10–17).
+    /// After every sync no background run owns: the strap's timeline and nights through the ring's
+    /// Health writer, carrying the strap's `HKDevice` (decisions 10–17). Logged as a foreground sync
+    /// only while the app is active; one that ends in the background (a restoration relaunch, a link
+    /// that came back while suspended) is logged as a background sync.
     static func flushToHealth(result: HelioSyncResult, timeline: SyncDeviceID, store: LocalStore?) async {
         let observability = ObservabilityStore()
-        observability.recordSyncOutcome(kind: .foreground, success: !result.interrupted && result.roundsFailed == 0,
+        let kind: TaskRecord.Kind = UIApplication.shared.applicationState == .active ? .foreground : .backgroundSync
+        observability.recordSyncOutcome(kind: kind, success: !result.interrupted && result.roundsFailed == 0,
                                         detail: "helio: \(result.roundsStored) round(s) stored, \(result.roundsFailed) failed, \(result.nights.count) night(s)")
-        guard let store, HealthKitWriter.isAvailable else { return }
+        guard let store else { return }
+        guard let flush = await healthFlush(timeline: timeline, store: store, nights: result.nights) else { return }
+        if flush.wroteAnything { observability.recordHealthWrite() }
+    }
+
+    /// The strap's Apple Health pass: its timeline's pending samples (HRV withheld, decision 14) and
+    /// `nights`. nil when Health isn't available on this device. `nightsFinalized` skips the nights'
+    /// 20-minute quiet margin (the Sleep Focus wake, as for the ring).
+    static func healthFlush(timeline: SyncDeviceID, store: LocalStore, nights: [HelioSleepSelection.Night],
+                            nightsFinalized: Bool = false) async -> HealthKitWriter.FlushResult? {
+        guard HealthKitWriter.isAvailable else { return nil }
         let flush = await HealthKitWriter().flushToHealth(
             store: store, device: timeline, mirroredKinds: HelioHealthPolicy.healthMirroredKinds(),
-            strapNights: result.nights.map(\.segments))
-        if flush.wroteAnything { observability.recordHealthWrite() }
+            strapNights: nights.map(\.segments), strapNightsFinalized: nightsFinalized)
         helioLog.notice("helio: Health flush samples=\(flush.samples, privacy: .public) sleep=\(flush.sleepSegments, privacy: .public) steps=\(flush.steps, privacy: .public) rhr=\(flush.restingDays, privacy: .public)")
+        return flush
     }
 
     private func known(_ characteristic: CBCharacteristic) -> ZeppCharacteristic? {
@@ -293,6 +316,28 @@ final class HelioConnection: NSObject {
             writeQueue.removeFirst()
             flushWrites()
         }
+    }
+}
+
+// MARK: - HelioBackgroundLink
+
+extension HelioConnection: HelioBackgroundLink {
+    var strapTimeline: SyncDeviceID? {
+        if let session { return session.timeline }
+        return Self.savedPeripheralID.map {
+            SyncDeviceID.timeline(for: .zeppOS(model: HelioSession.displayName), identityID: $0)
+        }
+    }
+
+    func connectForBackground() -> Bool {
+        reconnectKnown()
+    }
+
+    func disconnectForBackground() {
+        // `disconnect()` drops the session before the link goes, so `didDisconnectPeripheral` can't see
+        // a busy strap any more: note it here, so nothing reconnects by itself (decision 7).
+        if session?.phase == .strapBusy { endedBusy = true }
+        disconnect()
     }
 }
 

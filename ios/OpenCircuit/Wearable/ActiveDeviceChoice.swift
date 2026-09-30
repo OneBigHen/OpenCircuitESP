@@ -71,3 +71,19 @@ enum DeviceSwitcher {
         }
     }
 }
+
+/// Which drain a background wake runs (decision 1): the chosen device's, never the other's. The BGTask
+/// handler and the Sleep Focus filter decide with it from the persisted choice (UserDefaults only)
+/// before touching either driver, so with the strap chosen the ring's scanner and central are never
+/// constructed, and with the ring chosen the strap's connection and central never are.
+enum BackgroundDrain: Equatable {
+    case ring
+    case strap
+
+    init(_ choice: ActiveDeviceChoice) {
+        switch choice {
+        case .ringConn: self = .ring
+        case .helioStrap: self = .strap
+        }
+    }
+}

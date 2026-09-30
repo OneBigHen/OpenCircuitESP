@@ -445,6 +445,33 @@ final class HelioSessionTests: XCTestCase {
         XCTAssertEqual(Array(device.findOpcodes.suffix(2)), [0x06, 0x01], "the owed stop, then the capabilities request")
     }
 
+    func testAFindStopOwedSurvivesTheProcess() throws {
+        let suite = "test.HelioSessionTests.findStop"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let device = makeStrap()
+        let rig = connect(device, store: nil, findState: HelioFindState(defaults: defaults), autoSync: false)
+        XCTAssertNil(rig.session.startFind())
+        rig.transport.drain()
+        XCTAssertTrue(device.isBuzzing)
+        XCTAssertTrue(defaults.bool(forKey: HelioFindState.stopOwedKey))
+
+        // The system ends the process with the strap still buzzing. The next process's first
+        // connection sends the stop before anything else on the find endpoint.
+        let next = connect(device, store: nil, findState: HelioFindState(defaults: defaults), autoSync: false)
+        XCTAssertFalse(device.isBuzzing)
+        XCTAssertEqual(Array(device.findOpcodes.suffix(2)), [0x06, 0x01])
+        XCTAssertFalse(defaults.bool(forKey: HelioFindState.stopOwedKey))
+
+        // A find stopped normally leaves nothing owed.
+        XCTAssertNil(next.session.startFind())
+        XCTAssertTrue(defaults.bool(forKey: HelioFindState.stopOwedKey))
+        next.session.stopFind()
+        next.transport.drain()
+        XCTAssertFalse(defaults.bool(forKey: HelioFindState.stopOwedKey))
+    }
+
     func testControlsTheStrapDoesNotListAreHidden() throws {
         let device = makeStrap()
         device.services = helioServices.filter { $0.endpoint != 0x001A && $0.endpoint != 0x000F }
@@ -663,5 +690,410 @@ final class HelioStatusTests: XCTestCase {
                        "the first-write guard needs a firmware version: it is read before the first sync")
         XCTAssertEqual(fields.localIdentifier, "zeppos:5B1E4C2A-0000-4000-8000-0000000000B2")
         XCTAssertTrue(active.capabilities.contains(.historySync))
+    }
+}
+
+// MARK: - Background sync (#215 phase 4)
+
+/// `HelioBackgroundLink` over the simulated strap: what `HelioConnection` does for a background run,
+/// minus CoreBluetooth. A connect builds a session over a `FakeStrapTransport`; events reach it only
+/// when the test's `pause` drains them, as CoreBluetooth hands them over on later run-loop turns.
+@MainActor
+private final class FakeBackgroundLink: HelioBackgroundLink {
+    let device: FakeZeppDevice
+    let keyStore: MemoryKeyStore
+    let store: LocalStore?
+    let findState = HelioFindState()
+    let clock: () -> Date
+    var strapID: String? = "5B1E4C2A-0000-4000-8000-0000000000C3"
+    /// false: a connect is armed but never completes (the strap is out of range).
+    var inRange = true
+    /// The strap never answers (another phone holds it).
+    var silent = false
+    var endedBusy = false
+    var backgroundRunActive = false
+    private(set) var session: HelioSession?
+    private(set) var transport: FakeStrapTransport?
+    private(set) var connects = 0
+    private(set) var disconnects = 0
+
+    init(device: FakeZeppDevice, keyStore: MemoryKeyStore, store: LocalStore?, clock: @escaping () -> Date) {
+        self.device = device
+        self.keyStore = keyStore
+        self.store = store
+        self.clock = clock
+    }
+
+    var strapTimeline: SyncDeviceID? {
+        strapID.map { SyncDeviceID.timeline(for: .zeppOS(model: HelioSession.displayName), identityID: $0) }
+    }
+
+    func connectForBackground() -> Bool {
+        connects += 1
+        guard let strapID else { return false }
+        guard inRange else { return true }
+        let transport = FakeStrapTransport(device: device)
+        transport.silent = silent
+        let session = HelioSession(transport: transport, identityID: strapID, key: keyStore.load(), keyStore: keyStore,
+                                   sink: store.map { HelioStoreSink(store: $0) }, findState: findState,
+                                   clock: clock, autoTick: false)
+        session.backgroundRunOwnsSyncs = backgroundRunActive
+        transport.session = session
+        self.transport = transport
+        self.session = session
+        session.start()
+        return true
+    }
+
+    func disconnectForBackground() {
+        disconnects += 1
+        if session?.phase == .strapBusy { endedBusy = true }
+        session?.stopFind()
+        session?.abortSync()
+        session?.linkLost()
+        session = nil
+        transport = nil
+    }
+}
+
+@MainActor
+final class HelioBackgroundSyncTests: XCTestCase {
+    private var containers: [ModelContainer] = []
+    private var clock = testNow
+    private var defaults: UserDefaults!
+    private let suite = "test.HelioBackgroundSyncTests"
+
+    override func setUp() {
+        super.setUp()
+        defaults = UserDefaults(suiteName: suite)
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suite)
+        containers.removeAll()
+        super.tearDown()
+    }
+
+    private func makeStore() throws -> LocalStore {
+        let container = try ModelContainer(
+            for: StoredSample.self, StoredCursor.self, StoredSleepSummary.self, StoredDaily.self, StoredNap.self,
+            StoredPeriodEntry.self, StoredDaytimeTemp.self, StoredStepSample.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        containers.append(container)
+        return LocalStore(container.mainContext)
+    }
+
+    private func rows(_ store: LocalStore) throws -> [String] {
+        let samples = try store.context.fetch(FetchDescriptor<StoredSample>(sortBy: [SortDescriptor(\.start)]))
+            .map { "\($0.deviceID) \($0.kindRaw) \($0.start.timeIntervalSince1970) \($0.value)" }
+        let steps = try store.context.fetch(FetchDescriptor<StoredStepSample>(sortBy: [SortDescriptor(\.start)]))
+            .map { "step \($0.start.timeIntervalSince1970) \($0.end.timeIntervalSince1970) \($0.delta)" }
+        let dailies = try store.context.fetch(FetchDescriptor<StoredDaily>()).map { "daily \($0.day.timeIntervalSince1970) \($0.steps)" }
+        let nights = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
+            .map { "night \($0.night.timeIntervalSince1970) asleep \($0.asleepMin) deep \($0.deepMin) rem \($0.remMin) temp \($0.skinTempC)" }
+        return (samples + steps + dailies + nights).sorted()
+    }
+
+    /// What the service handed to Apple Health.
+    private struct FlushCall {
+        let timeline: SyncDeviceID
+        let nights: Int
+        let finalized: Bool
+        let rowsAtFlush: Int
+    }
+
+    /// The service over `link`. `pause` moves the simulated strap along (default: deliver everything
+    /// queued, one second passes); the Health pass is recorded instead of written.
+    private func service(_ link: FakeBackgroundLink, store: LocalStore, flushes: @escaping (FlushCall) -> Void = { _ in },
+                         pause: (@MainActor () -> Void)? = nil) -> HelioBackgroundSyncService {
+        HelioBackgroundSyncService(
+            link: link, keyStore: link.keyStore, observability: ObservabilityStore(defaults),
+            flush: { [unowned self] timeline, nights, finalized in
+                let count = (try? self.rows(store).count) ?? 0
+                flushes(FlushCall(timeline: timeline, nights: nights.count, finalized: finalized, rowsAtFlush: count))
+                var result = HealthKitWriter.FlushResult()
+                result.samples = count
+                return result
+            },
+            now: { [unowned self] in self.clock },
+            pause: { [unowned self] in
+                if let pause { pause() } else { link.transport?.drain() }
+                self.clock = self.clock.addingTimeInterval(1)
+                link.session?.tick(now: self.clock)
+                await Task.yield()
+            },
+            grace: { link.transport?.drain() })
+    }
+
+    private func lastRecord() -> TaskRecord? { ObservabilityStore(defaults).records().last }
+
+    // MARK: a background run with the strap chosen: drain → store → Health → run log
+
+    func testABackgroundRunDrainsTheStrapStoresRowsFlushesHealthAndLogsIt() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let run = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+
+        XCTAssertEqual(run.ending, .synced)
+        XCTAssertEqual(run.result?.interrupted, false)
+        XCTAssertTrue(run.success)
+        XCTAssertEqual(link.connects, 1, "connect by identifier once")
+        XCTAssertEqual(link.disconnects, 0, "a finished run leaves the idle link up")
+        XCTAssertTrue(device.authenticated)
+        XCTAssertEqual(device.timeSetCount, 1, "decision 9: the clock is set on the background connection too")
+        XCTAssertEqual(Set(device.fetchAcks), [0x09], "decision 8: keep-on-strap for every round")
+        XCTAssertEqual(device.fetchAcks.count, device.fetchStarts.count)
+
+        // Rows on the strap's timeline, as a foreground sync stores them.
+        let samples = try store.context.fetch(FetchDescriptor<StoredSample>())
+        XCTAssertTrue(samples.allSatisfy { $0.deviceID == "zeppos:5B1E4C2A-0000-4000-8000-0000000000C3" })
+        XCTAssertEqual(samples.filter { $0.kindRaw == "heartRate" }.count, 50)
+        XCTAssertEqual(try store.context.fetch(FetchDescriptor<StoredSleepSummary>()).count, 1)
+
+        // Health: one flush, after the rows were committed, with the night; not finalized (BGTask).
+        XCTAssertEqual(flushes.count, 1)
+        XCTAssertEqual(flushes.first?.timeline, link.strapTimeline)
+        XCTAssertEqual(flushes.first?.nights, 1)
+        XCTAssertEqual(flushes.first?.finalized, false)
+        XCTAssertEqual(flushes.first?.rowsAtFlush, try rows(store).count)
+        XCTAssertNotNil(run.flushMS)
+
+        // The run log: the ring's background log, labelled for the strap.
+        let record = try XCTUnwrap(lastRecord())
+        XCTAssertEqual(record.kind, .appRefresh)
+        XCTAssertTrue(record.success)
+        XCTAssertTrue(record.detail?.hasPrefix("helio strap: synced") == true, record.detail ?? "")
+        XCTAssertTrue(ObservabilityStore(defaults).metricRecords().contains {
+            $0.source == "bgphase" && $0.detail.hasPrefix("device=helio kind=appRefresh ending=synced")
+        })
+        XCTAssertNotNil(ObservabilityStore(defaults).bgLastRun)
+        // The session is handed back: a later foreground sync on it flushes by itself again.
+        XCTAssertEqual(link.session?.backgroundRunOwnsSyncs, false)
+        XCTAssertFalse(link.backgroundRunActive)
+    }
+
+    func testTheSleepFocusRunFinalizesTheStrapsNights() async throws {
+        let store = try makeStore()
+        let link = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let run = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: true)
+        XCTAssertEqual(run.ending, .synced)
+        XCTAssertEqual(flushes.map(\.finalized), [true])
+        XCTAssertEqual(lastRecord()?.kind, .sleepFocus)
+    }
+
+    func testAnAlreadyConnectedStrapIsSyncedWithoutReconnecting() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        // A foreground connection that already synced and stayed up.
+        _ = link.connectForBackground()
+        link.transport?.drain()
+        XCTAssertEqual(link.session?.syncsFinished, 1)
+        let startsBefore = device.fetchStarts.count
+
+        let run = await service(link, store: store).run(kind: .processing, timeout: RingBackgroundSyncService.processingTimeout)
+        XCTAssertEqual(run.ending, .synced)
+        XCTAssertEqual(link.connects, 1, "no second connect")
+        XCTAssertEqual(link.session?.syncsFinished, 2, "a fresh sync on the open link")
+        XCTAssertGreaterThan(device.fetchStarts.count, startsBefore)
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+    }
+
+    // MARK: expiration mid-round → 03 09, committed rows kept, next run resumes, no duplicates
+
+    func testExpiryMidRoundAcksKeepKeepsCommittedRowsAndTheNextRunResumesWithoutDuplicates() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        // One event per pause. iOS expires the task once the sleep-session round (the second type,
+        // after activity's two rounds) has asked for its data: activity is committed, that round is open.
+        var expired = false
+        let operation = Task { @MainActor in
+            await service(link, store: store, flushes: { flushes.append($0) }, pause: {
+                link.transport?.drainSteps(1)
+                let dataRequests = link.transport?.writes.filter { $0.characteristic == .activityControl && $0.bytes == [0x02] }.count ?? 0
+                if !expired, dataRequests == 3, link.session?.fetchAcksSent.count == 2 {
+                    expired = true
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }).run(kind: .appRefresh, timeout: 3600)
+        }
+        let run = await operation.value
+
+        XCTAssertTrue(expired, "the test reached the open round")
+        XCTAssertEqual(run.ending, .expired)
+        XCTAssertFalse(run.success)
+        XCTAssertEqual(link.disconnects, 1, "disconnected cleanly")
+        XCTAssertNil(link.session)
+        XCTAssertEqual(device.fetchStarts.count, 3)
+        XCTAssertEqual(device.fetchAcks, [0x09, 0x09, 0x09], "the open round got its 03 09; nothing was deleted")
+        XCTAssertEqual(run.result?.interrupted, true)
+        XCTAssertTrue(flushes.isEmpty, "no Health flush once iOS has ended the task")
+        XCTAssertTrue(lastRecord()?.detail?.hasPrefix("helio strap: iOS ended the task") == true)
+
+        // What was committed before the expiry stays: activity. The open round's night isn't stored.
+        let timeline = try XCTUnwrap(link.strapTimeline)
+        let afterFirst = try rows(store)
+        XCTAssertTrue(afterFirst.contains { $0.contains(" heartRate ") })
+        XCTAssertFalse(afterFirst.contains { $0.hasPrefix("night") })
+        XCTAssertFalse(afterFirst.contains { $0.contains(" temperature ") })
+        let cursors = store.helioFetchCursors(device: timeline)
+        XCTAssertNotNil(cursors[.activity])
+        XCTAssertNil(cursors[.sleepSession], "the open round's watermark never moved")
+
+        // The next run resumes from the stored cursors and ends with exactly the rows one clean sync gives.
+        clock = clock.addingTimeInterval(600)
+        let plan = HelioFetchPlan.plan(cursors: cursors, now: clock)
+        let startsBefore = device.fetchStarts.count
+        let next = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(next.ending, .synced)
+        var firstStarts: [[UInt8]] = []
+        for start in device.fetchStarts[startsBefore...] where !firstStarts.contains(where: { $0[1] == start[1] }) {
+            firstStarts.append(start)
+        }
+        XCTAssertEqual(firstStarts, plan.map { ZeppFetchCommand.start($0.type, since: $0.since, timeZone: .current) },
+                       "every type's first round starts from its persisted cursor")
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+
+        let reference = try makeStore()
+        let referenceLink = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: reference, clock: { [unowned self] in self.clock })
+        _ = await service(referenceLink, store: reference).run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(try rows(store), try rows(reference), "no duplicates, nothing missing")
+        XCTAssertEqual(flushes.count, 1, "the second run flushed Health")
+    }
+
+    func testRunningOutOfBudgetAbandonsTheRoundFlushesWhatWasCommittedAndDisconnects() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        // Two events a second: the ~20 s fetch window of an app-refresh task ends mid-sync.
+        let run = await service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(2) })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(run.ending, .outOfTime)
+        XCTAssertEqual(link.disconnects, 1)
+        XCTAssertFalse(device.fetchStarts.isEmpty, "the cut came during the fetch")
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+        // Every round the app saw opened was acked 03 09; a start whose reply hadn't arrived yet opened
+        // nothing on the app's side (the strap keeps what it wasn't told to delete, §6.3).
+        XCTAssertLessThanOrEqual(device.fetchStarts.count - device.fetchAcks.count, 1)
+        XCTAssertEqual(flushes.count, 1, "what was committed still reaches Health inside the reserve")
+        XCTAssertEqual(flushes.first?.rowsAtFlush, try rows(store).count)
+        XCTAssertTrue(lastRecord()?.detail?.hasPrefix("helio strap: out of time") == true)
+    }
+
+    func testAStrapOutOfRangeKeepsThePendingConnectArmed() async throws {
+        let store = try makeStore()
+        let link = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        link.inRange = false
+        let run = await service(link, store: store).run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(run.ending, .outOfTime)
+        XCTAssertEqual(link.connects, 1, "one connect, no retry loop")
+        XCTAssertEqual(link.disconnects, 0, "nothing to disconnect; the standing connect stays for restoration")
+        XCTAssertTrue(try rows(store).isEmpty)
+    }
+
+    // MARK: rejected / missing key, busy strap → no retry, no writes, a logged reason
+
+    func testAMissingOrRejectedKeyEndsTheRunBeforeAnyRadioWork() async throws {
+        let store = try makeStore()
+        var flushes: [FlushCall] = []
+
+        let noKey = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(nil), store: store, clock: { [unowned self] in self.clock })
+        let first = await service(noKey, store: store, flushes: { flushes.append($0) }).run(kind: .appRefresh, timeout: 28)
+        XCTAssertEqual(first.ending, .keyNeeded)
+        XCTAssertEqual(noKey.connects, 0, "no connect, so no central is created")
+        XCTAssertTrue(lastRecord()?.detail?.hasPrefix("helio strap: key needed") == true)
+        XCTAssertEqual(lastRecord()?.success, false)
+
+        let keys = MemoryKeyStore(keyHex)
+        keys.markRejected()
+        let rejected = FakeBackgroundLink(device: makeStrap(), keyStore: keys, store: store, clock: { [unowned self] in self.clock })
+        let second = await service(rejected, store: store, flushes: { flushes.append($0) }).run(kind: .processing, timeout: 150)
+        XCTAssertEqual(second.ending, .keyRejected)
+        XCTAssertEqual(rejected.connects, 0)
+        XCTAssertTrue(lastRecord()?.detail?.hasPrefix("helio strap: key rejected") == true)
+
+        let noStrap = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        noStrap.strapID = nil
+        let third = await service(noStrap, store: store, flushes: { flushes.append($0) }).run(kind: .appRefresh, timeout: 28)
+        XCTAssertEqual(third.ending, .noSavedStrap)
+        XCTAssertEqual(noStrap.connects, 0)
+
+        XCTAssertTrue(flushes.isEmpty, "no Health writes")
+        XCTAssertTrue(try rows(store).isEmpty, "no store writes")
+    }
+
+    func testAKeyTheStrapRejectsInTheBackgroundIsNotRetried() async throws {
+        let store = try makeStore()
+        let device = makeStrap(authKey: "ffeeddccbbaa99887766554433221100")
+        let keys = MemoryKeyStore(keyHex)
+        let link = FakeBackgroundLink(device: device, keyStore: keys, store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let run = await service(link, store: store, flushes: { flushes.append($0) }).run(kind: .appRefresh, timeout: 28)
+        XCTAssertEqual(run.ending, .keyRejected)
+        XCTAssertTrue(keys.isRejected, "decision 7: marked, so no later run tries it")
+        XCTAssertEqual(link.connects, 1)
+        XCTAssertEqual(link.disconnects, 1, "the link is dropped, not left retrying")
+        XCTAssertEqual(device.receivedEndpoints.filter { $0 == 0x0082 }.count, 2, "one 04 and one 05, once")
+
+        let again = await service(link, store: store, flushes: { flushes.append($0) }).run(kind: .appRefresh, timeout: 28)
+        XCTAssertEqual(again.ending, .keyRejected)
+        XCTAssertEqual(link.connects, 1, "no retry")
+        XCTAssertEqual(device.receivedEndpoints.filter { $0 == 0x0082 }.count, 2)
+        XCTAssertTrue(flushes.isEmpty)
+        XCTAssertTrue(try rows(store).isEmpty)
+        XCTAssertTrue(lastRecord()?.detail?.hasPrefix("helio strap: key rejected") == true)
+    }
+
+    func testABusyStrapEndsTheRunAndIsNotRetried() async throws {
+        let store = try makeStore()
+        let link = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        link.silent = true
+        var flushes: [FlushCall] = []
+        let run = await service(link, store: store, flushes: { flushes.append($0) }).run(kind: .appRefresh, timeout: 28)
+        XCTAssertEqual(run.ending, .strapBusy, "no auth reply within 10 s")
+        XCTAssertTrue(link.endedBusy)
+        XCTAssertEqual(link.disconnects, 1)
+        let again = await service(link, store: store, flushes: { flushes.append($0) }).run(kind: .appRefresh, timeout: 28)
+        XCTAssertEqual(again.ending, .strapBusy)
+        XCTAssertEqual(link.connects, 1, "no retry loop")
+        XCTAssertTrue(flushes.isEmpty)
+        XCTAssertTrue(lastRecord()?.detail?.hasPrefix("helio strap: strap busy") == true)
+    }
+
+    // MARK: one device at a time (decision 1)
+
+    func testABackgroundWakeRunsOnlyTheChosenDevicesDrain() throws {
+        XCTAssertEqual(BackgroundDrain(.ringConn), .ring)
+        XCTAssertEqual(BackgroundDrain(.helioStrap), .strap)
+        XCTAssertEqual(BackgroundDrain(ActiveDeviceChoiceStore.persisted(defaults)), .ring,
+                       "nothing chosen: the ring, as for every existing user")
+    }
+
+    func testWithTheRingChosenTheStrapsConnectionCreatesNoCentral() throws {
+        // The live connection reads the process-wide choice; this test sets it and restores it.
+        let standard = UserDefaults.standard
+        let savedChoice = standard.object(forKey: ActiveDeviceChoiceStore.key)
+        let savedStrap = standard.object(forKey: HelioConnection.savedPeripheralKey)
+        defer {
+            standard.set(savedChoice, forKey: ActiveDeviceChoiceStore.key)
+            standard.set(savedStrap, forKey: HelioConnection.savedPeripheralKey)
+        }
+        standard.set(ActiveDeviceChoice.ringConn.rawValue, forKey: ActiveDeviceChoiceStore.key)
+        standard.set("5B1E4C2A-0000-4000-8000-0000000000D4", forKey: HelioConnection.savedPeripheralKey)
+
+        let connection = HelioConnection(keyStore: MemoryKeyStore(keyHex))
+        XCTAssertFalse(connection.connectForBackground(), "the strap isn't the chosen device")
+        XCTAssertFalse(connection.hasCentral, "so its central is never created")
+        XCTAssertNil(connection.session)
     }
 }
