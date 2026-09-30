@@ -32,6 +32,10 @@ final class FakeZeppDevice {
     var corruptCRC = false
     var skipPacketIndex: Int?
     var refuseTypes: Set<ZeppFetchType> = []
+    /// Start replies in the 16-byte form, with a trailing `00` (§6.2).
+    var startReplyTrailingZero = false
+    /// An empty type answers with an all-zero start instead of echoing the *since* (§6.2).
+    var emptyStartAllZero = false
 
     // Observed state
     private(set) var sessionKey: [UInt8]?
@@ -186,8 +190,12 @@ final class FakeZeppDevice {
             guard c.count == 10, let type = ZeppFetchType(rawValue: c[1]) else { return [control([0x10, 0x01, 0x02])] }
             if refuseTypes.contains(type) { return [control([0x10, 0x01, 0x04])] }
             currentFetch = type
-            let entry = fetchData[type] ?? (start: Array(c[2..<10]), data: [])
-            return [control([0x10, 0x01, 0x01] + le32(UInt32(entry.data.count)) + entry.start)]
+            let emptyStart = emptyStartAllZero ? [UInt8](repeating: 0, count: 8) : Array(c[2..<10])
+            let entry = fetchData[type] ?? (start: emptyStart, data: [])
+            // Activity announces 8-byte records, every other type bytes (§6.2).
+            let length = type == .activity ? entry.data.count / 8 : entry.data.count
+            let trailer: [UInt8] = startReplyTrailingZero ? [0x00] : []
+            return [control([0x10, 0x01, 0x01] + le32(UInt32(length)) + entry.start + trailer)]
         case 0x02:
             guard let type = currentFetch else { return [] }
             let data = fetchData[type]?.data ?? []
