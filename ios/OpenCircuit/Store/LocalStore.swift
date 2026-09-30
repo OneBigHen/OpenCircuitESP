@@ -1257,11 +1257,15 @@ struct LocalStore {
     /// Per device (#214): `device`'s samples against `device`'s `hk:` watermark, so a second
     /// device's backfill older than the ring's watermark still reaches Health. The ring (the
     /// default) owns every pre-V8 row, so its pending set is exactly what it was.
-    func pendingHealthSamples(device: SyncDeviceID = .ringConn) throws -> [QuantitySample] {
+    ///
+    /// `kinds` narrows the mirrored set for a device whose policy withholds a kind (the Helio
+    /// Strap's HRV, `HelioHealthPolicy.writesHRV`); it defaults to every mirrored kind.
+    func pendingHealthSamples(device: SyncDeviceID = .ringConn,
+                              kinds: [MetricKind] = LocalStore.healthMirroredKinds) throws -> [QuantitySample] {
         let cursor = try loadHealthCursor(device: device)
         let deviceID = device.rawValue
         var out: [QuantitySample] = []
-        for kind in Self.healthMirroredKinds {
+        for kind in Self.healthMirroredKinds where kinds.contains(kind) {
             let kindRaw = kind.rawValue
             let last = cursor.last(kind) ?? .distantPast
             let descriptor = FetchDescriptor<StoredSample>(

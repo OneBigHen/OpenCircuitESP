@@ -403,9 +403,16 @@ final class HealthKitWriter {
     /// `sleepFinalized` is reserved for an authoritative wake signal (currently Sleep Focus ending):
     /// unlike an ordinary drain, that signal proves the user ended their sleep session, so the night
     /// can be written immediately instead of waiting for the conservative 20-minute quiet margin.
+    ///
+    /// `device` / `mirroredKinds` / `strapNights` are the Helio Strap's pass (#215 phase 3): its own
+    /// timeline's pending samples (minus the kinds its policy withholds, `HelioHealthPolicy`) and the
+    /// nights it staged. Their defaults are exactly the ring's pass, unchanged.
     @discardableResult
     func flushToHealth(store: LocalStore, sleepSegments: [SleepSegment] = [],
-                       sleepFinalized: Bool = false) async -> FlushResult {
+                       sleepFinalized: Bool = false,
+                       device: SyncDeviceID = .ringConn,
+                       mirroredKinds: [MetricKind] = LocalStore.healthMirroredKinds,
+                       strapNights: [[SleepSegment]] = []) async -> FlushResult {
         var result = FlushResult()
         guard isShareAuthorized, !Self.isFlushing else { return result }
         Self.isFlushing = true
@@ -417,10 +424,10 @@ final class HealthKitWriter {
         // Scalars: write, THEN advance the watermark, so a failed save backfills next time. The
         // write is SPLIT per metric (#132): a single denied type (e.g. SpO₂) no longer sinks the
         // whole batch — the granted metrics still land and only the denied one is left pending.
-        if let pending = try? store.pendingHealthSamples(), !pending.isEmpty {
+        if let pending = try? store.pendingHealthSamples(device: device, kinds: mirroredKinds), !pending.isEmpty {
             let outcome = await write(pending)
             if !outcome.written.isEmpty {
-                try? store.markHealthWritten(outcome.written)   // advance ONLY for what actually saved
+                try? store.markHealthWritten(outcome.written, device: device)   // advance ONLY for what actually saved
                 result.samples = outcome.written.count
                 writtenKinds.formUnion(outcome.written.map(\.kind))
             }
@@ -445,6 +452,21 @@ final class HealthKitWriter {
             case .failed:
                 // A denied .sleepAnalysis type (or a transient write error) — surface it (#135)
                 // instead of silently retrying, so the card can say "Sleep hasn't synced".
+                pendingFlushFailures.insert(.sleep)
+            }
+        }
+        // The Helio Strap's staged nights (#215, decision 13), each through the same settled-night
+        // mirror and quiet margin as the ring's; `mirrorSettledNight` leaves an edited night alone
+        // and is a no-op for a night Health already holds (signature match).
+        for night in strapNights where SleepHealthGate.isReadyToWrite(
+            latestSegmentEnd: night.map(\.end).max(), now: Date(), finalized: false) {
+            switch await mirrorSettledNight(local: store, segments: night) {
+            case .wrote(let count):
+                result.sleepSegments += count
+                writtenKinds.insert(.sleep)
+            case .unchanged:
+                break
+            case .failed:
                 pendingFlushFailures.insert(.sleep)
             }
         }

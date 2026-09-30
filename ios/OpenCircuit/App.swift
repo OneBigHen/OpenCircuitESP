@@ -62,7 +62,11 @@ struct OpenCircuitApp: App {
                 // so a reinstall, a restore, or a revoked notification permission can't quietly
                 // leave the guaranteed half of the alarm unarmed. Both are no-ops when the alarm
                 // is off. (`RingAlarmController`)
-                RingAlarmController.shared.evaluate(session: RingScanner.shared.session)
+                // The ring's wake-up alarm drives the ring only; with the Helio Strap active the ring
+                // is never touched (decision 1), and the strap's alarms live on the strap.
+                if ActiveDeviceChoiceStore.shared.isRing {
+                    RingAlarmController.shared.evaluate(session: RingScanner.shared.session)
+                }
                 RingAlarmController.shared.refreshBackupNotification()
                 return
             }

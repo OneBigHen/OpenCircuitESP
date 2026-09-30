@@ -2,9 +2,10 @@ import Foundation
 import Observation
 import OpenCircuitKit
 
-/// The one active wearable (#214, docs/DEVICE_SEAM.md). v1 allows ONE device at a time, and today
-/// that is always the connected RingConn ring: `session` is `RingScanner.shared.session`, read
-/// through a closure so constructing this never constructs the scanner.
+/// The one active wearable (#214, docs/DEVICE_SEAM.md). v1 allows ONE device at a time: the device
+/// `ActiveDeviceChoiceStore` names (#215). `session` is `RingScanner.shared.session` or
+/// `HelioConnection.shared.session`, read through a closure so constructing this never constructs
+/// either driver, and the inactive driver is never touched.
 ///
 /// Injected at the composition root (`App.swift`). No view reads it yet — views keep using
 /// `RingSession` concretely until the Helio driver retypes them. Its first consumer is
@@ -22,8 +23,8 @@ final class ActiveWearable {
     ///   - session: the active session, if any.
     ///   - fallbackDeviceID: the device to attribute writes to while no session exists (a flush in a
     ///     cold background launch, or after a disconnect).
-    init(session: @escaping @MainActor () -> (any WearableSession)? = { RingScanner.shared.session },
-         fallbackDeviceID: @escaping @MainActor () -> String? = { ActiveWearable.lastRingID() },
+    init(session: @escaping @MainActor () -> (any WearableSession)? = { ActiveWearable.activeDeviceSession() },
+         fallbackDeviceID: @escaping @MainActor () -> String? = { ActiveWearable.lastActiveDeviceID() },
          identityStore: WearableIdentityStore = WearableIdentityStore()) {
         self.currentSession = session
         self.fallbackDeviceID = fallbackDeviceID
@@ -51,6 +52,22 @@ final class ActiveWearable {
         }
         guard let id = fallbackDeviceID(), !id.isEmpty else { return nil }
         return identityStore.load(id: id)
+    }
+
+    /// The chosen device's live session (decision 1: the other driver is not read, so not created).
+    static func activeDeviceSession() -> (any WearableSession)? {
+        switch ActiveDeviceChoiceStore.shared.current {
+        case .ringConn: return RingScanner.shared.session
+        case .helioStrap: return HelioConnection.shared.session
+        }
+    }
+
+    /// The chosen device writes would come from while it isn't connected.
+    static func lastActiveDeviceID() -> String? {
+        switch ActiveDeviceChoiceStore.shared.current {
+        case .ringConn: return lastRingID()
+        case .helioStrap: return HelioConnection.savedPeripheralID
+        }
     }
 
     /// The ring writes would come from while none is connected: the one set to auto-reconnect,

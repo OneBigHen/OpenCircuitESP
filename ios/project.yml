@@ -53,6 +53,9 @@ targets:
     dependencies:
       - package: OpenCircuitKit
         product: OpenCircuitKit
+      # Zepp OS protocol core for the Amazfit Helio Strap (#215 phase 3). Pure Swift + CommonCrypto.
+      - package: OpenCircuitKit
+        product: ZeppKit
       # liveline-swift charts (live vitals line + hero sparklines). See the `packages:` note above.
       - package: Liveline
         product: Liveline
@@ -189,6 +192,9 @@ targets:
     platform: iOS
     sources:
       - path: OpenCircuitTests
+      # The simulated Helio Strap, shared with ZeppKitTests (#215). Compiled in from its one file so
+      # ZeppKit's symbols resolve against the host app's single copy (no second static link).
+      - path: OpenCircuitKit/Sources/ZeppKitTesting/FakeZeppDevice.swift
     dependencies:
       - target: OpenCircuit
     settings:
