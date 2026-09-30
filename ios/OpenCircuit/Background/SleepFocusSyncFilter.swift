@@ -88,6 +88,13 @@ private enum SleepFocusSyncRunner {
             // non-destructive builder and retry on a later trigger if protected data is unavailable.
             let container = try OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()
             let store = LocalStore(container.mainContext)
+            // #215: this drains the RING. With the Helio Strap chosen the ring's scanner is never
+            // constructed; the strap's background sync is Phase 4.
+            guard ActiveDeviceChoiceStore.persisted() == .ringConn else {
+                observability.recordSyncOutcome(kind: .sleepFocus, success: false,
+                                                detail: "helio strap active: background sync not in this build")
+                return
+            }
             let service = RingBackgroundSyncService(store: store, health: HealthKitWriter())
 
             // Sleep Focus ending is a short system wake, so use the same bounded, no-live-poll mode
