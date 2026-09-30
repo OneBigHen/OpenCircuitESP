@@ -365,6 +365,31 @@ final class HelioFetchPlanTests: XCTestCase {
                        previous, "a re-delivered older round never moves it back")
     }
 
+    func testNotBeforeBoundsEveryTypeIncludingTheReFetchWindows() {
+        // Decision 28: the strap became the owner six hours ago.
+        let owned = now.addingTimeInterval(-6 * 3600)
+        let plan = HelioFetchPlan.plan(cursors: [:], now: now, notBefore: owned)
+        for (type, start) in plan {
+            XCTAssertEqual(start, HelioFetchPlan.floorToMinute(owned), "\(type): never before the ownership start")
+        }
+        // The temperature re-fetch rewinds activity and sleep sessions; the bound still holds.
+        let temperature = now.addingTimeInterval(-3 * 3600)
+        let rewound = HelioFetchPlan.plan(cursors: [.activity: now.addingTimeInterval(-60), .temperature: temperature,
+                                                    .sleepSession: now.addingTimeInterval(-60)],
+                                          now: now, notBefore: owned)
+        XCTAssertEqual(since(rewound, .activity), HelioFetchPlan.floorToMinute(temperature))
+        XCTAssertEqual(since(rewound, .sleepSession), HelioFetchPlan.floorToMinute(owned),
+                       "temperature − 24 h would reach into the ring's time")
+        // A watermark after the bound is untouched; a strap-only install (distantPast) is unbounded.
+        XCTAssertEqual(since(rewound, .temperature), HelioFetchPlan.floorToMinute(temperature))
+        let strapOnly = HelioFetchPlan.plan(cursors: [:], now: now, notBefore: .distantPast)
+        XCTAssertEqual(since(strapOnly, .activity), nowMinute.addingTimeInterval(-7 * 86_400))
+        XCTAssertEqual(strapOnly.map(\.since), HelioFetchPlan.plan(cursors: [:], now: now).map(\.since))
+        // A bound in the future (clock oddity) is capped at now.
+        let future = HelioFetchPlan.plan(cursors: [:], now: now, notBefore: now.addingTimeInterval(3600))
+        XCTAssertEqual(since(future, .spo2), nowMinute)
+    }
+
     func testTheTemperatureWatermarkWaitsForTheNight() {
         let proposed = nowMinute
         // A sync at 03:00-ish: the night isn't recorded, the last known night ended two days ago.
