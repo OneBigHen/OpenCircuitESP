@@ -126,6 +126,21 @@ final class TodayTilesTests: XCTestCase {
         XCTAssertEqual(t.trend?.direction, .above)
     }
 
+    /// Review #220 F2. The detail screen said resting HR was "the day's lowest 5-minute average";
+    /// on a day of spot reads 10 minutes apart (the auto-measure cadence) no 5-minute window holds
+    /// two readings, so the value is the single lowest READING. The copy now says exactly that.
+    func testTheRestingHRCopyDescribesTheSparseReadingFallback() {
+        let bpms = [64, 61, 48, 63, 62, 60]
+        let hr = bpms.enumerated().map { i, b in
+            HRSample(bpm: b, start: now.addingTimeInterval(Double(i) * 600),
+                     end: now.addingTimeInterval(Double(i) * 600 + 60))
+        }
+        XCTAssertEqual(RestingHR.dailyValues(hr: hr, calendar: cal).map(\.bpm), [48])
+        let copy = MetricDetailView.what(.restingHR)
+        XCTAssertTrue(copy.contains("lowest reading when readings are sparse"), copy)
+        XCTAssertFalse(copy.contains("5-minute average"), copy)
+    }
+
     func testThirtyDayWindow() {
         let t = tile(.hrv, nights(Array(repeating: 50, count: 30)), window: 30)
         XCTAssertEqual(t.values.count, 30)

@@ -1,11 +1,13 @@
-// DEBUG-ONLY synthetic demo data for screenshots (#216). Compiled out of Release entirely.
+// DEBUG SIMULATOR-ONLY synthetic demo data for screenshots (#216). Compiled out of Release and out
+// of every device build (`#if DEBUG && targetEnvironment(simulator)`).
 //
-// Launch a Debug build with `-OCDemoData YES` (e.g. `xcrun simctl launch booted <bundle> -OCDemoData YES`)
-// and, on a store with no sleep history, this seeds 30 days of SYNTHETIC ring data — sleep
-// summaries, overnight HR/HRV/SpO₂/resp. rate, daytime HR + skin temp, and steps — so the Today tab
-// can be reviewed by screenshot. Every value is generated from smooth formulas below; none of it
-// comes from, or resembles a copy of, any real wearer's data. It refuses to touch a store that
-// already holds sleep history, so it can never mix into real data on a developer's own phone.
+// Launch a Debug simulator build with `-OCDemoData YES` (e.g. `xcrun simctl launch booted <bundle>
+// -OCDemoData YES`) and, on a store holding no row of any type it writes, this seeds 30 days of
+// SYNTHETIC ring data — sleep summaries, overnight HR/HRV/SpO₂/resp. rate, daytime HR + skin temp,
+// and steps — so the Today tab can be reviewed by screenshot. Every value is generated from smooth
+// formulas below; none of it comes from, or resembles a copy of, any real wearer's data. One
+// existing night, sample, daytime temperature, step delta or daily total is enough for it to refuse
+// (`holdsNoSeedableRows`): seeded samples are Health-flushable, so they must never mix into real data.
 
 #if DEBUG && targetEnvironment(simulator)
 import Foundation
