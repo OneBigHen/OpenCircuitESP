@@ -41,8 +41,9 @@ final class HelioConnection: NSObject {
     /// The link's signal strength while the find screen polls it.
     private(set) var rssi: Int?
     /// The last connection ended with the strap refusing auth in a way that looks like another
-    /// phone or app holds it. No automatic reconnect follows (no retry loop, decision 7); the next
-    /// explicit connect clears it.
+    /// phone or app holds it. Nothing retries inside that connection or on a timer (no retry loop,
+    /// decision 7). The next connect clears it: "Try again", or the one `reconnectKnown()` every
+    /// foreground activation makes, so a busy strap costs at most one re-auth per foreground.
     private(set) var endedBusy = false
 
     @ObservationIgnored let keyStore: any HelioKeyStoring
