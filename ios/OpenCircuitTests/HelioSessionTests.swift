@@ -805,6 +805,8 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
     private(set) var transport: FakeStrapTransport?
     private(set) var connects = 0
     private(set) var disconnects = 0
+    /// Flushes `HelioConnection`'s own post-sync hook would run: syncs no background run owns.
+    private(set) var hookFlushes = 0
 
     init(device: FakeZeppDevice, keyStore: MemoryKeyStore, store: LocalStore?, clock: @escaping () -> Date) {
         self.device = device
@@ -825,6 +827,9 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
         transport.silent = silent
         let session = HelioSession(transport: transport, identityID: strapID, key: keyStore.load(), keyStore: keyStore,
                                    sink: store.map { HelioStoreSink(store: $0) }, findState: findState,
+                                   onSyncFinished: { [weak self] result, _ in
+                                       if !result.endedInBackgroundRun { self?.hookFlushes += 1 }
+                                   },
                                    clock: clock, autoTick: false)
         session.backgroundRunOwnsSyncs = backgroundRunActive
         transport.session = session
@@ -899,6 +904,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
     /// The service over `link`. `pause` moves the simulated strap along (default: deliver everything
     /// queued, one second passes); the Health pass is recorded instead of written.
     private func service(_ link: FakeBackgroundLink, store: LocalStore, flushes: @escaping (FlushCall) -> Void = { _ in },
+                         appIsActive: Bool = false,
                          pause: (@MainActor () -> Void)? = nil) -> HelioBackgroundSyncService {
         HelioBackgroundSyncService(
             link: link, keyStore: link.keyStore, observability: ObservabilityStore(defaults),
@@ -917,7 +923,8 @@ final class HelioBackgroundSyncTests: XCTestCase {
                 link.session?.tick(now: self.clock)
                 await Task.yield()
             },
-            grace: { link.transport?.drain() })
+            grace: { link.transport?.drain() },
+            appIsActive: { appIsActive })
     }
 
     private func lastRecord() -> TaskRecord? { ObservabilityStore(defaults).records().last }
@@ -1130,6 +1137,37 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(flushes.count, 1, "what was committed still reaches Health inside the reserve")
         XCTAssertEqual(flushes.first?.rowsAtFlush, try rows(store).count)
         XCTAssertTrue(lastRecord()?.detail?.hasPrefix("helio strap: out of time") == true)
+    }
+
+    func testRunningOutOfBudgetWithTheAppInFrontHandsTheSyncToTheApp() async throws {
+        // Review-225 S1: the person opens the app during a background run (the morning Sleep Focus
+        // wake). The budget runs out mid-sync; the link and the sync are left to the app.
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let run = await service(link, store: store, flushes: { flushes.append($0) }, appIsActive: true,
+                                pause: { link.transport?.drainSteps(2) })
+            .run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: true)
+        XCTAssertEqual(run.ending, .handedToApp)
+        XCTAssertFalse(run.success)
+        XCTAssertEqual(link.disconnects, 0, "the open app keeps its link")
+        XCTAssertTrue(flushes.isEmpty, "the run doesn't flush a sync it handed over")
+        XCTAssertTrue(lastRecord()?.detail?.hasPrefix("helio strap: handed to the app") == true)
+        let session = try XCTUnwrap(link.session)
+        XCTAssertTrue(session.syncing, "the sync is still running")
+        XCTAssertFalse(session.backgroundRunOwnsSyncs)
+
+        // The sync finishes in the app, and the connection's own hook flushes it exactly once.
+        link.transport?.drain()
+        for _ in 0..<200 where link.hookFlushes == 0 { await Task.yield() }
+        XCTAssertEqual(session.syncsFinished, 1)
+        XCTAssertEqual(session.lastSyncResult?.interrupted, false)
+        XCTAssertEqual(session.lastSyncResult?.endedInBackgroundRun, false)
+        XCTAssertEqual(link.hookFlushes, 1)
+        XCTAssertTrue(flushes.isEmpty)
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+        XCTAssertEqual(device.fetchAcks.count, device.fetchStarts.count)
     }
 
     func testAStrapOutOfRangeKeepsThePendingConnectArmed() async throws {

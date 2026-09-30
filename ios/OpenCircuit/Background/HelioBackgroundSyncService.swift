@@ -1,5 +1,6 @@
 import Foundation
 import OpenCircuitKit
+import UIKit
 import ZeppKit
 
 // The Amazfit Helio Strap's background sync (#215 phase 4, decision 26). The strap's counterpart of
@@ -17,7 +18,8 @@ import ZeppKit
 // expires the task, the open round is acked `03 09`, what was committed stays committed, the link is
 // dropped cleanly (a running find gets its `06` first) and the rest stays on the strap for next time.
 // Only an uninterrupted sync is followed by the Health flush inside the window; an abandoned one
-// flushes only when the budget (not iOS) ended it.
+// flushes only when the budget (not iOS) ended it. If the app is in front when the budget runs out,
+// nothing is torn down: the sync is handed to the app, whose post-sync hook flushes it (review-225 S1).
 //
 // Key states (decision 7): no key, a rejected key, or a strap that was busy end the run before any
 // radio work; a session that turns out keyless, rejected, busy or unsupported ends it quietly. No
@@ -62,6 +64,9 @@ struct HelioBackgroundRun: Equatable {
         case outOfTime
         /// iOS expired the task: abandoned the same way, without the Health flush.
         case expired
+        /// Out of budget (or expired) while the app was in front: the sync was left running for the
+        /// app, whose own post-sync hook flushes and logs it (review-225 S1). Nothing torn down.
+        case handedToApp
     }
 
     var ending: Ending
@@ -77,7 +82,7 @@ struct HelioBackgroundRun: Equatable {
     var endedQuietly: Bool {
         switch ending {
         case .noSavedStrap, .keyNeeded, .keyRejected, .strapBusy, .unsupported: return true
-        case .synced, .outOfTime, .expired: return false
+        case .synced, .outOfTime, .expired, .handedToApp: return false
         }
     }
 
@@ -98,6 +103,7 @@ struct HelioBackgroundRun: Equatable {
         case .unsupported: head = "strap doesn't offer history over Bluetooth"
         case .outOfTime: head = "out of time; open round kept on the strap (03 09), disconnected"
         case .expired: head = "iOS ended the task; open round kept on the strap (03 09), disconnected"
+        case .handedToApp: head = "handed to the app"
         }
         var parts = ["helio strap: \(head)"]
         if let result {
@@ -140,6 +146,9 @@ struct HelioBackgroundSyncService {
     /// After an abandoned sync: time for the `03 09` (and a find `06`) to leave the radio before the
     /// link goes. It must also run in a task iOS just expired, so the app's version can't be cancelled.
     let grace: @MainActor () async -> Void
+    /// The app is in front (`applicationState == .active`). Then a run that runs out of time hands
+    /// its sync to the app instead of tearing down the link the person is now using (review-225 S1).
+    let appIsActive: @MainActor () -> Bool
 
     /// One bounded run. `nightsFinalized` is the Sleep Focus wake's "the night is over" signal: the
     /// strap's nights then skip the 20-minute quiet margin, as the ring's do on that wake.
@@ -214,6 +223,15 @@ struct HelioBackgroundSyncService {
         if let syncStartedAt, run.ending == .synced { run.syncMS = Self.ms(from: syncStartedAt, to: now()) }
 
         switch run.ending {
+        case .outOfTime where appIsActive(), .expired where appIsActive():
+            // Review-225 S1: the person opened the app while this run was syncing (the Sleep Focus
+            // wake, then a look at last night). Abandoning would disconnect the strap under the open
+            // app, and nothing reconnects it. Hand the sync over instead: the session's own post-sync
+            // hook flushes and logs it once it ends (its result is no longer the run's), so there is
+            // still exactly one flush, and nothing is sent to the strap here.
+            watched?.backgroundRunOwnsSyncs = false
+            run.ending = .handedToApp
+            return record(run, kind: kind)
         case .synced:
             // Leave the link as it is: an idle, authenticated link costs nothing, the next wake skips
             // connect + auth, and the standing reconnect stays armed for the restoration leg. (The
@@ -224,6 +242,8 @@ struct HelioBackgroundSyncService {
             // The teardown's writes get their moment on the radio before anything else runs.
             if abandon() { await grace() }
             if let watched, watched.syncsFinished > baseline, let result = watched.lastSyncResult { run.result = result }
+        case .handedToApp:
+            break
         case .keyNeeded, .keyRejected, .strapBusy, .unsupported, .noSavedStrap:
             // Decision 7: end here, drop the link and leave it down; the next explicit connect retries.
             link.disconnectForBackground()
@@ -282,6 +302,7 @@ extension HelioBackgroundSyncService {
                 await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
                     DispatchQueue.main.asyncAfter(deadline: .now() + teardownGrace) { done.resume() }
                 }
-            })
+            },
+            appIsActive: { UIApplication.shared.applicationState == .active })
     }
 }
