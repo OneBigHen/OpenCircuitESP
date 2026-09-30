@@ -69,6 +69,13 @@ public struct DeviceOwnershipLog: Codable, Equatable, Sendable {
         owner(at: t) == Family(timeline: timeline)
     }
 
+    /// The start of the ownership stretch that contains `t`: the latest entry's `since` at or before
+    /// `t`, or `.distantPast` before the first entry. Decision 28b clamps a step row to it, so the row
+    /// lies wholly in its device's time (with an empty log: `.distantPast`, no clamp).
+    public func ownershipStart(at t: Date) -> Date {
+        entries.last(where: { $0.since <= t })?.since ?? .distantPast
+    }
+
     /// A night belongs to the owner at the midpoint of its in-bed window.
     public func owner(ofNightFrom inBedStart: Date, to inBedEnd: Date) -> Family {
         owner(at: Self.midpoint(inBedStart, inBedEnd))

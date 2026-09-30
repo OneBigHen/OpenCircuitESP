@@ -531,4 +531,56 @@ final class DeviceOwnershipAppTests: XCTestCase {
         XCTAssertTrue(DeviceOwnershipStore.persisted(defaults).isEmpty, "a ring-only install records nothing")
         XCTAssertFalse(neverHadRingAsked, "and doesn't even look at the store")
     }
+
+    // MARK: Review-224b B-1 / decision 28b: step rows lie wholly in their device's time
+
+    /// From the review's probe: back to the ring at 08:05. The ring's first reading at 08:07 credits
+    /// its 08:00 bucket (120 steps). The row is clamped to 08:05, delta kept: wholly ring time, named
+    /// the ring, given distance, and clear of the strap's 08:00–08:04 minutes.
+    func testARingBucketSpanningASwitchBackIsStoredWhollyInRingTime() throws {
+        let switchBack = at(8 + 5.0 / 60)
+        let log = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: at(-2)), .init(family: .ringConn, since: switchBack)])
+        ownership.install(log)
+        let store = try makeStore()
+        let strapMinutes = (0..<5).map { m -> QuantitySample in
+            let t = at(8 + Double(m) / 60)
+            return QuantitySample(kind: .steps, start: t, end: t.addingTimeInterval(60), value: 10)
+        }
+        XCTAssertEqual(try store.ingestHelioStepMinutes(strapMinutes, device: strapTimeline, now: oNow), 5)
+        try store.addDailySteps(120, day: at(8 + 7.0 / 60), windowStart: at(8))
+
+        let rows = try store.pendingStepSamples()
+        let ringRow = try XCTUnwrap(rows.first { $0.delta == 120 })
+        let strapRows = rows.filter { $0.delta == 10 }
+        XCTAssertEqual(ringRow.start, switchBack, "clamped to the ring's ownership start")
+        XCTAssertEqual(ringRow.end, at(8 + 7.0 / 60))
+        XCTAssertEqual(strapRows.count, 5)
+        XCTAssertTrue(strapRows.allSatisfy { $0.end <= ringRow.start }, "no overlap with the strap's minutes")
+        XCTAssertEqual(try store.todaySteps(day: at(8)), 170, "the delta is kept")
+
+        // Named the ring (untagged rows name the owner at their start) and given distance.
+        XCTAssertEqual(log.owner(at: ringRow.start), .ringConn)
+        let active = ActiveWearable(session: { nil }, fallbackDeviceID: { nil }, identityStore: WearableIdentityStore(defaults),
+                                    ringFallbackID: { self.ringID }, strapFallbackID: { self.strapID }, ownership: { log })
+        active.recordIdentity(ringIdentity())
+        XCTAssertEqual(HealthDeviceAttribution.fields(for: active.identityForHealthWrite(at: ringRow.start), origin: .device)?.localIdentifier,
+                       SyncDeviceID.ringConn.rawValue)
+        XCTAssertEqual(HealthKitWriter.distanceRows(rows, ownership: log).map(\.delta), [120],
+                       "distance from the ring's row only")
+    }
+
+    /// The mirror (28b for the strap): the minute a ring→strap switch lands in counts for the strap,
+    /// clamped to the switch; a minute that ends after a switch away is the ring's, not the strap's.
+    func testAStrapMinuteSpanningASwitchIsClampedToTheStrapsTime() throws {
+        let toStrap = at(-2 + 30.0 / 3600), backToRing = at(-1 + 30.0 / 3600)
+        ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: toStrap), .init(family: .ringConn, since: backToRing)]))
+        let store = try makeStore()
+        let minutes = [at(-2), at(-2 + 1.0 / 60), at(-1)].map {
+            QuantitySample(kind: .steps, start: $0, end: $0.addingTimeInterval(60), value: 10)
+        }
+        XCTAssertEqual(try store.ingestHelioStepMinutes(minutes, device: strapTimeline, now: oNow), 2)
+        let rows = try store.pendingStepSamples().sorted { $0.start < $1.start }
+        XCTAssertEqual(rows.map(\.start), [toStrap, at(-2 + 1.0 / 60)], "the spanning minute starts at the switch")
+        XCTAssertEqual(rows.map(\.delta), [10, 10])
+    }
 }

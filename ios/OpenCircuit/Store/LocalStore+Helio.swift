@@ -70,16 +70,20 @@ extension LocalStore {
         let last = helioCursor(Self.helioStepCursorName, device: device) ?? .distantPast
         let ceiling = now.addingTimeInterval(86_400)
         let log = Self.ownershipLog()
-        // Decision 28: only minutes `device` owned count toward the day and Apple Health.
+        // Decision 28 / 28b, the ring's rule mirrored: a minute counts if `device` owns its last
+        // instant, and its row is clamped to that ownership's start, so it lies wholly in the strap's
+        // time (the minute a switch lands in goes to the device switched TO).
+        func lastInstant(_ minute: QuantitySample) -> Date { max(minute.start, minute.end.addingTimeInterval(-1)) }
         let fresh = minutes
             .filter { $0.kind == .steps && $0.value > 0 && $0.start > last && $0.start <= ceiling }
-            .filter { log.owns(device, at: $0.start) }
+            .filter { log.owns(device, at: lastInstant($0)) }
             .sorted { $0.start < $1.start }
         guard let newest = fresh.last?.start else { return 0 }
         var dailies: [Date: StoredDaily] = [:]
         for minute in fresh {
             let delta = Int(minute.value)
-            let day = Calendar.current.startOfDay(for: minute.start)
+            let start = max(minute.start, log.ownershipStart(at: lastInstant(minute)))
+            let day = Calendar.current.startOfDay(for: start)
             if dailies[day] == nil {
                 let descriptor = FetchDescriptor<StoredDaily>(predicate: #Predicate { $0.day == day })
                 if let existing = try context.fetch(descriptor).first {
@@ -92,7 +96,7 @@ extension LocalStore {
             }
             dailies[day]?.steps += delta
             dailies[day]?.updatedAt = now
-            context.insert(StoredStepSample(start: minute.start, end: minute.end, delta: delta))
+            context.insert(StoredStepSample(start: start, end: minute.end, delta: delta))
         }
         stageHelioCursor(Self.helioStepCursorName, to: newest, device: device)
         do { try context.save() } catch { context.rollback(); throw error }

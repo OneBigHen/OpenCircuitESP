@@ -47,6 +47,16 @@ final class DeviceOwnershipTests: XCTestCase {
         XCTAssertEqual(log.entries.count, 1)
     }
 
+    func testTheOwnershipStartIsTheStretchContainingT() {
+        XCTAssertEqual(DeviceOwnershipLog().ownershipStart(at: t0), .distantPast, "an empty log clamps nothing")
+        let log = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: t0), .init(family: .ringConn, since: t0 + 3600)])
+        XCTAssertEqual(log.ownershipStart(at: t0 - 1), .distantPast)
+        XCTAssertEqual(log.ownershipStart(at: t0), t0)
+        XCTAssertEqual(log.ownershipStart(at: t0 + 3599), t0)
+        XCTAssertEqual(log.ownershipStart(at: t0 + 3600), t0 + 3600)
+        XCTAssertEqual(log.ownershipStart(at: .distantFuture), t0 + 3600)
+    }
+
     func testAClockThatMovedBackIsClampedToTheLastEntry() {
         var log = DeviceOwnershipLog()
         log.record(.zeppOS, since: t0)

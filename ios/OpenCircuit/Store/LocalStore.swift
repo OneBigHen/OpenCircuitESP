@@ -3172,7 +3172,8 @@ struct LocalStore {
         guard delta > 0 else { return }
         // Decision 28 (defensive): the ring's steps for time the strap owned stay out of the day's
         // totals and Apple Health. No-op for a ring-only install.
-        guard Self.ownershipLog().owns(.ringConn, at: day) else { return }
+        let ownership = Self.ownershipLog()
+        guard ownership.owns(.ringConn, at: day) else { return }
         let dayStart = Calendar.current.startOfDay(for: day)
         let descriptor = FetchDescriptor<StoredDaily>(predicate: #Predicate { $0.day == dayStart })
         if let existing = try? context.fetch(descriptor).first {
@@ -3181,7 +3182,12 @@ struct LocalStore {
         } else {
             context.insert(StoredDaily(day: dayStart, steps: delta))
         }
-        context.insert(StoredStepSample(start: windowStart ?? dayStart, end: day, delta: delta))
+        // Decision 28b (review-224b B-1): the first bucket after a strap→ring switch starts before the
+        // switch. Clamp the row to the ring's ownership start, delta kept, so it lies wholly in ring
+        // time: named the ring, given distance, not overlapping the strap's minutes. Empty log: no
+        // clamp (`.distantPast`).
+        let start = max(windowStart ?? dayStart, ownership.ownershipStart(at: day))
+        context.insert(StoredStepSample(start: start, end: day, delta: delta))
         try context.save()
     }
 

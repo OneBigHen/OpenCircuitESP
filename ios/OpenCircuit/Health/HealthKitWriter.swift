@@ -573,8 +573,7 @@ final class HealthKitWriter {
             var gpsCommits: [(reduction: Double, day: Date)] = []
             // Decision 28 / review-224 N1: the distance estimate is the RING's per-step constant, so it
             // is derived only from step rows the ring owned (every row, for a ring-only install).
-            let ownership = LocalStore.ownershipLog()
-            let ringRows = ownership.isEmpty ? pending : pending.filter { ownership.owner(at: $0.start) == .ringConn }
+            let ringRows = Self.distanceRows(pending, ownership: LocalStore.ownershipLog())
             let byDay = Dictionary(grouping: ringRows) { Calendar.current.startOfDay(for: $0.end) }
             for (day, rows) in byDay {
                 let dayDelta = rows.reduce(0) { $0 + $1.delta }
@@ -1943,6 +1942,12 @@ final class HealthKitWriter {
             return wearableDevice(ownerAt: Date())
         }
         return wearableDevice(ownerAt: DeviceOwnershipLog.midpoint(start, end))
+    }
+
+    /// The step rows the ring's per-step distance estimate is derived from: those the ring owned at
+    /// their start (decision 28, review-224 N1). Every row for a ring-only install.
+    static func distanceRows(_ rows: [StoredStepSample], ownership: DeviceOwnershipLog) -> [StoredStepSample] {
+        ownership.isEmpty ? rows : rows.filter { ownership.owner(at: $0.start) == .ringConn }
     }
 
     /// Whether the ring owned the midpoint of these segments' span (always true for an empty log).
