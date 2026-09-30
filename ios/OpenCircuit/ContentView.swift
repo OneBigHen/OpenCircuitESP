@@ -1209,14 +1209,15 @@ struct ContentView: View {
     private func evaluateReminders(includeSedentary: Bool) {
         // The sedentary and wear reminders read the ring's own live signals (its descriptor stream,
         // its saved-ring list, its last-frame stamp), so with the Helio Strap chosen they would judge
-        // a device that isn't worn. Ring only (#215).
-        guard ringActive else { return }
+        // a device that isn't worn: ring only (#215). The bedtime reminder is the wearer's own
+        // schedule and runs for either device (review-224 S4).
         let d = UserDefaults.standard
         SleepScheduleDefaults.register(d)
         let bedMinutes  = d.integer(forKey: SleepScheduleDefaults.bedMinutes)
         let wakeMinutes = d.integer(forKey: SleepScheduleDefaults.wakeMinutes)
         let sleepEnabled = d.bool(forKey: SleepScheduleDefaults.enabled)
-        let s = session
+        let s = session                     // nil with the strap chosen
+        let ringReminders = ringActive
         // The wear reminder needs the store for its worn-evidence input (newest HR device
         // timestamp). Built here on the main actor, like `evaluateHealthAlerts` does.
         let store = LocalStore(modelContext)
@@ -1227,6 +1228,7 @@ struct ContentView: View {
                 sleepWakeMinutes: wakeMinutes,
                 sleepEnabled: sleepEnabled,
                 includeSedentary: includeSedentary,
+                ringReminders: ringReminders,
                 store: store)
         }
     }

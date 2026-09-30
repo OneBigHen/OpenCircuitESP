@@ -632,13 +632,47 @@ struct HealthNotificationCenter {
     /// just loses that suppression; every caller that has a store should pass it.
     /// (Bound to `localStore` internally: the bare name `store` is this type's own
     /// `HealthNotificationStore` de-dupe ledger, used further down — same convention as `evaluate`.)
+    ///
+    /// `ringReminders` (#215, review-224 S4): the sedentary and wear rules judge the RING's own
+    /// signals (its step deltas, frames, charger state, saved-ring list), so with the Helio Strap
+    /// chosen they would judge a device that isn't worn. `false` skips exactly those two; the
+    /// bedtime reminder is the user's own schedule and runs for every device.
     func evaluateReminders(session: RingSession?,
                            sleepBedMinutes: Int, sleepWakeMinutes: Int, sleepEnabled: Bool,
                            includeSedentary: Bool = true,
+                           ringReminders: Bool = true,
                            store localStore: LocalStore? = nil,
                            now: Date = Date()) async {
-        ReminderDefaults.register()
-        let d = UserDefaults.standard
+        let candidates = Self.reminderCandidates(session: session, sleepBedMinutes: sleepBedMinutes,
+                                                 sleepWakeMinutes: sleepWakeMinutes, sleepEnabled: sleepEnabled,
+                                                 includeSedentary: includeSedentary, ringReminders: ringReminders,
+                                                 store: localStore, now: now)
+        guard !candidates.isEmpty else { return }
+        let quiet = HealthAlertDefaults.quietHours()
+        let lastFired = store.lastFired()
+        // #137: the bedtime reminder is a user-SCHEDULED wind-down self-reminder, not a body-vital
+        // alert the user is trying to mute overnight. Its only firing window is
+        // [bed − minutesBefore, bed), which for a typical post-22:00 bedtime falls entirely inside the
+        // default 22:00–07:00 quiet window — so routing it through the shared quiet gate would suppress
+        // it every single night. Split it out: bedtime bypasses the quiet-hours mute but STILL gets the
+        // anti-spam backoff (via `lastFired`), so it fires at most once per night. Every OTHER reminder
+        // (wear / sedentary) stays under the quiet gate unchanged — no regression to the overnight mute.
+        let bedtime = candidates.filter { $0 == .bedtimeReminder }
+        let others  = candidates.filter { $0 != .bedtimeReminder }
+        var fire = gate.filter(others, now: now, lastFired: lastFired, quietHours: quiet)
+        fire += gate.filter(bedtime, now: now, lastFired: lastFired, quietHours: QuietHours(enabled: false))
+        guard !fire.isEmpty, await ensureAuthorized() else { return }
+        for n in fire { await post(n, hit: nil) }
+        store.markFired(fire, at: now)
+    }
+
+    /// The reminders due now, before the quiet-hours / backoff gate (see `evaluateReminders`).
+    static func reminderCandidates(session: RingSession?,
+                                   sleepBedMinutes: Int, sleepWakeMinutes: Int, sleepEnabled: Bool,
+                                   includeSedentary: Bool, ringReminders: Bool,
+                                   store localStore: LocalStore?, now: Date,
+                                   defaults d: UserDefaults = .standard) -> [HealthNotification] {
+        ReminderDefaults.register(d)
         var candidates: [HealthNotification] = []
 
         // Newest moment ANY frame arrived, shared by the sedentary and wear rules. The DURABLE
@@ -652,7 +686,7 @@ struct HealthNotificationCenter {
 
         // Sedentary / move reminder — only when `includeSedentary` (post-sync), so it never fires on
         // a stale pre-sync `lastActivityAt` reading (#145).
-        if includeSedentary, d.bool(forKey: ReminderDefaults.sedentaryEnabled) {
+        if ringReminders, includeSedentary, d.bool(forKey: ReminderDefaults.sedentaryEnabled) {
             let interval = TimeInterval(d.integer(forKey: ReminderDefaults.sedentaryIntervalMin)) * 60
             let r = SedentaryReminder(interval: max(interval, 10 * 60))
             let lastActivityEpoch = d.double(forKey: ReminderDefaults.lastActivityAt)
@@ -676,7 +710,7 @@ struct HealthNotificationCenter {
         }
 
         // Wear reminder
-        if d.bool(forKey: ReminderDefaults.wearEnabled) {
+        if ringReminders, d.bool(forKey: ReminderDefaults.wearEnabled) {
             let r = WearReminder()
             // "ever connected" = a ring identifier has been persisted by RingScanner. Tolerant of
             // both the multi-ring list and the pre-migration single key (a background launch may run
@@ -732,23 +766,7 @@ struct HealthNotificationCenter {
             }
         }
 
-        guard !candidates.isEmpty else { return }
-        let quiet = HealthAlertDefaults.quietHours()
-        let lastFired = store.lastFired()
-        // #137: the bedtime reminder is a user-SCHEDULED wind-down self-reminder, not a body-vital
-        // alert the user is trying to mute overnight. Its only firing window is
-        // [bed − minutesBefore, bed), which for a typical post-22:00 bedtime falls entirely inside the
-        // default 22:00–07:00 quiet window — so routing it through the shared quiet gate would suppress
-        // it every single night. Split it out: bedtime bypasses the quiet-hours mute but STILL gets the
-        // anti-spam backoff (via `lastFired`), so it fires at most once per night. Every OTHER reminder
-        // (wear / sedentary) stays under the quiet gate unchanged — no regression to the overnight mute.
-        let bedtime = candidates.filter { $0 == .bedtimeReminder }
-        let others  = candidates.filter { $0 != .bedtimeReminder }
-        var fire = gate.filter(others, now: now, lastFired: lastFired, quietHours: quiet)
-        fire += gate.filter(bedtime, now: now, lastFired: lastFired, quietHours: QuietHours(enabled: false))
-        guard !fire.isEmpty, await ensureAuthorized() else { return }
-        for n in fire { await post(n, hit: nil) }
-        store.markFired(fire, at: now)
+        return candidates
     }
 
     // MARK: - Charging complete (#86)
