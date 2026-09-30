@@ -62,7 +62,7 @@ rules are in `ZeppKit/HelioSyncPolicy.swift`, tested by `HelioSyncPolicyTests`.
 | HRV (`0x49`) | `.hrvSDNN` (local only) | **no** (`HelioHealthPolicy.writesHRV = false`): the statistic is unverified |
 | Sleep (`0x48`) | the strap's own stages → Sleep summary + hypnogram; no invented in-bed span | yes, through `mirrorSettledNight`; a manually edited night is never overwritten. No `SleepStaging` fallback yet (DECISION-GAP, see `HelioSleepSelection`) |
 | Stress (`0x13`), PAI (`0x0d`) | shown in the app only | no Health type |
-| Walking + running distance | — | **no**: the ring's distance is its own per-step estimate, so it is derived only from step rows the RING owned (decision 28). The strap sends no distance history and its steps get none |
+| Walking + running distance | — | **no**: the ring's distance is its own per-step estimate, so it is derived only from step rows the RING owned (decision 28). The strap sends no distance history and its steps get none. The ring's day distance is one sample from midnight to its last row, named the ring, so on a day with a switch Health's hourly chart spreads it across the strap's hours too (review-224c N-c; the day total is right) |
 
 #### Who owns which time (decision 28)
 
