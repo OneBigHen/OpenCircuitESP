@@ -154,7 +154,7 @@ struct WellnessBalanceCardView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(tierLabel(r.tier))
                             .font(.title3.weight(.semibold))
-                            .foregroundStyle(r.tier == .needsImprovement ? Theme.rust : Theme.goldDeep)
+                            .foregroundStyle(.primary)
                         ForEach(WellnessBalance.Result.Factor.allCases, id: \.self) { factor in
                             if let v = r.factors[factor] {
                                 ReadinessFactorBar(label: factorLabel(factor), value: v,

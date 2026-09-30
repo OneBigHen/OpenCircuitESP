@@ -50,7 +50,7 @@ struct TodaySynthesisHeader: View {
                 .foregroundStyle(.secondary)
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 KeylineGlyph(.sparkles, size: 18, relativeTo: .title3)
-                    .foregroundStyle(Theme.gold)
+                    .foregroundStyle(Theme.accent)
                     .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 3 }
                 Text(sentence)
                     .font(.system(.title3, design: .rounded).weight(.medium))

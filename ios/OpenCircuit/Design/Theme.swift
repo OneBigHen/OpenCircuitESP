@@ -21,35 +21,11 @@ enum Theme {
         })
     }
 
-    /// 0xRRGGBB → the 0…1 triple `adaptive` takes.
-    private static func hex(_ v: UInt32) -> (Double, Double, Double) {
-        (Double((v >> 16) & 0xFF) / 255, Double((v >> 8) & 0xFF) / 255, Double(v & 0xFF) / 255)
-    }
-
     // MARK: Brand accent (tab tint, primary buttons, focus)
 
-    /// App accent — antique gold (#216 palette pass; the warm gold family NOOP's display language
-    /// uses, re-derived here as OpenCircuit tokens). Deliberately NOT the bright #E8B84B: controls
-    /// tint with this, and `.borderedProminent` draws WHITE labels on it, so each scheme's value is
-    /// picked to keep the contrast the previous indigo accent had —
-    ///   light #8F6212: white label 5.35:1, as text on white 5.35:1, on cream 4.74:1 (was 5.75 / 5.75)
-    ///   dark  #C28E26: white label 2.92:1, as text on the dark card 5.68:1       (was 2.98 / 5.71)
-    static let accent = adaptive(hex(0x8F6212), hex(0xC28E26))
-
-    // MARK: Gold family (rings, highlights — graphics, not control tints)
-
-    /// The readiness ring fill and data highlights. Graphics need 3:1: light #B88421 on white 3.3:1,
-    /// dark #E8B84B on the charcoal card 9.0:1.
-    static let gold       = adaptive(hex(0xB88421), hex(0xE8B84B))
-    /// The bright end of the ring's gradient.
-    static let goldBright = adaptive(hex(0xE0B44C), hex(0xFCEBA8))
-    /// The deep end of the ring's gradient; also gold used as TEXT (4.5:1+ on both card surfaces).
-    static let goldDeep   = adaptive(hex(0x8F6212), hex(0xD9A23E))
-    /// Warm amber-rust for a "needs improvement" readiness — a graphic, never the only signal (the
-    /// tier is always spelled out beside it).
-    static let rust       = adaptive(hex(0xB2541C), hex(0xE0763F))
-    /// Unfilled ring / sparkline-baseline track.
-    static let ringTrack  = adaptive(hex(0xECE7DC), hex(0x302B24))
+    /// App accent — a calm indigo-blue that reads as "health" in both modes (deeper on light for tint
+    /// legibility, brighter on dark).
+    static let accent = adaptive((0.28, 0.34, 0.86), (0.48, 0.55, 1.00))
 
     // MARK: Metric accent palette
     //
@@ -66,15 +42,14 @@ enum Theme {
     static let steps  = adaptive((0.15, 0.58, 0.33), (0.38, 0.82, 0.52))   // steps — green
     static let energy = adaptive((0.83, 0.39, 0.08), (0.99, 0.60, 0.30))   // active energy — orange
     static let stress = adaptive((0.80, 0.23, 0.23), (0.97, 0.46, 0.46))   // stress — red
-    static var readiness: Color { gold }                                    // readiness — gold ring
+    static var readiness: Color { accent }                                  // readiness — brand
 
     // MARK: Surfaces
 
-    /// The page background behind every tab: warm paper in light, warm charcoal in dark (#216).
-    /// Keep `LaunchBackground` in Assets.xcassets on the same two values, or launch flashes.
-    static let pageBackground = adaptive(hex(0xF4F1EA), hex(0x12100D))
-    /// The raised card surface: white on paper in light, a lifted warm charcoal in dark.
-    static let cardBackground = adaptive(hex(0xFFFFFF), hex(0x1E1B17))
+    /// The page background behind every tab (defers to the grouped background so it tracks light/dark).
+    static let pageBackground = Color(uiColor: .systemGroupedBackground)
+    /// The raised card surface.
+    static let cardBackground = Color(uiColor: .secondarySystemGroupedBackground)
 
     // MARK: Metrics
 

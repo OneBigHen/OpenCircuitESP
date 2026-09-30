@@ -1,4 +1,5 @@
-// The readiness ring (#216) — a thick, gold, glanceable dial for the Wellness Balance score.
+// The readiness ring (#216) — a thick, glanceable dial for the Wellness Balance score, in the
+// card's existing tier colours (the same green / teal / orange the score number always used).
 //
 // Pure drawing: it fills to exactly the fraction it's given and says nothing of its own. The card
 // (`WellnessBalanceCardView`) decides the number, the tier and the empty/low-confidence states;
@@ -11,7 +12,7 @@ import OpenCircuitKit
 struct ReadinessRing<Center: View>: View {
     /// 0…1, or nil for the empty state (track only).
     let progress: Double?
-    var tint: Color = Theme.gold
+    var tint: Color = Theme.readiness
     /// Dashed track + muted fill: the score is real but rests on fewer inputs than usual.
     var lowConfidence = false
     var lineWidth: CGFloat = 16
@@ -22,7 +23,7 @@ struct ReadinessRing<Center: View>: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(Theme.ringTrack,
+                .stroke(Color(uiColor: .systemFill),
                         style: StrokeStyle(lineWidth: lineWidth, lineCap: .round,
                                            dash: lowConfidence ? [2, lineWidth * 0.55] : []))
             if let progress, progress > 0 {
@@ -50,7 +51,7 @@ struct ReadinessFactorBar: View {
     let label: String
     /// 0…1 as the analytics computed it.
     let value: Double
-    var tint: Color = Theme.gold
+    var tint: Color = Theme.readiness
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -62,7 +63,7 @@ struct ReadinessFactorBar: View {
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Theme.ringTrack)
+                    Capsule().fill(Color(uiColor: .systemFill))
                     Capsule().fill(tint)
                         .frame(width: max(geo.size.width * min(max(value, 0), 1), 4))
                 }
@@ -75,11 +76,13 @@ struct ReadinessFactorBar: View {
 }
 
 extension WellnessBalance.Tier {
-    /// The ring colour for a tier. Never the only carrier of the tier: the label is always shown.
+    /// The tier colour the readiness card has always used for its score (#97). Never the only
+    /// carrier of the tier: the label is always shown beside it.
     var ringColor: Color {
         switch self {
-        case .excellent, .good: return Theme.gold
-        case .needsImprovement: return Theme.rust
+        case .excellent:        return .green
+        case .good:             return .teal
+        case .needsImprovement: return .orange
         }
     }
 }

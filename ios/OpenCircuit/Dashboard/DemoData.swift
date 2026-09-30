@@ -10,6 +10,7 @@
 #if DEBUG
 import Foundation
 import SwiftData
+import UIKit
 import OpenCircuitKit
 
 enum DemoData {
@@ -17,9 +18,14 @@ enum DemoData {
 
     static var isRequested: Bool { UserDefaults.standard.bool(forKey: launchArgumentKey) }
 
+    /// `-OCDemoScrollY <points>`: after launch, scroll the Today list down that far, so a
+    /// screenshot run can capture below the fold without UI automation.
+    static let scrollKey = "OCDemoScrollY"
+
     @MainActor
     static func seedIfRequested(_ context: ModelContext, now: Date = Date()) {
         guard isRequested else { return }
+        scheduleScrollIfRequested()
         let existing = (try? context.fetchCount(FetchDescriptor<StoredSleepSummary>())) ?? 0
         guard existing == 0 else { return }
 
@@ -91,6 +97,28 @@ enum DemoData {
             context.insert(StoredDaily(day: wakeDay, steps: daySteps, updatedAt: dayEnd))
         }
         try? context.save()
+    }
+
+    @MainActor
+    private static func scheduleScrollIfRequested() {
+        let y = UserDefaults.standard.double(forKey: scrollKey)
+        guard y > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            let windows = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+            guard let list = windows.lazy.compactMap({ firstVerticalScrollView(in: $0) }).first else { return }
+            let maxY = max(list.contentSize.height - list.bounds.height + list.adjustedContentInset.bottom, 0)
+            list.setContentOffset(CGPoint(x: 0, y: min(y, maxY) - list.adjustedContentInset.top), animated: false)
+        }
+    }
+
+    /// The first on-screen scroll view taller in content than in frame (the Today `List`).
+    @MainActor
+    private static func firstVerticalScrollView(in view: UIView) -> UIScrollView? {
+        if let s = view as? UIScrollView, s.window != nil, !s.isHidden,
+           s.contentSize.height > s.bounds.height + 1, s.bounds.width > 200 { return s }
+        for sub in view.subviews { if let s = firstVerticalScrollView(in: sub) { return s } }
+        return nil
     }
 }
 #endif
