@@ -13,8 +13,9 @@ keys and made-up readings; none is a capture or a fixture from another project.
 
 Confidence legend (same as `PROTOCOL.md`): 🟢 confirmed on our own strap · 🟡 probable
 (two sources agree, or one source that is known to work on the Helio) · 🔴 guess / single
-source / inference. **Nothing here is 🟢 yet**: nothing has been checked on Juan's strap.
-§10 is the checklist that promotes claims to 🟢.
+source / inference. §10 is the checklist that promotes claims to 🟢. §10.1 records the first
+run on Juan's strap (2026-09-30); the claims it confirmed are 🟢 with the source
+`HW:2026-09-30 (hw 0.132.27.2)`, and everything else keeps its 🟡/🔴 tag.
 
 ## Source key
 
@@ -39,6 +40,7 @@ Citations use these aliases. Line numbers are 1-based at the pinned commit.
 | `HC` | HelioCore (no licence; facts only), `GooseSwift/GooseSwiftApp.swift` | github `a9eelsh/heliocore@ca2a4fa0cd3a10d926c8705957ef91e7251aaa18` (2026-06-03) |
 | `TE` | tiny-ECDH-c (Unlicense), `ecdh.c` / `ecdh.h` | `kokke/tiny-ECDH-c@a6095d6e1feaa4e77b84cddda8468d8651ca3a32` |
 | `OC-vec` | Vectors computed for this document: tiny-ECDH-c, cross-checked by an independent pure-Python sect163r2 implementation, AES via Python `cryptography` and LibreSSL, CRC via zlib | 2026-09-30 |
+| `HW:2026-09-30 (hw 0.132.27.2)` | Our own HelioVerify run against Juan's Helio Strap: hardware revision 0.132.27.2 (his Zepp account lists firmware 3.3.6.5), macOS CoreBluetooth, every ack `03 09`. Control bytes and lengths only; results in §10.1 | 2026-09-30 |
 
 HelioCore is the only reference known to run on a real Helio Strap from iOS; Gadgetbridge
 covers the whole Zepp OS family and marks the Helio Strap *experimental*
@@ -62,8 +64,11 @@ disagree, §9 says so.
 | Gadgetbridge supports a Bluetooth-Classic transport for some Zepp OS watches. **Ignore it**: iOS is BLE-only, and the Helio uses the BLE path. | 🟡 | `GB/devices/huami/zeppos/ZeppOsCoordinator.java:121-132` |
 
 Firmware seen in the wild on Helio Straps: **3.11.0** and **3.11.0.1** (user reports,
-Gadgetbridge issues #5986 opened 2026-04-08 and #5843 opened 2026-03-06). 🔴 Pin the version
-read from Juan's strap in §10.
+Gadgetbridge issues #5986 opened 2026-04-08 and #5843 opened 2026-03-06). Juan's strap:
+hardware revision **0.132.27.2** (DIS `0x2A27`); his Zepp account lists firmware **3.3.6.5**.
+The strap has **no DIS firmware-revision characteristic** (`0x2A26`), so the firmware version
+has not been read over BLE yet; endpoint `0x0043` (§5.3) is the remaining route. 🟢
+`HW:2026-09-30 (hw 0.132.27.2)` for the hardware revision and the missing `0x2A26`.
 
 ---
 
@@ -76,20 +81,25 @@ which service holds them (that is what HelioCore does, `HC:1101-1106`).
 | UUID | Name here | Props needed | Direction / use | v1? | Tag / source |
 |---|---|---|---|---|---|
 | service `0xFEE0` | Huami main service | — | parent of the chunked and activity characteristics | yes | 🟡 `HS:28`, `BTLE:75` |
-| `…0016` | **chunked-write** | write (HelioCore uses write-without-response) and notify | phone → device message chunks; device's *chunk acks* may arrive here as notifications | **yes** | 🟡 `HS:57`, `SUP:1074-1075,1145-1156`, `HC:607,894-899` |
-| `…0017` | **chunked-read** | notify, write | device → phone message chunks (notify); phone writes its *chunk acks* **to this same characteristic** | **yes** | 🟡 `HS:58`, `BTLE:138`, `SUP:1158-1165` |
-| `…0004` | **activity-control** | write, notify | history-fetch control (§6) | **yes** | 🟡 `HS:44`, `SUP:962,973`, `HC:609,944` |
-| `…0005` | **activity-data** | notify | history-fetch data packets (§6) | **yes** | 🟡 `HS:45`, `SUP:963,1077-1078`, `HC:610` |
-| `0x180D` / `0x2A37` | Heart Rate Measurement | notify | live HR (§7) | **yes** | 🟡 `BTLE:72`, `SUP:1089-1090`, `HC:611` |
-| `0x180A` | Device Information Service | read | firmware / hardware revision strings, PnP ID; a leading `V` on the firmware string is stripped by Gadgetbridge | recommended | 🟡 `BTLE:73,78-105` |
-| `0x2A2B` | Current Time | write | time-set fallback when the time endpoint is absent (§5.1) | fallback | 🟡 `BTLE:180-183` |
-| `0x180F` / `0x2A19` | Battery Level | read/notify | HelioCore records the characteristic if discovered but never reads or subscribes to it; Gadgetbridge does not use it. **Existence on the Helio unconfirmed.** | optional | 🔴 `HC:612,1106,1127` |
+| `…0016` | **chunked-write** | write (HelioCore uses write-without-response) and notify | phone → device message chunks; device's *chunk acks* may arrive here as notifications | **yes** | 🟢 present `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `HS:57`, `SUP:1074-1075,1145-1156`, `HC:607,894-899` |
+| `…0017` | **chunked-read** | notify, write | device → phone message chunks (notify); phone writes its *chunk acks* **to this same characteristic** | **yes** | 🟢 present `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `HS:58`, `BTLE:138`, `SUP:1158-1165` |
+| `…0004` | **activity-control** | write, notify | history-fetch control (§6) | **yes** | 🟢 present and used for every fetch `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `HS:44`, `SUP:962,973`, `HC:609,944` |
+| `…0005` | **activity-data** | notify | history-fetch data packets (§6) | **yes** | 🟢 present and used for every fetch `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `HS:45`, `SUP:963,1077-1078`, `HC:610` |
+| `0x180D` / `0x2A37` | Heart Rate Measurement | notify | live HR (§7) | **yes** | 🟢 present `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `BTLE:72`, `SUP:1089-1090`, `HC:611` |
+| `0x180A` | Device Information Service | read | firmware / hardware revision strings, PnP ID; a leading `V` on the firmware string is stripped by Gadgetbridge. **On the Helio only the hardware revision `0x2A27` is exposed: there is no firmware revision `0x2A26`** | recommended | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` for what the Helio exposes; 🟡 `BTLE:73,78-105` |
+| `0x2A2B` | Current Time | write | time-set fallback when the time endpoint is absent (§5.1) | fallback | 🟢 present `HW:2026-09-30 (hw 0.132.27.2)` (not written); 🟡 `BTLE:180-183` |
+| `0x180F` / `0x2A19` | Battery Level | read/notify | HelioCore records the characteristic if discovered but never reads or subscribes to it; Gadgetbridge does not use it. **Present on the Helio.** | optional | 🟢 present `HW:2026-09-30 (hw 0.132.27.2)`; `HC:612,1106,1127` |
 | `…0001` / `…0002` | raw sensor control / data | — | raw accelerometer stream; not needed | no | 🟡 `HS:37-38` |
 | `…0023` / `…0024` | file transfer v3 | — | not needed | no | 🟡 `HS:63-64` |
 | `00001530-…` service, `…1531`/`…1532` | firmware update | — | **never write** | no | 🟡 `HS:31-34` |
 
 Before sending anything, **enable notifications on `…0017`** (Gadgetbridge does so first,
 `BTLE:138`). Enable notifications on `…0004` and `…0005` before a history fetch (§6).
+
+Of the characteristics HelioVerify looks for, Juan's strap exposed `…0016`, `…0017`, `…0004`,
+`…0005`, `0x2A37`, `0x2A19`, `0x2A2B` and `0x2A27`; only `0x2A26` was missing. 🟢
+`HW:2026-09-30 (hw 0.132.27.2)`. Not recorded in that run: which service each sits under,
+their properties, and the write types `…0016`/`…0004` accept (§10 item 2).
 
 ---
 
@@ -171,8 +181,10 @@ For an encrypted message with plaintext payload `P` of length `L`:
 
 **Receiving**: decrypt the reassembled ciphertext with the same message-key rule, using the
 *incoming* chunk's handle, then keep the first `L` bytes. Gadgetbridge does **not** check the
-device's trailing sequence number or CRC (`DEC:106-126`). 🔴 whether the device's trailer has
-the same `S ‖ C` layout (the padded length strongly suggests it does; §10 item).
+device's trailing sequence number or CRC (`DEC:106-126`). The device's trailer has the same
+`S ‖ C` layout: on the Helio, encrypted replies on `0x000A` and `0x001A` decrypted and the CRC
+in their trailer matched `CRC-32(P ‖ S)`. 🟢 `HW:2026-09-30 (hw 0.132.27.2)`. Still open: whether the device's sequence
+numbers are its own or follow ours (§10 item 5).
 
 The sequence number starts at the value derived during auth (§4.4) and is per connection.
 Gadgetbridge resets it to 0 on reconnect before re-auth overwrites it (`ENC:160-163`).
@@ -207,6 +219,13 @@ Gadgetbridge resets it to 0 on reconnect before re-auth overwrites it (`ENC:160-
 
 (Endpoint numbers coincide numerically with some characteristic short UUIDs, e.g. `0x0016`,
 `0x0017`. They are unrelated namespaces.)
+
+**The Helio Strap's services list** (🟢 `HW:2026-09-30 (hw 0.132.27.2)`): 28 endpoints, `*` = encrypted:
+`0000 0081* 0015 0047 0029 0017* 0028 0043 000a* 0030* 000d 0048 0016 0022 0049 0032 0036*
+001d 0031 0018* 0082 0025 004b 000c* 004d* 0019* 000f 001a*`. Every endpoint in the table
+above is present. Three of them differ from the default column: connection `0x0015`, battery
+`0x0029` and activity-fetch `0x004B` are **plaintext** on this strap. This is why the services
+list, not the defaults, decides encryption (§5.2).
 
 A **connection ping**: the device may send `03` on endpoint `0x0015`; answer `04` on the
 same endpoint. 🟡 `SVC/Connection:54-58`
@@ -318,6 +337,10 @@ Phone                                                        Strap
 | `04` reply `[19..66]` | device public key, 48 bytes (§4.2) | 🟡 `AUTH:85`, `HC:870` |
 | AES in `05` | **AES-128-ECB, no padding**, one 16-byte block each: first with the auth key, second with the **session key** | 🟡 `AUTH:98-104`, `CRY:45-50`, `HC:875-880` |
 
+The success path of this sequence works on the Helio with the real key: the `04` exchange,
+the `05` message built as above, and `10 05 01`. 🟢 `HW:2026-09-30 (hw 0.132.27.2)`. The wrong-key reply (`10 05 25`)
+has not been tested yet (§10 item 3).
+
 ### 4.4 Deriving the session parameters
 
 From the 48-byte shared secret `s` (§4.2 layout):
@@ -325,7 +348,9 @@ From the 48-byte shared secret `s` (§4.2 layout):
 - **encrypted-sequence seed** = `s[0..3]` read as **u32 little-endian** (the low 32 bits of the
   shared point's X). 🟡 `AUTH:87`, `BLT:229-231`, `HC:872`
 - **session key** = `s[8..23]` (16 bytes, the middle of X's encoding) XOR the auth key,
-  byte for byte. 🟡 `AUTH:89-92`, `HC:873-874`
+  byte for byte. 🟡 `AUTH:89-92`, `HC:873-874`. 🟢 `HW:2026-09-30 (hw 0.132.27.2)`: the strap's encrypted replies
+  decrypt with it (§3.3). The strap also answered our encrypted requests, which carried the
+  seed-derived sequence numbers; 🔴 whether it checks them.
 
 Both are installed **as soon as the `04` reply is processed**, before the `05` message is
 sent (the `05` message itself is plaintext). After `10 05 01`, every endpoint that the
@@ -433,7 +458,8 @@ Example (constructed): 2026-09-30 12:34:56.000, a Wednesday, Europe/Madrid (UTC+
 Request `03`. Reply: `04`, u16 LE count, then count × (u16 LE endpoint, u8 encrypted flag
 `00`/`01`; other flag values = leave the default). 🟡 `SVC/Services:58-90`. Use it to
 (a) know which endpoints exist (e.g. whether `0x004B` and `0x0047` are available), and
-(b) override each endpoint's encryption flag from §3.5.
+(b) override each endpoint's encryption flag from §3.5. 🟢 `HW:2026-09-30 (hw 0.132.27.2)`: request, reply layout
+and flags as described; the Helio's list is in §3.5.
 
 ### 5.3 Device info and battery
 
@@ -499,6 +525,10 @@ was parsed and stop. 🟡 `SVC/Config:1025-1032`
 **HEALTH group = `0x08`** (Gadgetbridge understands versions 1–3 and writes version `03`).
 🟡 `SVC/Config:399,516-539`
 
+On the Helio, capabilities reply with service version **3** and groups `00 0b 08 09 0a`, and
+the HEALTH group `0x08` reads back as group version **3**. 🟢 `HW:2026-09-30 (hw 0.132.27.2)` (read only; nothing was
+written).
+
 | Arg | Type | Meaning | Relevant fetch type(s) |
 |---|---|---|---|
 | `0x01` | byte | all-day HR monitoring: `00` off, `ff` "smart"/auto, `N` = every N minutes (Gadgetbridge caps at 120) | activity HR, resting/max HR, HRV 🔴 | 
@@ -532,7 +562,9 @@ Example (constructed): enable stress monitoring → payload `05 08 03 00 01 13 0
 Gadgetbridge uses Path B whenever the services list includes `0x004B`, else Path A
 (`SUP:968-976`, `SVC/ActivityFetch:44-52`). HelioCore uses Path A on the Helio and it works
 (`HC:902-946`). Control messages have **identical bytes** on both paths. 🟡. Recommendation:
-Path A first (simplest, proven on the Helio); Path B only if Path A is refused.
+Path A first (simplest, proven on the Helio); Path B only if Path A is refused. 🟢 `HW:2026-09-30 (hw 0.132.27.2)`:
+Path A (plaintext writes to `…0004`) carried every fetch of §10.1, even though the Helio also
+lists `0x004B` (plaintext there, §3.5). Path B is untested.
 
 Notifications: enable `…0004` before the first command; enable `…0005` before sending the
 "fetch data" command; Gadgetbridge disables both when the whole batch is done
@@ -543,8 +575,8 @@ Notifications: enable `…0004` before the first command; enable `…0005` befor
 ```
 Phone                                                          Strap
   |-- 01 <type> <since: 8 bytes> ------------------------------>|  10 B  "start"
-  |<- 10 01 01 <len u32> <start: 8 bytes> ---------------------|  15 B (16 B seen with a trailing 00)
-  |   if len == 0: skip to ACK (keep)                           |
+  |<- 10 01 01 <len u32> <start: 8 bytes> [00] ----------------|  16 B on the Helio (15 B elsewhere)
+  |   if len == 0: skip to ACK (keep), whatever <start> holds    |
   |-- 02 ------------------------------------------------------>|  "fetch data"
   |<- …0005: <ctr> <data…>   (repeated)                         |
   |<- 10 02 01 [crc32 u32]   (3 or 7 bytes) -------------------|  "transfer done"
@@ -554,13 +586,14 @@ Phone                                                          Strap
 
 | Message | Layout | Tag / source |
 |---|---|---|
-| **start** | `01`, u8 fetch type (§6.5), then the 8-byte **since** timestamp: u16 LE year, month, day, hour, minute (local), u8 second, i8 UTC offset **including DST** in quarter-hours. Gadgetbridge sends second = `00` by default (minute precision; seconds broke the GTR 3). | 🟡 `FETCH:145-151`, `SUP:679-688`, `BLT:121-134,380-387`, `GB/service/devices/huami/HuamiFetcher.java:150-156`, `HC:926-928,1258-1266` |
-| **start reply** | `10 01 <status>`; status `01` = ok, else the type is unsupported/refused: skip it. Then u32 LE **expected length** (bytes of data excluding the per-packet counter bytes), then the 8-byte **start** timestamp of the first record, same format as *since*. Gadgetbridge accepts 15 or 16 bytes (a 16th byte, `00`, was seen on another Zepp OS band). | 🟡 `FETCH:153-221` |
-| **fetch data** | the single byte `02` | 🟡 `FETCH:220`, `HC:944` |
-| **data packet** | on `…0005`: byte `[0]` = u8 **packet counter** starting at `00` for each round and incrementing by 1 (wrapping); the rest is data. Concatenate the data parts. | 🟡 `FETCH:123-143`, `HC:955-965` |
-| **transfer done** | `10 02 <status>`; status `01` = ok. 7-byte form carries u32 LE **CRC-32** (same CRC as §3.3) of the concatenated data parts, counters excluded. | 🟡 `FETCH:223-246` |
-| **ack** | `03`, then ack mode (§6.3) | 🟡 `FETCH:260-277` |
-| **ack reply** | `10 03 …`; Gadgetbridge treats it as "round finished" and only then starts the next round/type | 🟡 `FETCH:173-176` |
+| **start** | `01`, u8 fetch type (§6.5), then the 8-byte **since** timestamp: u16 LE year, month, day, hour, minute (local), u8 second, i8 UTC offset **including DST** in quarter-hours. Gadgetbridge sends second = `00` by default (minute precision; seconds broke the GTR 3). | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` (second `00`); 🟡 `FETCH:145-151`, `SUP:679-688`, `BLT:121-134,380-387`, `GB/service/devices/huami/HuamiFetcher.java:150-156`, `HC:926-928,1258-1266` |
+| **start reply** | `10 01 <status>`; status `01` = ok, else the type is unsupported/refused: skip it. Then u32 LE **expected length**, then the 8-byte **start** timestamp of the first record, same format as *since*. Gadgetbridge accepts 15 or 16 bytes (a 16th byte, `00`, was seen on another Zepp OS band); **the Helio sent the 16-byte form** (trailing `00`) every time. **The length's unit depends on the type**: 8-byte **records** for activity, **bytes** for every other type seen on hardware (§6.5 "Length unit"). Either way it excludes the per-packet counter bytes. | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` (16 B, the per-type unit); 🟡 `FETCH:153-221` |
+| **empty start reply** | status `01` with **length 0** means the strap has nothing for this type since *since*, **whatever the start timestamp holds**: don't validate it. Two forms seen: a far-future **sentinel** start (e.g. `3a 08 02 06 02 1c 10 f0` = 2106-02-06 02:28:16 at UTC−4, which is 2³² − 86 400 Unix seconds) for a type with nothing in the window, and an **all-zero** start (8 × `00`, not a valid date) on the follow-up round straight after a round that delivered data. Both are then acked like any empty round. | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` (both forms; 🔴 what the sentinel's value means) |
+| **fetch data** | the single byte `02` | 🟢 `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `FETCH:220`, `HC:944` |
+| **data packet** | on `…0005`: byte `[0]` = u8 **packet counter** starting at `00` for each round and incrementing by 1 (wrapping); the rest is data. Concatenate the data parts. A packet can be much longer than 20 bytes (a 241-byte packet was seen at the Mac's MTU). | 🟢 `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `FETCH:123-143`, `HC:955-965` |
+| **transfer done** | `10 02 <status>`; status `01` = ok. 7-byte form carries u32 LE **CRC-32** (same CRC as §3.3) of the concatenated data parts, counters excluded. | 🟢 `HW:2026-09-30 (hw 0.132.27.2)`: 7-byte form, and the CRC matched for every type except activity, where it is **unknown** (§6.5); 🟡 `FETCH:223-246` |
+| **ack** | `03`, then ack mode (§6.3) | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` (`03 09` only); 🟡 `FETCH:260-277` |
+| **ack reply** | `10 03 …`; Gadgetbridge treats it as "round finished" and only then starts the next round/type | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` (`10 03 01` after every ack, including empty rounds); 🟡 `FETCH:173-176` |
 
 Worked example D (constructed, made-up readings): fetch HRV since 2026-09-29 00:00 in UTC+2.
 `OC-vec`
@@ -577,6 +610,23 @@ Worked example D (constructed, made-up readings): fetch HRV since 2026-09-29 00:
 
 The two records decode (§6.5) to 42 ms at 1790633100 (2026-09-28T22:05:00Z) and 57 ms at
 1790633400 (22:10:00Z).
+
+Example E (from hardware, control bytes and lengths only, `HW:2026-09-30 (hw 0.132.27.2)`): a 30-minute activity
+window at UTC−4. The length field counts **records**: 30 minutes × 8 bytes = 240 data bytes.
+
+```
+→ 01 01 ea 07 09 1e 0b 37 00 f0                     since 2026-09-30 11:55 (−04:00)
+← 10 01 01 1e 00 00 00 ea 07 09 1e 0b 37 00 f0 00   length 30 (records); start = since; 16 B
+→ 02
+← […0005] 00 + 240 data bytes                        one 241-byte packet
+→ 03 09                                              ZeppKit before the fix: "overflow", acked at once
+← 10 02 01 <crc32>                                   transfer done, 7-byte form, after our ack
+← 10 03 01
+```
+
+A correct phone waits for the transfer done, checks 240 = 30 × 8 bytes and the CRC, then
+acks. A 12-hour activity window announced `720` (720 minutes, so 5760 data bytes are
+expected; that round was also aborted early, at 960 bytes, so the full size is not yet seen).
 
 ### 6.3 Ack: keep vs delete (critical)
 
@@ -598,9 +648,15 @@ round is durably committed** to the local store (mirroring `HistoryCommitGate`).
 path → `03 09`.
 
 Unknowns (🔴, §10): whether `01` frees strap storage immediately; how long the strap retains
-unsynced data when only `09` is ever sent (it may eventually overwrite the oldest); whether a
-later fetch with an older *since* re-delivers data acked with `09` (it should: *since* is
-chosen by the phone).
+unsynced data when only `09` is ever sent (it may eventually overwrite the oldest).
+
+Answered on the Helio (🟢 `HW:2026-09-30 (hw 0.132.27.2)`):
+
+- A later fetch whose *since* overlaps data already acked with `09` **re-delivers** it
+  (temperature).
+- A `03 09` sent **mid-transfer** (before the strap's transfer done) is tolerated: the strap
+  still sent its transfer done and `10 03 01`, and the next type fetched normally. The phone
+  must therefore ignore a late `10 02` after it has acked.
 
 ### 6.4 Rounds, cursors and timestamps
 
@@ -612,7 +668,9 @@ chosen by the phone).
 - First-ever cursor: Gadgetbridge starts 100 days back (`FETCH:293-303`). Keep one cursor
   **per fetch type**.
 - **Per-minute types** (activity, stress-auto, temperature) carry no timestamps: record *i*
-  is at `start + i minutes`, where *start* comes from the start reply. Interpret the start
+  is at `start + i minutes`, where *start* comes from the start reply. On the Helio, their
+  *start* equalled the requested *since*; for event types it was the first record's own time.
+  🟢 `HW:2026-09-30 (hw 0.132.27.2)`. Interpret the start
   reply's local fields **with its own quarter-hour offset byte**: absolute instant = local
   fields − offset × 15 min. 🟡 `BLT:161-184`, `FOP/Activity:112-121`. (HelioCore ignores the
   offset byte and uses the phone's zone, `HC:1268-1285`. Wrong whenever the strap's zone
@@ -630,25 +688,36 @@ support, and the strap inherits all Zepp OS defaults except display-dependent on
 
 | Code | Name | Record layout (LE) | Rate / timestamps | Units / scaling | GB maps to | Helio in GB | Tag / source |
 |---|---|---|---|---|---|---|---|
-| `0x01` | **activity** | **8 bytes/min** on Zepp OS: `[0]` kind, `[1]` intensity, `[2]` steps, `[3]` HR, `[4]` unknown, `[5]` sleep, `[6]` deep-sleep, `[7]` REM (sleep bytes: use low 7 bits) | 1/min from *start* | steps = count in that minute; HR bpm, `ff` or `00` = no reading (HelioCore drops them; GB stores raw); intensity 0–255 (GB divides by 256). CRC is **not** checked by GB for this type. | per-minute activity sample | yes (always) | 🟡 `FOP/Activity:71-164`, `SUP:984-986`, `HC:1180-1193` |
-| `0x02` | manual HR | 6 bytes: u32 ts, i8 tz (¼ h), u8 bpm | event | bpm | manual-HR sample | yes | 🟡 `FOP/HeartRateManual:63-90` |
-| `0x0d` | PAI | 102 bytes: u8 type (`05` valid, `00` pre-reset: skip), u32 ts, i8 tz, 31 unknown, f32 PAI low, f32 moderate, f32 high, u16 min low, u16 min moderate, u16 min high, f32 PAI today, f32 PAI total, 39 unknown | daily | PAI points, minutes | PAI sample | yes | 🟡 `FOP/Pai:62-129` |
-| `0x12` | stress (manual) | 5 bytes: u32 ts, u8 stress | event | 0–100 | stress, type manual | yes | 🟡 `FOP/StressManual:64-95` |
-| `0x13` | **stress (auto)** | 1 byte/min, `ff` = none (the minute still advances) | 1/min from *start* | 0–100; bands 0–39 relaxed, 40–59 mild, 60–79 moderate, 80–100 high | stress, type automatic | yes | 🟡 `FOP/StressAuto:62-91`, `HC:1195-1199` |
-| `0x25` | **SpO₂** (normal: manual + auto) | one leading **version byte `02`** per round, then 65-byte records: u32 ts, u8 value (**bit 7 set = automatic**, value = low 7 bits), 60 unknown bytes. Other versions: reject. | event | % | SpO₂ sample, type auto/manual | yes | 🟡 `FOP/Spo2Normal:64-103`, `HC:1201-1212` |
-| `0x26` | SpO₂ (sleep) | version byte `02`, then 30-byte records: u32 ts, u8 SpO₂, u8 duration, 6 bytes "high", 6 bytes "low", 8 bytes signal quality, 4 bytes "extend" | per sleep | %; GB notes it often differs by ~1 from `0x25` | **not stored** | **not scheduled** | 🟡 `FOP/Spo2Sleep:48-93` (no queue entry in `HuamiFetcher.java`) |
-| `0x2e` | **temperature** | 8 bytes/min: i16 unknown (`0x7fff` observed), **i16 temperature**, i16 unknown, i16 unknown (`0x5a5a` observed in both) | 1/min from *start* | **centi-°C** (÷100), skin at the wrist/arm | skin temperature | yes (no display) | 🟡 `FOP/Temperature:61-96`, `HC:1168-1178` |
-| `0x38` | **sleep respiratory rate** | 8 bytes: u32 ts, i8 tz, u8 rate, u8 unknown (`00`), u8 unknown (`01`, sometimes `02`/`04` near waking) | during sleep | breaths/min | resp-rate sample | yes | 🟡 `FOP/SleepRespiratoryRate:62-90`, `HC:1225-1233` |
-| `0x3a` | **resting HR** | 6 bytes: u32 ts, i8 tz, u8 bpm | ~daily (Zepp shows it per day) | bpm | resting-HR sample | yes | 🟡 `FOP/HeartRateResting:63-91`, `HC:1214-1222` |
-| `0x3d` | **max HR** | 6 bytes: u32 ts, i8 tz, u8 bpm | ~daily 🔴 | bpm | max-HR sample | yes | 🟡 `FOP/HeartRateMax:63-90` |
-| `0x48` | **sleep session** | **594-byte** records, see §6.6 | per night | minutes | sleep-session blob; stages overlaid on activity | yes | 🟡 `FOP/SleepSession:59-85` |
-| `0x49` | **HRV** | 6 bytes: u32 ts, u8 unknown (🔴 probably the tz byte, as in the 6-byte HR records), u8 HRV | a few per day/night 🔴 | **ms**; statistic **unknown** (RMSSD vs SDNN, 🔴) | HRV value | yes (no display) | 🟡 `FOP/Hrv:59-85`, `HC:1236-1245` |
+| `0x01` | **activity** | **8 bytes/min** on Zepp OS: `[0]` kind, `[1]` intensity, `[2]` steps, `[3]` HR, `[4]` unknown, `[5]` sleep, `[6]` deep-sleep, `[7]` REM (sleep bytes: use low 7 bits) | 1/min from *start* | steps = count in that minute; HR bpm, `ff` or `00` = no reading (HelioCore drops them; GB stores raw); intensity 0–255 (GB divides by 256). CRC is **not** checked by GB for this type; 🔴 whether it matches on the Helio (no hardware activity round has reached the check yet). | per-minute activity sample | yes (always) | 🟢 8 bytes/min, length in records `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Activity:71-164`, `SUP:984-986`, `HC:1180-1193` |
+| `0x02` | manual HR | 6 bytes: u32 ts, i8 tz (¼ h), u8 bpm | event | bpm | manual-HR sample | yes | 🟡 `FOP/HeartRateManual:63-90` (only empty replies on the Helio so far) |
+| `0x0d` | PAI | 102 bytes: u8 type (`05` valid, `00` pre-reset: skip), u32 ts, i8 tz, 31 unknown, f32 PAI low, f32 moderate, f32 high, u16 min low, u16 min moderate, u16 min high, f32 PAI today, f32 PAI total, 39 unknown | daily | PAI points, minutes | PAI sample | yes | 🟢 102-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Pai:62-129` |
+| `0x12` | stress (manual) | 5 bytes: u32 ts, u8 stress | event | 0–100 | stress, type manual | yes | 🟡 `FOP/StressManual:64-95` (only empty replies on the Helio so far) |
+| `0x13` | **stress (auto)** | 1 byte/min, `ff` = none (the minute still advances) | 1/min from *start* | 0–100; bands 0–39 relaxed, 40–59 mild, 60–79 moderate, 80–100 high | stress, type automatic | yes | 🟢 1 byte/min, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/StressAuto:62-91`, `HC:1195-1199` |
+| `0x25` | **SpO₂** (normal: manual + auto) | one leading **version byte `02`** per round, then 65-byte records: u32 ts, u8 value (**bit 7 set = automatic**, value = low 7 bits), 60 unknown bytes. Other versions: reject. | event | % | SpO₂ sample, type auto/manual | yes | 🟢 version `02` + 65-byte records, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Spo2Normal:64-103`, `HC:1201-1212` |
+| `0x26` | SpO₂ (sleep) | version byte `02`, then 30-byte records: u32 ts, u8 SpO₂, u8 duration, 6 bytes "high", 6 bytes "low", 8 bytes signal quality, 4 bytes "extend" | per sleep | %; GB notes it often differs by ~1 from `0x25` | **not stored** | **not scheduled** | 🟢 version `02` + 30-byte records, CRC `HW:2026-09-30 (hw 0.132.27.2)`; 🔴 **field layout**: on the Helio every record decoded to the same SpO₂ value, which is implausible (out of v1 scope; parser unchanged). `FOP/Spo2Sleep:48-93` (no queue entry in `HuamiFetcher.java`) |
+| `0x2e` | **temperature** | 8 bytes/min: i16 unknown (`0x7fff` observed), **i16 temperature**, i16 unknown, i16 unknown (`0x5a5a` observed in both) | 1/min from *start* | **centi-°C** (÷100), skin at the wrist/arm | skin temperature | yes (no display) | 🟢 8 bytes/min, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Temperature:61-96`, `HC:1168-1178` |
+| `0x38` | **sleep respiratory rate** | 8 bytes: u32 ts, i8 tz, u8 rate, u8 unknown (`00`), u8 unknown (`01`, sometimes `02`/`04` near waking) | during sleep | breaths/min | resp-rate sample | yes | 🟢 8-byte records, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/SleepRespiratoryRate:62-90`, `HC:1225-1233` |
+| `0x3a` | **resting HR** | 6 bytes: u32 ts, i8 tz, u8 bpm | ~daily (Zepp shows it per day) | bpm | resting-HR sample | yes | 🟢 6-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/HeartRateResting:63-91`, `HC:1214-1222` |
+| `0x3d` | **max HR** | 6 bytes: u32 ts, i8 tz, u8 bpm | ~daily 🔴 | bpm | max-HR sample | yes | 🟡 `FOP/HeartRateMax:63-90` (only empty replies on the Helio so far) |
+| `0x48` | **sleep session** | **594-byte** records, see §6.6 | per night | minutes | sleep-session blob; stages overlaid on activity | yes | 🟢 594-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/SleepSession:59-85` |
+| `0x49` | **HRV** | 6 bytes: u32 ts, u8 unknown (🔴 probably the tz byte, as in the 6-byte HR records), u8 HRV | a few per day/night 🔴 | **ms**; statistic **unknown** (RMSSD vs SDNN, 🔴) | HRV value | yes (no display) | 🟢 6-byte records, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Hrv:59-85`, `HC:1236-1245` |
 | `0x2c` | statistics | opaque files; fetched only so the strap frees memory | — | — | discarded | yes | 🟡 `FOP/Statistics` |
 | `0x05` / `0x06` | workout summary / detail | binary summary + track; **out of scope for v1**, not specified here | per workout | — | workouts | yes | 🟡 `FOP/SportsSummary`, `FOP/SportsDetails` |
 | `0x07` | debug logs | — | — | — | — | no | 🟡 `GB/…/fetch/HuamiFetchDataType.java:24` |
 
-Length rules to enforce before parsing (a violation = reject the round, ack `09`): activity
-multiple of 8; stress-auto any; manual/max/resting HR and HRV multiple of 6; temperature
+**Length unit of the start reply** (§6.2). The announced length counts **8-byte records
+(minutes) for activity** and **bytes for every other type seen on hardware**: temperature
+(`0x2e`), stress-auto (`0x13`, 1 byte per minute, so the two units coincide there), HRV
+(`0x49`), SpO₂ (`0x25`), resting HR (`0x3a`), sleep respiratory rate (`0x38`), sleep session
+(`0x48`), PAI (`0x0d`) and sleep SpO₂ (`0x26`). 🟢 `HW:2026-09-30 (hw 0.132.27.2)`. Manual HR (`0x02`), manual stress
+(`0x12`) and max HR (`0x3d`) have only answered "empty" so far: **bytes 🟡**. Activity proved
+that the unit can differ by type, so confirm each of these the first time it delivers data.
+Convert to bytes before the checks below: expected data bytes = length × 8 for activity,
+= length otherwise. Then an overflow, a length mismatch at transfer done, or a CRC mismatch
+rejects the round (ack `09`).
+
+Length rules to enforce before parsing (a violation = reject the round, ack `09`), in bytes:
+activity multiple of 8; stress-auto any; manual/max/resting HR and HRV multiple of 6; temperature
 and resp-rate multiple of 8; SpO₂ (length − 1) multiple of 65; sleep SpO₂ (length − 1)
 multiple of 30; sleep session multiple of 594; PAI multiple of 102; manual stress multiple
 of 5. 🟡 (the per-type sources above)
@@ -700,7 +769,9 @@ should use both and flag gaps.
 
 - **With auth** (Gadgetbridge's path): enable notify on `0x2A37`, then send `04 01` (start) on
   endpoint `0x001D`, then `04 02` ("continue") **every second** to keep it running; `04 00`
-  stops it. Reply `05 <status>` (`00` observed as success). 🟡 `SVC/HeartRate:36-47,112-183`
+  stops it. Reply `05 <status>` (`00` observed as success). 🟡 `SVC/HeartRate:36-47,112-183`.
+  🟢 `HW:2026-09-30 (hw 0.132.27.2)`: after auth, this start plus the 1 s `04 02` gave **one `0x2A37` notification per
+  second**. (The `05` reply's status was not recorded.)
 - The same endpoint pushes **sleep events**: `06 01` fell asleep, `06 00` woke up. 🟡
   `SVC/HeartRate:74-88` (useful as a sleep-window hint).
 - **Without auth (Tier 0)**: Amazfit documents a **"Heart Rate Push"** switch (Zepp › Device ›
@@ -755,7 +826,7 @@ Use the battery endpoint (§5.3). `0x2A19` only if discovery shows it exists. �
 | 1 | Fetch control transport | `0x004B` encrypted when listed, else `…0004` | always `…0004` plaintext | start with `…0004`; fall back to `0x004B` (§6.1) |
 | 2 | Start-reply timezone | honours the reply's offset byte | uses the phone's zone | honour the offset byte (§6.4) |
 | 3 | Ack timing | after CRC check + successful processing | `03 09` immediately, before parsing, no CRC check | CRC check → parse → durable commit → ack (§6.3) |
-| 4 | Activity record size | fixed 8 on Zepp OS | 8 if length divisible by 8, else 4 | fixed 8 (4 would be ambiguous whenever a round is a multiple of 8) |
+| 4 | Activity record size | fixed 8 on Zepp OS | 8 if length divisible by 8, else 4 | fixed 8 (4 would be ambiguous whenever a round is a multiple of 8). 🟢 `HW:2026-09-30 (hw 0.132.27.2)`: 8, with the start reply counting records (§6.5) |
 | 5 | HR-type `ff`/`00` | stored raw | dropped | drop (no reading), never write 0/255 bpm |
 | 6 | Chunk acks | sent | never sent | send (§3.4) |
 | 7 | MTU | 23 until auth, then asks for 247 | hard-coded 247 | use the OS-negotiated `maximumWriteValueLength` |
@@ -778,7 +849,13 @@ Other defensive points:
   version the device reported (`SVC/Config:944-947`). 🔴 whether a v1/v2 device accepts that;
   prefer echoing the version from the read reply.
 - **Start-reply length**: accept 15 or 16 bytes (`FETCH:190-195`; Gadgetbridge's check
-  effectively accepts any 16th byte); treat other lengths as a failed round.
+  effectively accepts any 16th byte); treat other lengths as a failed round. The Helio sends
+  16 (🟢 `HW:2026-09-30 (hw 0.132.27.2)`).
+- **Empty start replies**: length 0 ends the type for this fetch whatever the start timestamp
+  says; an all-zero start is normal there, not a malformed reply (🟢 `HW:2026-09-30 (hw 0.132.27.2)`, §6.2). Validating
+  that timestamp turns every "nothing more" into a bogus failure and a retry.
+- **Per-type length unit**: never assume the start reply's length is in bytes. Activity counts
+  records (§6.5); an implementation that assumes bytes rejects every activity round.
 - **Competing central**: while the Zepp app is installed and running, it reconnects to the
   strap and may win the connection. Auth failures other than `25` right after connect may
   mean another central holds the strap. 🔴 (plan-of-record §7; no protocol-level signal
@@ -793,7 +870,8 @@ Other defensive points:
 
 ## 10. Promote to 🟢: capture checklist (Juan's strap)
 
-Record firmware (DIS `0x2A26` or endpoint `0x0043`) with every run. Keep captures in
+Record firmware (DIS `0x2A26` or endpoint `0x0043`) with every run. The Helio has no
+`0x2A26` (§10.1), so use `0x0043`. Keep captures in
 `desktop/captures/` (gitignored); commit findings only. Use `03 09` (keep) for every ack.
 
 1. **Advertisement**: name exactly as broadcast (suffix or not); manufacturer data bytes;
@@ -824,8 +902,68 @@ Record firmware (DIS `0x2A26` or endpoint `0x0043`) with every run. Keep capture
 12. **Coexistence**: with the Zepp app installed but force-quit, does it steal the
     connection? After uninstalling Zepp, does the key keep working across strap reboots?
 
+### 10.1 Results from a real strap (2026-09-30)
+
+Juan ran HelioVerify against his Helio Strap: hardware revision 0.132.27.2, firmware 3.3.6.5
+per his Zepp account, macOS CoreBluetooth, local time UTC−4 (offset byte `f0`), every ack
+`03 09`, no time or setting written. Source tag for everything below: `HW:2026-09-30 (hw 0.132.27.2)`. Only control bytes and
+lengths are recorded here; no health value, serial number, MAC or setting value is.
+
+| §10 item | Result | Promoted |
+|---|---|---|
+| 1 Advertisement | Not recorded in this run. | — |
+| 2 GATT dump | Present: `…0016`, `…0017`, `…0004`, `…0005`, `0x2A37`, `0x2A19`, `0x2A2B`, `0x2A27`. **No DIS firmware revision `0x2A26`**, so the firmware version was not printed. Parent services, properties and write types not recorded. | §1, §2 |
+| 3 Auth | The real key authenticated. The wrong-key test (`10 05 25`) was **not run**. | §4.3 success path, §4.4 session key |
+| 4 Services list | 28 endpoints (listed in §3.5). `0x004B` is present. Battery `0x0029`, connection `0x0015` and `0x004B` are plaintext on this strap. | §3.5, §5.2 |
+| 5 Encrypted round-trip | Replies on `0x000A` and `0x001A` decrypted, and their trailer CRC matched `CRC-32(P ‖ S)`. (Battery could not serve: it is plaintext here.) Whether the device's sequence numbers are its own or follow ours was not recorded. | §3.3 |
+| 6 Chunk acks | Not recorded. | — |
+| 7 Time set | **Not run** (HelioVerify's `--set-time` is off by default). | — |
+| 8 HEALTH config read | Config service version 3, groups `00 0b 08 09 0a`; HEALTH group `0x08` version 3. Argument values are personal settings and are not recorded here. Arg `0x05` vs Zepp's "Heart Rate Push": not tested. | §5.5 |
+| 9 Fetch each type | Path A, 30-minute and 12-hour windows. Start replies are 16 bytes. **Activity's length counts records**; every other type counts bytes and its CRC matched (table below). Values were not compared with Zepp. | §6.1, §6.2, §6.4, §6.5 |
+| 10 Ack semantics | After `03 09`, fetching an overlapping temperature window again **re-delivered** the data. A mid-transfer `03 09` was tolerated. Ack `01`: **not run**. | §6.3 |
+| 11 Tier 0 live HR | Without auth: **not run**. With auth (§7.1 start + keep-alive): one `0x2A37` notification per second. | §7.1 |
+| 12 Coexistence | **Not tested.** | — |
+
+**Fetch rounds** (item 9):
+
+| Type | Window | Announced length → data received | Unit | CRC |
+|---|---|---|---|---|
+| activity `0x01` | 30 min | `30` → one 241-byte packet: counter + 240 bytes = 30 × 8 | **records** | unknown: ZeppKit aborted the round with a false overflow before the check (fixed since) |
+| activity `0x01` | 12 h | `720` → ZeppKit aborted at 960 bytes | **records** | unknown |
+| temperature `0x2e` | 30 min / 12 h | `240` → 240 B / 5760 B | bytes | ok |
+| stress-auto `0x13` | 12 h | 720 B (1 byte per minute) | bytes (= records here) | ok |
+| HRV `0x49` | — | 2136 B = 356 × 6 | bytes | ok |
+| SpO₂ `0x25` | — | 6566 B = 1 + 101 × 65 | bytes | ok |
+| resting HR `0x3a` | — | 6 B | bytes | ok |
+| sleep respiratory rate `0x38` | — | 3528 B = 441 × 8 | bytes | ok |
+| sleep session `0x48` | — | 594 B | bytes | ok |
+| PAI `0x0d` | — | 102 B | bytes | ok |
+| sleep SpO₂ `0x26` | — | 421 B = 1 + 14 × 30 | bytes | ok, but every record decoded to the same SpO₂ value: **the §6.5 field layout for `0x26` is 🔴** (out of v1 scope; parser unchanged) |
+
+- For the per-minute types the start timestamp equalled the requested *since*; for event
+  types it was the first record's own time.
+- **Empty start replies** (status `01`, length 0) came in two forms (§6.2): the far-future
+  sentinel for types with nothing in the window (`0x3d`, `0x02`, `0x12`, and `0x26`'s second
+  round), and the all-zero start on the follow-up round straight after a round that delivered
+  data (`0x2e`, `0x13`). ZeppKit rejected the all-zero form as malformed and retried once
+  (fixed since: length 0 is empty whatever the timestamp).
+- The strap coped with ZeppKit's mid-transfer `03 09` on the activity round: it still sent
+  its transfer done and `10 03 01`, and the next type fetched normally.
+
+**Still untested** (keep their tags): wrong-key auth (`10 05 25`); ack `01` (delete); Tier 0
+live HR without auth; Zepp-app coexistence; time set (`0x0047`, `06 01`); the HRV statistic
+(RMSSD vs SDNN). Also not yet observed: the activity CRC; a full 12-hour activity round;
+the firmware version over BLE (endpoint `0x0043`); the advertisement; chunk acks; write types;
+Path B (`0x004B`); arg `0x05` vs "Heart Rate Push"; the device's sequence numbers; any value
+compared against Zepp (HRV unknown byte, temperature constants, sleep-session minute base);
+the `0x26` layout.
+
 ---
 
 ## Changelog
 
 - 2026-09-30: first version (zepp-spec agent, #215 Phase 0). All claims 🟡/🔴.
+- 2026-09-30: first hardware run (§10.1, hw 0.132.27.2). The start reply's length unit is per
+  type: records for activity, bytes for the other types seen (§6.2, §6.5). Both empty
+  start-reply forms documented: length 0 is empty whatever the timestamp. Confirmed claims
+  promoted to 🟢; `0x26`'s field layout demoted to 🔴 (zepp-fix agent, #215).
