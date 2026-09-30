@@ -95,7 +95,7 @@ becomes a real one-liner in the PR that retypes its view (follow-ups §4).
 | `model` | `model` | Generation label ("Gen 2", "Gen 2 Air", "Gen 3"), or nil while unknown. Never "Unknown" |
 | `hardwareVersion` | `hardwareVersion` | DIS 0x2A27 |
 | `firmwareVersion` | `firmwareVersion` | DIS 0x2A26, e.g. "FR02.018" |
-| `localIdentifier` | `id` | CoreBluetooth peripheral UUID: per-install, never the MAC. Already the per-ring key for EpochArchiveStore and RingMetadataStore |
+| `localIdentifier` | the family's sync timeline, `SyncDeviceID.timeline(for: kind, identityID: id)` | `"ringconn"` for every RingConn ring (Juan's decision: all rings are one device, as they are one store timeline, §3). A Zepp OS device gets `zeppos:<id>` by the same rule. Never the MAC |
 | `softwareVersion`, `udiDeviceIdentifier` | none | nil |
 
 Empty strings map to nil, so no field is ever written as "".
@@ -109,7 +109,8 @@ fields over the persisted ones with `WearableIdentity.merging(previous:)`: a kno
 downgraded to unknown for the same id, and a different id never inherits another ring's fields
 (the rule `RingMetadataStore.record` already uses). When no session exists, the persisted identity
 of the active ring (`RingScanner.activeRingID`) is used, falling back to the last-connected ring's
-id in `RingMetadataStore`.
+id in `RingMetadataStore`. The store stays keyed per peripheral even though every ring shares the
+`localIdentifier` "ringconn": one ring must never report another's firmware.
 
 **Which samples carry the device.** Everything the wearable measured or that is derived from its
 data: HR, HRV, SpO₂, RR, temperature, steps, distance, resting HR, active and basal energy,
@@ -220,10 +221,10 @@ phone that ever launched a V8 build.
    instead of reading `RingScanner.shared.session`.
 4. **Static keys on `RingSession`.** `lastNotifiedNightKey` is device-agnostic and belongs somewhere
    else (e.g. `HealthNotificationCenter`), but moving it changes nothing today, so it is left alone.
-5. **Samples flushed after a ring swap** are attributed to the ring active at flush time, because
-   the store has no device column in Part A. Part B adds `StoredSample.deviceID`; resolving each
-   row's `HKDevice` from its own device id is a follow-up once a registry holds more than one
-   identity.
+5. **Samples flushed after a ring swap** are attributed to the ring active at flush time. They
+   share its `localIdentifier` ("ringconn"), so Health still lists one device; only the name and
+   versions on those samples can be the newer ring's. Resolving each row's `HKDevice` from its own
+   device is a follow-up once a registry holds more than one identity.
 
 ## 5. Open questions for Juan
 

@@ -129,6 +129,35 @@ final class WearableSeamTests: XCTestCase {
         XCTAssertNil(identity?.hardwareVersion)
     }
 
+    /// Review #217 S1 (Juan's decision): two RingConn rings are ONE device in Apple Health — the
+    /// same `localIdentifier`, "ringconn" — while the identity store stays keyed per peripheral, so
+    /// each ring keeps reporting its own firmware and neither inherits the other's.
+    func testTwoRingsAreOneHealthDeviceButEachKeepsItsOwnFirmware() throws {
+        let store = WearableIdentityStore(defaults)
+        let ringA = FakeWearable(identity: ring(firmware: fullFirmware))
+        let a = try XCTUnwrap(ActiveWearable(session: { ringA }, fallbackDeviceID: { nil }, identityStore: store)
+            .identityForHealthWrite())
+        let gen3 = FirmwareInfo(version: "FR05.011", modelName: "RingConn Gen3-11FF", hardwareRevision: "00030002")
+        let ringB = FakeWearable(identity: ring(firmware: gen3, id: "OTHER-RING"))
+        let b = try XCTUnwrap(ActiveWearable(session: { ringB }, fallbackDeviceID: { nil }, identityStore: store)
+            .identityForHealthWrite())
+
+        let deviceA = try XCTUnwrap(HealthKitWriter.hkDevice(HealthDeviceAttribution.fields(for: a, origin: .device)))
+        let deviceB = try XCTUnwrap(HealthKitWriter.hkDevice(HealthDeviceAttribution.fields(for: b, origin: .device)))
+        XCTAssertEqual(deviceA.localIdentifier, "ringconn")
+        XCTAssertEqual(deviceB.localIdentifier, deviceA.localIdentifier)
+        XCTAssertEqual(deviceA.firmwareVersion, "FR02.018")
+        XCTAssertEqual(deviceB.firmwareVersion, "FR05.011")
+        XCTAssertEqual(deviceB.hardwareVersion, "00030002")
+
+        // Still two records, one per peripheral.
+        XCTAssertEqual(store.load(id: ringID)?.firmwareVersion, "FR02.018")
+        XCTAssertEqual(store.load(id: "OTHER-RING")?.firmwareVersion, "FR05.011")
+        // A disconnected flush attributed to ring A names ring A's firmware, not B's.
+        XCTAssertEqual(ActiveWearable(session: { nil }, fallbackDeviceID: { self.ringID }, identityStore: store)
+            .identityForHealthWrite()?.firmwareVersion, "FR02.018")
+    }
+
     // MARK: HKDevice
 
     func testHKDeviceCarriesEveryMappedField() throws {
@@ -141,7 +170,7 @@ final class WearableSeamTests: XCTestCase {
         XCTAssertEqual(device.hardwareVersion, "00010001")
         XCTAssertEqual(device.firmwareVersion, "FR02.018")
         XCTAssertNil(device.softwareVersion)
-        XCTAssertEqual(device.localIdentifier, ringID)
+        XCTAssertEqual(device.localIdentifier, "ringconn", "every RingConn ring is one Health device")
         XCTAssertNil(device.udiDeviceIdentifier)
         XCTAssertNil(HealthKitWriter.hkDevice(nil))
     }
@@ -152,7 +181,7 @@ final class WearableSeamTests: XCTestCase {
         let start = Date(timeIntervalSince1970: 1_790_000_000)
         let sample = try XCTUnwrap(HealthKitWriter.activeEnergySample(
             kcal: 12, start: start, end: start.addingTimeInterval(900), device: device))
-        XCTAssertEqual(sample.device?.localIdentifier, ringID)
+        XCTAssertEqual(sample.device?.localIdentifier, "ringconn")
         XCTAssertEqual(sample.device?.firmwareVersion, "FR02.018")
     }
 
@@ -171,7 +200,7 @@ final class WearableSeamTests: XCTestCase {
         XCTAssertEqual(samples.count, 2)
         let measured = try XCTUnwrap(samples.first { $0.startDate == t0 })
         let asserted = try XCTUnwrap(samples.first { $0.startDate != t0 })
-        XCTAssertEqual(measured.device?.localIdentifier, ringID)
+        XCTAssertEqual(measured.device?.localIdentifier, "ringconn")
         XCTAssertNil(measured.metadata?[HKMetadataKeyWasUserEntered])
         XCTAssertNil(asserted.device)
         XCTAssertEqual(asserted.metadata?[HKMetadataKeyWasUserEntered] as? Bool, true)
