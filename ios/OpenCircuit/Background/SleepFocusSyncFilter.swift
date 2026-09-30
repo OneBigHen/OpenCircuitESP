@@ -10,7 +10,7 @@ import Foundation
 struct SleepFocusSyncFilter: SetFocusFilterIntent {
     static let title: LocalizedStringResource = "Sync after Sleep Focus"
     static let description = IntentDescription(
-        "Sync your ring when the Sleep Focus this filter belongs to turns off."
+        "Sync your device when the Sleep Focus this filter belongs to turns off."
     )
     // iOS 26 replaced `openAppWhenRun` with explicit execution modes. This intent must launch the
     // containing app into a BACKGROUND process: its work depends on the app-owned CoreBluetooth

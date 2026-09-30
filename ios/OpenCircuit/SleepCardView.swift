@@ -382,7 +382,7 @@ struct SleepCardView: View {
     private var notSyncedYetNotice: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "arrow.triangle.2.circlepath").font(.caption2).foregroundStyle(.secondary)
-            Text("Last night hasn’t synced yet. Open OpenCircuit near the ring to pull it in — showing your most recent recorded night until then.")
+            Text("Last night hasn’t synced yet. Open OpenCircuit near your device to pull it in — showing your most recent recorded night until then.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(.vertical, 6).padding(.horizontal, 8)
@@ -396,7 +396,7 @@ struct SleepCardView: View {
     private var missedNightNotice: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "moon.zzz").font(.caption2).foregroundStyle(.orange)
-            Text("No sleep recorded for last night. Showing your most recent recorded night — wear the ring to bed and sync in the morning.")
+            Text("No sleep recorded for last night. Showing your most recent recorded night — wear your device to bed and sync in the morning.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(.vertical, 6).padding(.horizontal, 8)
@@ -1020,7 +1020,7 @@ struct SleepCardView: View {
             // as a defect.
             HStack(spacing: 6) {
                 Image(systemName: "thermometer.medium").font(.caption2).foregroundStyle(.tertiary)
-                Text("No skin temperature for this night — it's only recorded while the ring stays connected, and there weren't enough readings to compare.")
+                Text("No skin temperature for this night — there weren't enough readings from your device to compare.")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1563,7 +1563,7 @@ struct SleepCardView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Your sleep appears here after an overnight sync")
                     .font(.subheadline.weight(.medium))
-                Text("Wear the ring to bed and connect in the morning. Once it syncs, last night's sleep stays here all day.")
+                Text("Wear your device to bed and connect in the morning. Once it syncs, last night's sleep stays here all day.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

@@ -2176,7 +2176,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Label("Connect Apple Health", systemImage: "heart.text.square")
                     .font(.headline)
-                Text("Turn on Apple Health to start saving your ring's data.")
+                Text("Turn on Apple Health to start saving your device's data.")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 healthAuthPrompt
