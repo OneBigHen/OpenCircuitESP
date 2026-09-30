@@ -40,6 +40,12 @@ public final class FakeZeppDevice {
     public var startReplyTrailingZero = false
     /// An empty type answers with an all-zero start instead of echoing the *since* (§6.2).
     public var emptyStartAllZero = false
+    /// The start reply's length field per type, instead of the real data's (a strap announcing more
+    /// than it sends, e.g. a hostile 4 MiB round).
+    public var announcedLengths: [ZeppFetchType: UInt32] = [:]
+    /// Types whose ack (`03 xx`) the strap records but never answers with `10 03`, as if it stopped
+    /// responding in the middle of a fetch.
+    public var unansweredAckTypes: Set<ZeppFetchType> = []
 
     // Device controls (§11–§13). Only reachable when a test lists their endpoints in `services`.
     /// The find-device capabilities reply (§11.2); nil = the strap never answers `01`.
@@ -288,7 +294,7 @@ public final class FakeZeppDevice {
             let emptyStart = emptyStartAllZero ? [UInt8](repeating: 0, count: 8) : Array(c[2..<10])
             let entry = fetchData[type] ?? (start: emptyStart, data: [])
             // Activity announces 8-byte records, every other type bytes (§6.2).
-            let length = type == .activity ? entry.data.count / 8 : entry.data.count
+            let length = announcedLengths[type].map(Int.init) ?? (type == .activity ? entry.data.count / 8 : entry.data.count)
             let trailer: [UInt8] = startReplyTrailingZero ? [0x00] : []
             return [control([0x10, 0x01, 0x01] + le32(UInt32(length)) + entry.start + trailer)]
         case 0x02:
@@ -314,7 +320,9 @@ public final class FakeZeppDevice {
         case 0x03:
             guard c.count == 2 else { return [] }
             fetchAcks.append(c[1])
+            let acked = currentFetch
             currentFetch = nil
+            if let acked, unansweredAckTypes.contains(acked) { return [] }
             return [control([0x10, 0x03, 0x01])]
         default:
             return []

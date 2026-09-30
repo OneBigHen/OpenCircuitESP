@@ -561,6 +561,53 @@ final class HelioSessionTests: XCTestCase {
         XCTAssertEqual(rig.session.fetchAcksSent.last, 0x09)
     }
 
+    // MARK: review-223 U1: a round the strap never answers after our 03 09
+
+    func testARoundTheStrapNeverAnswersAfterOurKeepAckTripsTheStallTimeoutAndTheNextSyncWorks() throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        // A hostile announcement: 4 MiB of automatic stress (over the record limit, review-223 N1). The
+        // app refuses it with 03 09 and no 02, and this strap then never answers (no 10 03).
+        device.announcedLengths[.autoStress] = 4 << 20
+        device.unansweredAckTypes = [.autoStress]
+        var results: [HelioSyncResult] = []
+        let rig = connect(device, store: store, finished: { results.append($0) })
+        XCTAssertEqual(rig.session.phase, .syncing, "stuck waiting for the ack reply")
+        XCTAssertEqual(device.fetchAcks.last, 0x09)
+        let stressStart = try XCTUnwrap(device.fetchStarts.last)
+        XCTAssertEqual(stressStart[1], ZeppFetchType.autoStress.rawValue)
+
+        // No progress for the stall timeout: the sync ends cleanly, interrupted, nothing more is sent.
+        let writesBefore = rig.transport.writes.count
+        clock = clock.addingTimeInterval(HelioSession.syncStallTimeout - 1)
+        rig.session.tick(now: clock)
+        XCTAssertEqual(rig.session.phase, .syncing)
+        clock = clock.addingTimeInterval(2)
+        rig.session.tick(now: clock)
+        rig.transport.drain()
+        XCTAssertEqual(rig.session.phase, .ready)
+        XCTAssertEqual(rig.session.lastSyncResult?.interrupted, true)
+        XCTAssertEqual(rig.session.syncStatus, "Sync interrupted: what arrived is saved, the rest stays on the strap")
+        XCTAssertFalse(rig.transport.writes[writesBefore...].contains { $0.characteristic == .activityControl && $0.bytes.first == 0x03 },
+                       "the round already had its 03 09; the abort sends no second ack")
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+        let storedBefore = try store.context.fetch(FetchDescriptor<StoredSample>()).count
+        XCTAssertGreaterThan(storedBefore, 0, "the rounds before it stay stored")
+
+        // The strap answers again: the next sync on the same connection runs every type to the end.
+        device.unansweredAckTypes = []
+        device.announcedLengths = [:]
+        let startsBefore = device.fetchStarts.count
+        rig.session.syncHistory(manual: true)
+        rig.transport.drain()
+        XCTAssertEqual(rig.session.phase, .ready)
+        XCTAssertEqual(rig.session.lastSyncResult?.interrupted, false)
+        XCTAssertEqual(Set(device.fetchStarts[startsBefore...].compactMap { ZeppFetchType(rawValue: $0[1]) }),
+                       Set(HelioFetchPlan.types))
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+        XCTAssertEqual(device.fetchAcks.count, device.fetchStarts.count)
+    }
+
     func testALateNotifyOffDoesNotStartTheNextFetch() throws {
         let store = try makeStore()
         let device = makeStrap()
@@ -999,6 +1046,28 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(link.connects, 1, "one connect, no retry loop")
         XCTAssertEqual(link.disconnects, 0, "nothing to disconnect; the standing connect stays for restoration")
         XCTAssertTrue(try rows(store).isEmpty)
+    }
+
+    func testInTheBackgroundAStuckAckEndsWithTheBudgetAndTheNextRunSyncs() async throws {
+        // review-223 U1 in a background task: the budget trips long before the 90 s stall timeout.
+        let store = try makeStore()
+        let device = makeStrap()
+        device.announcedLengths[.autoStress] = 4 << 20
+        device.unansweredAckTypes = [.autoStress]
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        let stuck = await service(link, store: store).run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(stuck.ending, .outOfTime)
+        XCTAssertEqual(link.disconnects, 1, "disconnected cleanly")
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+        XCTAssertGreaterThan(try rows(store).count, 0, "what was committed before the stuck round stays")
+
+        device.unansweredAckTypes = []
+        device.announcedLengths = [:]
+        clock = clock.addingTimeInterval(600)
+        let next = await service(link, store: store).run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(next.ending, .synced)
+        XCTAssertEqual(next.result?.interrupted, false)
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
     }
 
     // MARK: rejected / missing key, busy strap → no retry, no writes, a logged reason
