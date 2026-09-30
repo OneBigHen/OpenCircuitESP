@@ -812,6 +812,7 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
     var endedBusy = false
     var activeBackgroundRuns = 0
     var backgroundRunAdoptsNewSessions = false
+    var pendingNightsFinalization = false
     private(set) var session: HelioSession?
     private(set) var transport: FakeStrapTransport?
     private(set) var connects = 0
@@ -1449,6 +1450,37 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(link.disconnects, 1)
         XCTAssertTrue(flushes.isEmpty, "no flush after iOS ended the task")
         XCTAssertEqual(Set(device.fetchAcks), [0x09])
+    }
+
+    /// Review-225b N-a, from the reviewer's real-budget probe: the Sleep Focus run (28 s) waits behind
+    /// a processing run whose sync holds the strap past the Focus run's 20 s window. The Focus run
+    /// gives up, but leaves its finalization for the processing run's flush, which uses it once.
+    func testAFocusRunThatNeverGetsATurnStillFinalizesTheNightWithRealBudgets() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let refresh = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        let focus = service(link, store: store, flushes: { flushes.append($0) }, pause: {})
+        let a = Task { @MainActor in await refresh.run(kind: .processing, timeout: RingBackgroundSyncService.processingTimeout) }
+        for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
+        let b = Task { @MainActor in
+            await focus.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: true)
+        }
+        let bgTask = await a.value
+        let sleepFocus = await b.value
+        XCTAssertEqual(bgTask.ending, .synced)
+        XCTAssertEqual(sleepFocus.ending, .anotherRunActive)
+        XCTAssertEqual(flushes.count, 1, "only the processing run flushed")
+        XCTAssertEqual(flushes.first?.finalized, true, "with the Focus run's finalization")
+        XCTAssertEqual(flushes.first?.nights, 1)
+        XCTAssertFalse(link.pendingNightsFinalization, "used once")
+
+        // A later run doesn't inherit it.
+        let later = await service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drain() })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(later.ending, .synced)
+        XCTAssertEqual(flushes.map(\.finalized), [true, false])
     }
 
     func testAStrapOutOfRangeKeepsThePendingConnectArmed() async throws {

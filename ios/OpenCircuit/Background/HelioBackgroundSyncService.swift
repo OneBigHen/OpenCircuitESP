@@ -50,6 +50,9 @@ protocol HelioBackgroundLink: AnyObject {
     /// session created before or after the loop (during the run's teardown or Health flush, or once
     /// the run is over) flushes and logs its own syncs through the connection's post-sync hook.
     var backgroundRunAdoptsNewSessions: Bool { get set }
+    /// A Sleep Focus run that never got a turn leaves its "the night is over" here (review-225b N-a);
+    /// the next run to flush or hand off ORs it in and clears it, so it is used exactly once.
+    var pendingNightsFinalization: Bool { get set }
     /// Arm a connect to the saved strap by identifier (no scan). false when there is none.
     func connectForBackground() -> Bool
     /// End the link cleanly and don't reconnect by itself: stop a running find, ack an open round
@@ -177,6 +180,7 @@ struct HelioBackgroundSyncService {
         // its own budget, then runs normally: a cheap second sync with its own `nightsFinalized`.
         while link.activeBackgroundRuns > 0 {
             if Task.isCancelled || now() >= syncDeadline {
+                if nightsFinalized { link.pendingNightsFinalization = true }
                 run.ending = .anotherRunActive
                 return record(run, kind: kind)
             }
@@ -265,7 +269,7 @@ struct HelioBackgroundSyncService {
             link.session?.backgroundRunOwnsSyncs = false   // one made during the loop's last turn, not yet watched
             // Review-225b S-B: the Sleep Focus run's "the night is over" goes with the sync, so the
             // hook's flush writes the night without the 20-minute margin, as this run would have.
-            if nightsFinalized {
+            if takeNightsFinalized(nightsFinalized) {
                 watched?.finalizeNightsOnHandOff = true
                 link.session?.finalizeNightsOnHandOff = true
             }
@@ -296,11 +300,17 @@ struct HelioBackgroundSyncService {
         if run.ending != .expired, let timeline = link.strapTimeline {
             let flushStart = now()
             run.flush = await flush(timeline, run.result?.nights ?? [], run.result?.identity ?? watched?.identity,
-                                    nightsFinalized)
+                                    takeNightsFinalized(nightsFinalized))
             run.flushMS = Self.ms(from: flushStart, to: now())
             if run.flush?.wroteAnything == true { observability.recordHealthWrite() }
         }
         return record(run, kind: kind)
+    }
+
+    /// This run's finalization, ORed with one a waiting Sleep Focus run left on the link (consumed).
+    private func takeNightsFinalized(_ own: Bool) -> Bool {
+        defer { link.pendingNightsFinalization = false }
+        return own || link.pendingNightsFinalization
     }
 
     /// Ack an open round `03 09` and drop the link (the find stop goes out first). false when no
