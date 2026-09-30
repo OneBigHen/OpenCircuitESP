@@ -12,8 +12,12 @@
 //   3. readiness states             → lead with readiness (or why there is none), then the most
 //                                     notable vitals clause: concerns first, then positives, then
 //                                     "in your usual range"
-// Skin temperature AND resting HR both above usual is surfaced ahead of any other clause, because
-// that pairing is what Vitals Status flags as possible fever signs.
+// Possible fever signs are surfaced ahead of any other clause, but ONLY when Vitals Status itself
+// flagged them (`Input.feverSuspected`, its `VitalsBaseline.Report.feverSuspected`: skin temp up
+// ≥ 1.0 °C AND resting HR up ≥ 8 bpm against a 7+ day baseline). The tiles' own bands are looser
+// (0.3 °C, 2 bpm, 4 days), so both tiles reading "above your usual" is not fever, and this line must
+// never say "take today gently" on a screen whose Vitals Status card says nothing is wrong. Each tile
+// direction still speaks for itself as an ordinary clause.
 
 import Foundation
 
@@ -36,6 +40,8 @@ public enum TodaySynthesis {
         public var hrv: BaselineTrend.Direction?
         public var restingHR: BaselineTrend.Direction?
         public var skinTemp: BaselineTrend.Direction?
+        /// Vitals Status's own verdict: its report has `feverSuspected`. False while it hasn't reported.
+        public var feverSuspected: Bool
         /// Last night's asleep minutes, when a night that ended today is stored.
         public var lastNightSleepMinutes: Int?
         /// Typical asleep minutes over recent nights, for the "short night" rule.
@@ -48,6 +54,7 @@ public enum TodaySynthesis {
                     hrv: BaselineTrend.Direction? = nil,
                     restingHR: BaselineTrend.Direction? = nil,
                     skinTemp: BaselineTrend.Direction? = nil,
+                    feverSuspected: Bool = false,
                     lastNightSleepMinutes: Int? = nil,
                     usualSleepMinutes: Double? = nil,
                     newestDataAt: Date?,
@@ -56,6 +63,7 @@ public enum TodaySynthesis {
             self.hrv = hrv
             self.restingHR = restingHR
             self.skinTemp = skinTemp
+            self.feverSuspected = feverSuspected
             self.lastNightSleepMinutes = lastNightSleepMinutes
             self.usualSleepMinutes = usualSleepMinutes
             self.newestDataAt = newestDataAt
@@ -85,7 +93,7 @@ public enum TodaySynthesis {
         let concerns = concernClauses(input)
         let positives = positiveClauses(input)
         let steady = steadyClause(input)
-        let feverPair = input.skinTemp == .above && input.restingHR == .above
+        let feverPair = input.feverSuspected
         let feverClause = "skin temperature and resting heart rate are both above your usual"
 
         switch input.readiness {

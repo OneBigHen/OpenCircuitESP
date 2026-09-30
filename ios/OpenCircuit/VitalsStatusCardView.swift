@@ -39,7 +39,12 @@ struct VitalsStatusCardView: View {
 
     private static let historyDays = 32
 
-    init() {
+    /// Reports every recomputed report, so the Today synthesis line (#216) names possible fever signs
+    /// only when this card does. nil while there isn't enough baseline history.
+    var onReport: ((VitalsBaseline.Report?) -> Void)?
+
+    init(onReport: ((VitalsBaseline.Report?) -> Void)? = nil) {
+        self.onReport = onReport
         let since = Calendar.current.startOfDay(for: Date())
             .addingTimeInterval(-Double(Self.historyDays) * 86_400)
         let hr = MetricKind.heartRate.rawValue
@@ -120,6 +125,7 @@ struct VitalsStatusCardView: View {
                                    fallbackRestingHR: fbRestingHR, fallbackSpO2: fbSpO2,
                                    fallbackHRV: fbHRV, fallbackSkinTempOffsetC: fbSkinTempOffsetC)
             }.value
+            onReport?(report)
         }
     }
 

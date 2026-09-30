@@ -104,6 +104,9 @@ struct ContentView: View {
     @State private var liveBuffer = LiveBuffer()
     /// What the readiness card last showed, so the Today synthesis line (#216) agrees with it.
     @State private var readinessReport: ReadinessReport?
+    /// Whether the Vitals Status card's last report flagged possible fever signs, so the synthesis
+    /// line only pairs skin temperature with resting HR when that card does.
+    @State private var vitalsFeverSuspected = false
 
     // Display units (#83) — SI is stored; only the display layer converts. Shared keys with settings.
     @AppStorage("units.temperature") private var tempUnitRaw = TemperatureUnit.localeDefault.rawValue
@@ -705,7 +708,9 @@ struct ContentView: View {
         // a false claim to a wearer who has plenty.
         guard trendsHaveLoaded else { return "Gathering today's numbers…" }
         return TodaySynthesis.sentence(TodaySynthesis.input(trends: trends, tiles: todayTiles,
-                                                             readiness: readinessReport, lastSyncAt: lastSyncAt))
+                                                             readiness: readinessReport,
+                                                             feverSuspected: vitalsFeverSuspected,
+                                                             lastSyncAt: lastSyncAt))
     }
 
     /// The sections actually rendered right now — `sectionOrder` minus any feature-gated card that's
@@ -1622,7 +1627,9 @@ struct ContentView: View {
     /// Vitals Status (#72): compares the latest day's resting HR / overnight SpO₂ / overnight HRV /
     /// skin temp to the user's PERSONAL 7–30 day baseline and surfaces normal / watch / anomaly with
     /// the contributing signals (incl. suspected fever). Self-contained view (its own @Query).
-    private var vitalsStatusCard: some View { VitalsStatusCardView() }
+    private var vitalsStatusCard: some View {
+        VitalsStatusCardView(onReport: { vitalsFeverSuspected = $0?.feverSuspected == true })
+    }
 
     /// Dedicated, always-visible sleep section below vitals. Reads the persisted nightly summary
     /// so the most recent night stays on screen all day — across reconnects and syncs — and

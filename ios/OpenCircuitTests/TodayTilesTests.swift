@@ -141,6 +141,29 @@ final class TodayTilesTests: XCTestCase {
         XCTAssertNil(input.hrv, "a two-day-old night must not be reported as today's HRV")
     }
 
+    /// Review #220 S3: the fever pairing is Vitals Status's verdict, passed through untouched — never
+    /// derived from the tiles. Two tiles above their usual, no Vitals Status fever: no pairing.
+    func testSynthesisTakesFeverSignsFromVitalsStatusOnly() {
+        let hot = [33.5, 33.5, 33.5, 33.5, 33.5, 33.9].enumerated().map { i, v in
+            TrendsEngine.DailyPoint(date: day(i - 5), skinTempC: v)
+        }
+        let rhr = (0..<6).map { RestingHR.DailyValue(day: day($0 - 5), bpm: $0 == 5 ? 61 : 58) }
+        let tiles = [tile(.skinTemp, hot), tile(.restingHR, [], restingHR: rhr)]
+        XCTAssertEqual(tiles.map { $0.trend?.direction }, [.above, .above])
+        var trends = TrendsData()
+        trends.newestSampleAt = now.addingTimeInterval(-3600)
+
+        let quiet = TodaySynthesis.input(trends: trends, tiles: tiles, readiness: nil, lastSyncAt: now, now: now)
+        XCTAssertFalse(quiet.feverSuspected)
+        XCTAssertFalse(TodaySynthesis.sentence(quiet).contains("gently"))
+
+        let flagged = TodaySynthesis.input(trends: trends, tiles: tiles, readiness: nil, feverSuspected: true,
+                                           lastSyncAt: now, now: now)
+        XCTAssertTrue(flagged.feverSuspected)
+        XCTAssertEqual(TodaySynthesis.sentence(flagged),
+                       "Skin temperature and resting heart rate are both above your usual, so take today gently.")
+    }
+
     func testSynthesisNeverClaimsNoDataAfterASync() {
         let input = TodaySynthesis.input(trends: TrendsData(), tiles: [], readiness: nil,
                                          lastSyncAt: now.addingTimeInterval(-86_400 * 20), now: now)
