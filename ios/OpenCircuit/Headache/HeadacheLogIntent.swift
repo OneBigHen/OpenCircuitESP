@@ -228,7 +228,8 @@ private func quickLogStore() throws -> LocalStore {
     guard let container = try? (OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()) else {
         throw HeadacheQuickLogError.storeUnavailable
     }
-    return LocalStore(container.mainContext)
+    // `container:` keeps a fallback-built container alive for as long as the returned store.
+    return LocalStore(container: container)
 }
 
 /// Shared confirmation wording, so every entry point says the same thing about what was stored.

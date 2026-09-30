@@ -118,7 +118,8 @@ private func exportStore() throws -> LocalStore {
     guard let container = try? (OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()) else {
         throw ExportIntentError.storeUnavailable
     }
-    return LocalStore(container.mainContext)
+    // `container:` keeps a fallback-built container alive for as long as the returned store.
+    return LocalStore(container: container)
 }
 
 // MARK: - The intent

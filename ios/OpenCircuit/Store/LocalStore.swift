@@ -787,8 +787,24 @@ final class StoredDaytimeTemp {
 @MainActor
 struct LocalStore {
     let context: ModelContext
+    /// The container this store was built from, when nothing else keeps it alive. A `ModelContext`
+    /// does NOT retain its `ModelContainer`, and a fetch through a context whose container has been
+    /// released traps inside SwiftData. The App's container and `OpenCircuitApp.sharedContainer`
+    /// live for the whole process, so `init(_:)` needs none; a container built on the spot by
+    /// `makeContainerOrThrow()` (an intent, a restoration relaunch) goes through `init(container:)`.
+    private let ownedContainer: ModelContainer?
 
-    init(_ context: ModelContext) { self.context = context }
+    init(_ context: ModelContext) {
+        self.context = context
+        self.ownedContainer = nil
+    }
+
+    /// A store over `container`'s main context that keeps `container` alive for as long as this
+    /// store, or any copy of it, exists.
+    init(container: ModelContainer) {
+        self.context = container.mainContext
+        self.ownedContainer = container
+    }
 
     // MARK: Shared fetch descriptors
     //
