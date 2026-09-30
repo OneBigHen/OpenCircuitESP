@@ -31,8 +31,9 @@ public struct ZeppRandom {
         return out
     }
 
-    /// Hands out `stream` in order and throws once it runs out. For tests and fixtures only.
-    public static func fixed(_ stream: [UInt8]) -> ZeppRandom {
+    /// Hands out `stream` in order and throws once it runs out. For tests and fixtures only, so it is
+    /// internal: tests reach it through `@testable import`, and no app or tool can pick it by mistake.
+    static func fixed(_ stream: [UInt8]) -> ZeppRandom {
         let box = FixedStream(stream)
         return ZeppRandom { count in try box.take(count) }
     }

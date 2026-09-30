@@ -188,3 +188,12 @@ public struct ZeppAuthenticator {
         return Step(send: nil, session: nil, state: state)
     }
 }
+
+/// Mid-handshake the authenticator holds the ephemeral ECDH private key (and always the auth key),
+/// so a description, debug description or reflection shows only the state: `print`, `dump` and
+/// string interpolation of it, or of a `ZeppLink`, cannot leak either.
+extension ZeppAuthenticator: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "ZeppAuthenticator(state: \(state))" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["state": state], displayStyle: .struct) }
+}
