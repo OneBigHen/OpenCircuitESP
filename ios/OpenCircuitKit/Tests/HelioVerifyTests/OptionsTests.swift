@@ -47,11 +47,28 @@ final class OptionsTests: XCTestCase {
         assertRejected(key + ["--allow-write", "--alarms"])
     }
 
-    func testSetTime() {
-        XCTAssertEqual(accepted(key + ["--set-time"])?.setTime, true)
-        XCTAssertEqual(accepted(key + ["--set-time", "--alarms"])?.setTime, true)
-        XCTAssertEqual(accepted(key + ["--set-time", "--find"])?.setTime, true)
-        assertRejected(key + ["--set-time", "--allow-write"])
+    /// #221 review S1: the clock write was the one strap write outside --allow-write, and adding
+    /// --allow-write to it was rejected.
+    func testSetTimeNeedsAllowWrite() {
+        assertRejected(key + ["--set-time"])
+        assertRejected(key + ["--set-time", "--alarms"])
+        assertRejected(key + ["--set-time", "--find"])
+        XCTAssertThrowsError(try parseOptions(key + ["--set-time"])) {
+            XCTAssertEqual($0 as? OptionsError, .invalid("--set-time writes the strap's clock: add --allow-write to confirm"))
+        }
+        XCTAssertEqual(accepted(key + ["--set-time", "--allow-write"])?.setTime, true)
+        XCTAssertEqual(accepted(key + ["--set-time", "--allow-write", "--alarms"])?.setTime, true)
+        XCTAssertEqual(accepted(key + ["--set-time", "--allow-write", "--find"])?.setTime, true)
+        // An alarm write sets the clock with or without --set-time.
+        XCTAssertEqual(accepted(key + ["--set-time", "--set-alarm", "07:00", "--allow-write"])?.setTime, true)
+        // Without a key there is no auth, so no clock set: refused rather than silently skipped.
+        assertRejected(["--set-time", "--allow-write"])
+    }
+
+    func testAllowWriteAloneNamesEveryWriteItApplies() {
+        XCTAssertThrowsError(try parseOptions(key + ["--allow-write"])) {
+            XCTAssertEqual($0 as? OptionsError, .invalid("--allow-write only applies to --set-time / --set-alarm / --delete-alarm"))
+        }
     }
 
     func testArgumentValidation() {

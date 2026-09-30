@@ -9,8 +9,8 @@
 // and flushed to the drive with F_FULLFSYNC.
 //
 // Device controls (`--find`, `--vibrate`, `--alarms`, `--set-alarm`, `--delete-alarm`, `--alerts`)
-// live in Controls.swift. Alarm writes need `--allow-write`; nothing else writes strap state
-// except the opt-in `--set-time`.
+// live in Controls.swift. Every write of strap settings (`--set-time`, and the alarm writes, which
+// set the clock first) needs `--allow-write`; dropping fetched data needs `--allow-delete`.
 
 import CoreBluetooth
 import Foundation
@@ -638,6 +638,8 @@ if options.allowDelete {
 }
 if options.writesAlarms {
     print("NOTE: this run WRITES the strap's alarms (--allow-write), and sets its clock first.")
+} else if options.setTime {
+    print("NOTE: this run WRITES the strap's clock (--set-time --allow-write).")
 }
 if #available(macOS 10.15.4, *) {
     let verifier = HelioVerifier(options: options, key: key)

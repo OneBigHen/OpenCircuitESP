@@ -57,7 +57,9 @@ OPTIONS
   --name <name>       Only connect to a device advertising exactly this name.
   --scan-seconds <n>  Give up scanning after n seconds (default 30).
   --timeout <n>       Abort the whole run after n seconds (default 300).
-  --set-time          Set the strap's clock to this Mac's time before fetching (off by default).
+  --set-time          WRITES STRAP STATE; needs --allow-write. Sets the strap's clock to this
+                      Mac's time and zone after auth (off by default). The strap stamps its later
+                      history with this clock.
   --trace             Print every history-fetch control message both ways as hex, and each data
                       packet's length and counter byte (never its payload).
   --out <path>        Append each fetched round (raw hex + metadata, JSON lines) to this file and
@@ -87,7 +89,10 @@ DEVICE CONTROLS (Helio Strap only; all need --key-file)
                       in strap-local time.
   --delete-alarm <n>  WRITES STRAP STATE; needs --allow-write. Deletes the alarm in slot n (0-9),
                       e.g. the one --set-alarm made. Prints the list before and after.
-  --allow-write       Permits --set-alarm / --delete-alarm. Without it nothing is written.
+  --allow-write       Confirms the writes that change strap settings: --set-time (the clock),
+                      --set-alarm and --delete-alarm (which also set the clock). Each of those
+                      needs it, and it is refused on its own. Without it no setting is changed.
+                      Dropping fetched data from the strap has its own flag, --allow-delete.
 
 EXIT CODES
   0 ok · 1 usage · 2 Bluetooth unavailable · 3 timeout · 4 auth failed · 5 no device found
@@ -175,11 +180,17 @@ func parseOptions(_ args: [String]) throws -> Options {
     if o.hasControls && o.keyFile == nil {
         throw fail("--find, --vibrate, --alerts and the alarm flags need --key-file: the strap only takes them after auth")
     }
+    if o.setTime && o.keyFile == nil {
+        throw fail("--set-time needs --key-file: the clock is set after auth")
+    }
     if o.writesAlarms && !o.allowWrite {
         throw fail("--set-alarm and --delete-alarm write the strap's alarms: add --allow-write to confirm")
     }
-    if o.allowWrite && !o.writesAlarms {
-        throw fail("--allow-write only applies to --set-alarm / --delete-alarm")
+    if o.setTime && !o.allowWrite {
+        throw fail("--set-time writes the strap's clock: add --allow-write to confirm")
+    }
+    if o.allowWrite && !o.writesAlarms && !o.setTime {
+        throw fail("--allow-write only applies to --set-time / --set-alarm / --delete-alarm")
     }
     if o.setAlarm != nil && o.deleteAlarmSlot != nil {
         throw fail("one alarm write per run: use --set-alarm or --delete-alarm, not both")
