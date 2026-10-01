@@ -1353,6 +1353,11 @@ struct LocalStore {
         if !(log.isEmpty && device == .ringConn) {
             out = out.filter { log.owns(device, at: $0.start) }
         }
+        // #227 (review-238 SF1): a strap workout's own readings are already in Health inside its
+        // HKWorkout; they stay out of this flush without the watermark moving. Never the ring's.
+        if device != .ringConn {
+            out = StrapWorkoutHealthExclusions().filter(out, device: device, healthWatermark: cursor.last(.heartRate))
+        }
         return out.sorted { $0.start < $1.start }
     }
 

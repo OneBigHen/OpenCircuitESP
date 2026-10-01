@@ -163,20 +163,4 @@ final class StrapWorkoutTests: XCTestCase {
         XCTAssertEqual(StrapWorkoutRecovery.decide(journal: future, samples: [], now: at(50)), .discard(.endsInTheFuture))
         XCTAssertEqual(StrapWorkoutRecovery.decide(journal: nil, samples: [], now: at(50)), .nothingToRecover)
     }
-
-    // MARK: Landing
-
-    func testReadingsLandOnlyOnceTheStrapsHistoryCoversThem() {
-        let pending = readings(0, 120, bpm: 130)
-        let none = StrapWorkoutHRLanding.split(pending, coveredThrough: nil, now: at(200))
-        XCTAssertEqual(none.land.count, 0)
-        XCTAssertEqual(none.keep.count, 120)
-
-        let half = StrapWorkoutHRLanding.split(pending, coveredThrough: at(60), now: at(200))
-        XCTAssertEqual(half.land.count, 60)
-        XCTAssertEqual(half.keep.first?.start, at(60))
-
-        let stale = StrapWorkoutHRLanding.split(pending, coveredThrough: nil, now: at(120 + StrapWorkoutHRLanding.maxWait))
-        XCTAssertEqual(stale.land.count, 120, "never held forever")
-    }
 }

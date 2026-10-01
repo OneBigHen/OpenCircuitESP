@@ -60,11 +60,9 @@ struct ContentView: View {
     /// Apple Health, or discard). Non-nil presents the recovery alert. See
     /// `WorkoutSessionRecovery` for what the app is allowed to claim about it.
     @State private var recoverableWorkout: RecoveredWorkout?
-    /// The strap's workout (#227), owned here for the same reason as `workoutManager`. Idle and inert
-    /// unless a strap workout starts.
-    @State private var strapWorkouts = StrapWorkoutRecorder.live(store: {
-        OpenCircuitApp.sharedContainer.map { LocalStore($0.mainContext) }
-    })
+    /// The strap's workout (#227): the app's one recorder, outliving every sheet as `workoutManager` does.
+    /// Built once, on first use (review-238 N2), idle and inert unless a strap workout starts.
+    private var strapWorkouts: StrapWorkoutRecorder { .shared }
     @State private var showStrapWorkout = false
     @State private var showCalibration = false
     @StateObject private var calibration = CalibrationSessionManager()

@@ -26,6 +26,8 @@ private final class FakeHRSource: StrapWorkoutHeartRateSource {
     private(set) var stops = 0
     private(set) var syncRequests = 0
     private(set) var orphanStops = 0
+    /// The persisted flag the recorder sets (`StrapWorkoutOrphanStop`), as `HelioSession` reads it.
+    var owedStop: StrapWorkoutOrphanStop?
 
     init(timeline: SyncDeviceID = .timeline(for: .zeppOS(model: "Helio Strap"), identityID: "STRAP-A")) {
         self.timeline = timeline
@@ -33,7 +35,11 @@ private final class FakeHRSource: StrapWorkoutHeartRateSource {
 
     func startWorkoutHeartRate() { starts += 1 }
     func stopWorkoutHeartRate() { stops += 1 }
-    func stopOrphanedHeartRate() { orphanStops += 1 }
+    func sendOwedOrphanStop() {
+        guard let owedStop, owedStop.owed else { return }
+        orphanStops += 1
+        owedStop.owed = false
+    }
     func syncHistory(manual: Bool) { syncRequests += 1 }
 
     /// The strap sends one reading.
@@ -59,7 +65,14 @@ private final class MemoryJournal: StrapWorkoutJournalStoring {
     func saveJournal(_ journal: StrapWorkoutJournal) { self.journal = journal }
     func appendSamples(_ samples: [HRSample]) { self.samples += samples }
     func loadSamples() -> [HRSample] { samples }
+    var parked: [StrapWorkoutParked] = []
     func clearRunning() { journal = nil; samples = [] }
+    func parkRunning() {
+        if let journal { parked.append(StrapWorkoutParked(journal: journal, samples: samples)) }
+        clearRunning()
+    }
+    func loadParked() -> [StrapWorkoutParked] { parked }
+    func saveParked(_ parked: [StrapWorkoutParked]) { self.parked = parked }
     func loadLanding() -> [StrapWorkoutLandingBatch] { landing }
     func saveLanding(_ batches: [StrapWorkoutLandingBatch]) { landing = batches }
 }
@@ -80,9 +93,7 @@ private final class FakeLocation: WorkoutLocationTracking {
 
 @MainActor
 private final class FakeHRStore: StrapWorkoutHRStore {
-    var covered: Date?
     private(set) var inserted: [HRSample] = []
-    func activityCoveredThrough(timeline: SyncDeviceID) -> Date? { covered }
     func insertWorkoutHeartRate(_ samples: [HRSample], timeline: SyncDeviceID) throws { inserted += samples }
 }
 
@@ -92,6 +103,14 @@ private final class FakeHRStore: StrapWorkoutHRStore {
 final class StrapWorkoutRecorderTests: XCTestCase {
     private var now = t0
     private let profile = UserProfile(age: 40, weightKg: 70, heightCm: 175, sex: .male)   // max HR 180
+    /// The owed-stop flag in a defaults suite of this test's own.
+    private let orphanStop = StrapWorkoutOrphanStop(UserDefaults(suiteName: "strap-workout-tests-\(UUID().uuidString)")!)
+
+    private func makeSource(_ timeline: SyncDeviceID? = nil) -> FakeHRSource {
+        let source = timeline.map { FakeHRSource(timeline: $0) } ?? FakeHRSource()
+        source.owedStop = orphanStop
+        return source
+    }
 
     private struct Rig {
         let recorder: StrapWorkoutRecorder
@@ -110,7 +129,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         let profile = self.profile
         let recorder = StrapWorkoutRecorder(source: source, health: health, journal: journal, hrStore: { store },
                                             location: location, liveActivity: nil, profile: { profile },
-                                            indoorKeepAlive: { false },
+                                            indoorKeepAlive: { false }, orphanStop: orphanStop,
                                             clock: { [unowned self] in self.now }, autoTick: false, managesIdleTimer: false)
         return Rig(recorder: recorder, health: health, journal: journal, location: location, store: store)
     }
@@ -130,7 +149,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
     // MARK: start → pause → resume → end
 
     func testStartPauseResumeEndWritesOneWorkoutWithTheActiveDurationAndZones() async throws {
-        let source = FakeHRSource()
+        let source = makeSource()
         let rig = makeRig(source: { source })
         rig.recorder.selectedSport = .runningIndoor
         XCTAssertTrue(rig.recorder.canStart(source))
@@ -172,21 +191,15 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         XCTAssertFalse(StrapWorkoutRecorder.holdsStrapLink)
         XCTAssertEqual(source.syncRequests, 1, "the sync the workout held back runs at End")
         XCTAssertNil(rig.journal.journal, "nothing left to recover")
-        XCTAssertEqual(rig.journal.landing.first?.samples.count, 480, "queued for LocalStore until the strap's history covers it")
-        XCTAssertEqual(rig.store.inserted.count, 0, "the strap's history hasn't covered the workout yet")
-
-        // The strap syncs past the workout: the readings land, and only then.
-        rig.store.covered = at(601)
-        rig.recorder.landPendingHeartRate()
-        XCTAssertEqual(rig.store.inserted.count, 480)
-        XCTAssertEqual(rig.journal.landing, [])
+        XCTAssertEqual(rig.store.inserted.count, 480, "stored at End (no watermark moves; Health has them already)")
+        XCTAssertEqual(rig.journal.landing, [], "nothing left queued")
 
         rig.recorder.reset()
         XCTAssertEqual(rig.recorder.state, .idle)
     }
 
     func testEndingWhilePausedEndsWhereItStoppedRunning() async throws {
-        let source = FakeHRSource()
+        let source = makeSource()
         let rig = makeRig(source: { source })
         rig.recorder.selectedSport = .yoga
         rig.recorder.start()
@@ -201,7 +214,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
     }
 
     func testStartWaitsForTheStrapsSyncAndNeedsAStream() {
-        let source = FakeHRSource()
+        let source = makeSource()
         let rig = makeRig(source: { source })
         source.syncing = true
         XCTAssertFalse(rig.recorder.canStart(source), "like the ring's Start, not while a sync holds the link")
@@ -214,7 +227,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
     }
 
     func testCancelWritesNothing() async {
-        let source = FakeHRSource()
+        let source = makeSource()
         let rig = makeRig(source: { source })
         rig.recorder.start()
         await stream(rig, source, from: 0, to: 30, bpm: 120)
@@ -227,7 +240,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
     }
 
     func testOutdoorStartsTheRouteAndTheRouteGoesToHealth() async throws {
-        let source = FakeHRSource()
+        let source = makeSource()
         let rig = makeRig(source: { source })
         rig.recorder.selectedSport = .runningOutdoor
         rig.recorder.start()
@@ -247,7 +260,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
 
     func testAWorkoutInterruptedByAKillIsOfferedBackAndClosesAtItsLastReading() async throws {
         let journal = MemoryJournal()
-        let source = FakeHRSource()
+        let source = makeSource()
         do {
             let first = makeRig(source: { source }, journal: journal)
             first.recorder.selectedSport = .runningIndoor
@@ -276,7 +289,9 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         XCTAssertEqual(write.samples.count, 905)
         XCTAssertEqual(write.summary.summary.zoneBreakdown.totalZoneSeconds, 905, accuracy: 0.001)
         XCTAssertNil(journal.journal, "a second launch can't offer (and write) it twice")
-        XCTAssertEqual(source.orphanStops, 1, "the dead process's stream is closed with 04 00")
+        XCTAssertEqual(source.orphanStops, 1, "the strap is ready at the launch: the owed 04 00 goes out at once")
+        XCTAssertFalse(orphanStop.owed)
+        XCTAssertEqual(second.store.inserted.count, 905, "its readings are stored too")
         XCTAssertNil(second.recorder.recoverable)
 
         let third = makeRig(source: { source }, journal: journal)
@@ -286,7 +301,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
 
     func testDiscardAndNotNow() async throws {
         let journal = MemoryJournal()
-        let source = FakeHRSource()
+        let source = makeSource()
         do {
             let first = makeRig(source: { source }, journal: journal)
             first.recorder.start()
@@ -300,14 +315,81 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         second.recorder.resolveOrphan()
         second.recorder.discardRecovered()
         XCTAssertNil(journal.journal)
-        XCTAssertEqual(source.orphanStops, 1)
+        XCTAssertEqual(source.orphanStops, 2, "each look at the journal owes one stop; the ready strap gets each at once")
+        XCTAssertFalse(orphanStop.owed)
         XCTAssertEqual(second.health.writes.count, 0)
+    }
+
+    /// Review-238 SF2: Save, Discard, Not now and a refused journal all leave the stop owed when no
+    /// strap is connected at the launch (the session sends it at its own `ready`; see the session test).
+    func testTheOrphanStopStaysOwedWhenNoStrapIsConnected() async throws {
+        let journal = MemoryJournal()
+        let source = makeSource()
+        do {
+            let first = makeRig(source: { source }, journal: journal)
+            first.recorder.start()
+            await stream(first, source, from: 0, to: 20, bpm: 140)
+        }
+        now = at(3600)
+        let launch = makeRig(source: { nil }, journal: journal)
+        launch.recorder.resolveOrphan()
+        XCTAssertTrue(orphanStop.owed)
+        launch.recorder.postponeRecovered()
+        XCTAssertTrue(orphanStop.owed, "Not now")
+        orphanStop.owed = false
+        launch.recorder.resolveOrphan()
+        _ = await launch.recorder.saveRecovered()
+        XCTAssertTrue(orphanStop.owed, "Save")
+        XCTAssertEqual(source.orphanStops, 0, "nothing reached a strap that isn't connected")
+
+        // A journal with no observed span is refused (dropped silently): its stream is still owed a stop.
+        orphanStop.owed = false
+        journal.journal = StrapWorkoutJournal(sport: .yoga, ledger: WorkoutActivityLedger(start: at(4000)),
+                                              lastAliveAt: at(4000), timelineRaw: source.timeline.rawValue)
+        launch.recorder.resolveOrphan()
+        XCTAssertNil(launch.recorder.recoverable)
+        XCTAssertNil(journal.journal)
+        XCTAssertTrue(orphanStop.owed, "a refused journal")
+    }
+
+    /// Review-238 N1 (its probe, ported): "Not now" promises the next launch asks again. A new workout
+    /// started in between sets the interrupted one aside instead of deleting it.
+    func testNotNowThenANewWorkoutKeepsTheInterruptedOne() async throws {
+        let journal = MemoryJournal()
+        let source = makeSource()
+        do {
+            let dead = makeRig(source: { source }, journal: journal)
+            dead.recorder.selectedSport = .runningIndoor
+            dead.recorder.start()
+            await stream(dead, source, from: 0, to: 30, bpm: 140)
+        }
+        now = at(3600)
+        let next = makeRig(source: { source }, journal: journal)
+        next.recorder.resolveOrphan()
+        XCTAssertNotNil(next.recorder.recoverable)
+        next.recorder.postponeRecovered()                     // "Not now"
+        next.recorder.start()                                  // a new workout, the same launch
+        await stream(next, source, from: 3600, to: 3620, bpm: 120)
+        await next.recorder.end()
+        XCTAssertEqual(next.health.writes.count, 1)
+
+        let relaunch = makeRig(source: { source }, journal: journal)
+        relaunch.recorder.resolveOrphan()
+        let recovered = try XCTUnwrap(relaunch.recorder.recoverable, "the postponed interrupted workout is still there")
+        XCTAssertEqual(recovered.end, at(30))
+        XCTAssertEqual(recovered.samples.count, 30)
+        _ = await relaunch.recorder.saveRecovered()
+        XCTAssertEqual(relaunch.health.writes.count, 1)
+        XCTAssertEqual(journal.parked, [], "saved once, then gone")
+        let after = makeRig(source: { source }, journal: journal)
+        after.recorder.resolveOrphan()
+        XCTAssertNil(after.recorder.recoverable)
     }
 
     // MARK: The link drops mid-workout
 
     func testALinkDropKeepsTheWorkoutRunningMarksTheGapAndAdoptsTheReconnectedStrap() async throws {
-        let first = FakeHRSource()
+        let first = makeSource()
         var current: FakeHRSource? = first
         let rig = makeRig(source: { current })
         rig.recorder.selectedSport = .runningIndoor
@@ -323,7 +405,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         XCTAssertEqual(rig.recorder.activeSeconds, 260)
 
         // It reconnects: a new session, set up but not yet ready, then ready.
-        let second = FakeHRSource()
+        let second = makeSource()
         second.ready = false
         current = second
         await stream(rig, nil, from: 260, to: 300, bpm: 0)
@@ -442,7 +524,11 @@ final class StrapWorkoutSessionTests: XCTestCase {
         return HelioStoreSink(store: LocalStore(container.mainContext))
     }
 
-    private func connect(sink: HelioStoreSink? = nil,
+    private func freshOrphanStop() -> StrapWorkoutOrphanStop {
+        StrapWorkoutOrphanStop(UserDefaults(suiteName: "strap-workout-tests-\(UUID().uuidString)")!)
+    }
+
+    private func connect(sink: HelioStoreSink? = nil, orphanStop: StrapWorkoutOrphanStop? = nil,
                          workoutHolds: @escaping @MainActor () -> Bool = { false }) -> (HelioSession, WorkoutStrapTransport) {
         let device = FakeZeppDevice(authKey: ZeppHex.bytes(keyHex)!, privateKey: Array(UInt8(0x81)...UInt8(0x98)),
                                     random: Array(UInt8(0xf0)...UInt8(0xff)), writeLength: 244)
@@ -457,6 +543,7 @@ final class StrapWorkoutSessionTests: XCTestCase {
                                    clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: false,
                                    workoutHoldsLink: workoutHolds)
         transport.session = session
+        session.orphanStop = orphanStop ?? freshOrphanStop()
         session.start()
         transport.drain()
         return (session, transport)
@@ -514,14 +601,42 @@ final class StrapWorkoutSessionTests: XCTestCase {
         XCTAssertFalse(transport.device.receivedEndpoints.contains(0x0019), "route 1 sends nothing on 0x0019")
     }
 
-    func testClosingAnInterruptedWorkoutSendsOneStopUnlessAStreamRuns() {
-        let (session, transport) = connect()
-        session.stopOrphanedHeartRate()
-        XCTAssertEqual(transport.heartRateCommands, [ZeppHeartRateControl.stop])
+    /// Review-238 SF2: the strap isn't connected when the person answers the interrupted-workout offer.
+    /// It connects later: exactly one `04 00`, at its first authenticated ready, and none after.
+    func testTheOwedStopIsSentOnceAtTheStrapsNextReady() async throws {
+        let owed = freshOrphanStop()
+        let journal = MemoryJournal()
+        let timeline = SyncDeviceID.timeline(for: .zeppOS(model: "Helio Strap"), identityID: "STRAP-O")
+        journal.journal = StrapWorkoutJournal(sport: .runningIndoor, ledger: WorkoutActivityLedger(start: at(0)),
+                                              lastAliveAt: at(600), timelineRaw: timeline.rawValue)
+        journal.samples = (1...600).map { HRSample(bpm: 140, start: at(Double($0) - 1), end: at(Double($0))) }
+        let recorder = StrapWorkoutRecorder(source: { nil }, health: FakeHealthWriter(), journal: journal,
+                                            hrStore: { FakeHRStore() }, location: FakeLocation(), liveActivity: nil,
+                                            profile: { UserProfile(age: 40, weightKg: 70, heightCm: 175, sex: .male) },
+                                            indoorKeepAlive: { false }, orphanStop: owed,
+                                            clock: { at(4000) }, autoTick: false, managesIdleTimer: false)
+        recorder.resolveOrphan()
+        let saved = await recorder.saveRecovered()
+        XCTAssertTrue(saved)
+        XCTAssertTrue(owed.owed, "no strap at the tap: still owed")
+
+        let (session, transport) = connect(orphanStop: owed)
+        XCTAssertTrue(session.ready)
+        XCTAssertEqual(transport.heartRateCommands, [ZeppHeartRateControl.stop], "exactly one 04 00, at ready")
+        XCTAssertFalse(owed.owed)
+        let (_, later) = connect(orphanStop: owed)
+        XCTAssertEqual(later.heartRateCommands, [], "and never again")
+    }
+
+    func testAnOwedStopIsOnlyClearedWhenThisConnectionStreamsItself() {
+        let owed = freshOrphanStop()
+        let (session, transport) = connect(orphanStop: owed)
         session.startLiveHeartRate(duration: StrapLiveHeartRate.duration)
-        session.stopOrphanedHeartRate()
+        owed.owed = true
+        session.sendOwedOrphanStop()
         XCTAssertTrue(session.liveHeartRateRunning, "a Measure running on this connection is left alone")
-        XCTAssertEqual(transport.heartRateCommands, [ZeppHeartRateControl.stop, ZeppHeartRateControl.start])
+        XCTAssertEqual(transport.heartRateCommands, [ZeppHeartRateControl.start])
+        XCTAssertFalse(owed.owed)
     }
 
     func testAStalledWorkoutStreamIsStartedAgain() {
@@ -573,9 +688,11 @@ final class StrapWorkoutStoreTests: XCTestCase {
     override func setUp() {
         super.setUp()
         ownership.install(.strapOwnsAllTime)
+        StrapWorkoutHealthExclusions().clear(device: timeline)
     }
 
     override func tearDown() {
+        StrapWorkoutHealthExclusions().clear(device: timeline)
         ownership.restore()
         containers.removeAll()
         super.tearDown()
@@ -590,9 +707,11 @@ final class StrapWorkoutStoreTests: XCTestCase {
         return LocalStore(container.mainContext)
     }
 
+    /// A 2-minute workout's readings, +1 … +120 s, each over the second before it.
+    private var readings: [HRSample] { (1...120).map { HRSample(bpm: 150, start: at(Double($0) - 1), end: at(Double($0))) } }
+
     func testWorkoutReadingsLandWithoutMovingEitherWatermarkAndOnlyOnce() throws {
         let store = try makeStore()
-        let readings = (1...120).map { HRSample(bpm: 150, start: at(Double($0) - 1), end: at(Double($0))) }
         try store.insertWorkoutHeartRate(readings, timeline: timeline)
         try store.insertWorkoutHeartRate(readings, timeline: timeline)   // a retried landing
         let rows = try store.context.fetch(FetchDescriptor<StoredSample>())
@@ -603,6 +722,327 @@ final class StrapWorkoutStoreTests: XCTestCase {
         // The strap's own history from BEFORE the workout still goes in afterwards.
         let earlier = [QuantitySample(kind: .heartRate, start: at(-3600), value: 70)]
         XCTAssertEqual(try store.ingest(earlier, device: timeline).count, 1)
-        XCTAssertNil(store.activityCoveredThrough(timeline: timeline))
+    }
+
+    /// Review-238 SF1 (its probe, ported): the strap's history rows at +0 and +60 were synced and flushed,
+    /// then the workout's readings are stored. None of them is offered to Health again.
+    func testLandedWorkoutReadingsAreNotOfferedToHealthAgain() throws {
+        let store = try makeStore()
+        _ = try store.ingest([QuantitySample(kind: .heartRate, start: at(0), value: 150),
+                              QuantitySample(kind: .heartRate, start: at(60), value: 152)], device: timeline)
+        let firstFlush = try store.pendingHealthSamples(device: timeline, kinds: [.heartRate])
+        XCTAssertEqual(firstFlush.count, 2)
+        try store.markHealthWritten(firstFlush, device: timeline)
+        try store.insertWorkoutHeartRate(readings, timeline: timeline)
+        XCTAssertEqual(try store.pendingHealthSamples(device: timeline, kinds: [.heartRate]).count, 0)
+    }
+
+    /// Review-238 SF1's second probe, ported: the strap never synced again after the workout (the person
+    /// went back to the ring); its next flush, whenever it comes, offers none of the readings.
+    func testReadingsStoredBeforeTheStrapEverFlushedAreNotOffered() throws {
+        let store = try makeStore()
+        try store.insertWorkoutHeartRate(readings, timeline: timeline)
+        XCTAssertEqual(try store.pendingHealthSamples(device: timeline, kinds: [.heartRate]).count, 0)
+    }
+
+    /// Why the Health watermark is not jumped (decision 39, the #241 shape): strap rows from before the
+    /// workout that a skipped flush left pending are still offered after the readings are stored.
+    func testPendingStrapRowsFromBeforeTheWorkoutAreStillOffered() throws {
+        let store = try makeStore()
+        let before = (1...10).map { QuantitySample(kind: .heartRate, start: at(Double(-60 * $0)), value: 70) }
+        _ = try store.ingest(before, device: timeline)   // synced; its flush was skipped (busy, or Health off)
+        try store.insertWorkoutHeartRate(readings, timeline: timeline)
+        let pending = try store.pendingHealthSamples(device: timeline, kinds: [.heartRate])
+        XCTAssertEqual(pending.count, 10, "none lost")
+        XCTAssertTrue(pending.allSatisfy { $0.start < at(0) })
+    }
+
+    /// The strap's own all-day rows inside the workout (instants) still reach Health; only a reading the
+    /// workout stored is left out.
+    func testTheStrapsOwnRowsInsideTheWorkoutAreStillOffered() throws {
+        let store = try makeStore()
+        try store.insertWorkoutHeartRate(readings, timeline: timeline)
+        // The history sync after End brings the strap's per-minute rows for the same two minutes.
+        _ = try store.ingest([QuantitySample(kind: .heartRate, start: at(30), value: 149),
+                              QuantitySample(kind: .heartRate, start: at(90), value: 151)], device: timeline)
+        let pending = try store.pendingHealthSamples(device: timeline, kinds: [.heartRate])
+        XCTAssertEqual(pending.map(\.start), [at(30), at(90)])
+        XCTAssertTrue(pending.allSatisfy { $0.end == $0.start })
+    }
+
+    func testASpanIsDroppedOnceTheHealthWatermarkPassesIt() throws {
+        let store = try makeStore()
+        try store.insertWorkoutHeartRate(readings, timeline: timeline)
+        XCTAssertEqual(StrapWorkoutHealthExclusions().intervals(device: timeline), [DateInterval(start: at(0), end: at(120))])
+        let later = [QuantitySample(kind: .heartRate, start: at(600), value: 80)]
+        _ = try store.ingest(later, device: timeline)
+        let pending = try store.pendingHealthSamples(device: timeline, kinds: [.heartRate])
+        XCTAssertEqual(pending, later)
+        try store.markHealthWritten(pending, device: timeline)
+        _ = try store.pendingHealthSamples(device: timeline, kinds: [.heartRate])
+        XCTAssertEqual(StrapWorkoutHealthExclusions().intervals(device: timeline), [], "nothing inside it can be pending")
+    }
+
+    func testTheRingsPendingSamplesAreUntouched() throws {
+        let store = try makeStore()
+        StrapWorkoutHealthExclusions().add(DateInterval(start: at(0), end: at(120)), device: .ringConn)
+        defer { StrapWorkoutHealthExclusions().clear(device: .ringConn) }
+        ownership.install(DeviceOwnershipLog())   // a ring-only install
+        let ring = (1...5).map { QuantitySample(kind: .heartRate, start: at(Double($0 * 10)), end: at(Double($0 * 10 + 2)), value: 90) }
+        _ = try store.ingest(ring, device: .ringConn)
+        XCTAssertEqual(try store.pendingHealthSamples(device: .ringConn, kinds: [.heartRate]), ring,
+                       "the exclusion never applies to the ring's timeline")
+    }
+}
+
+// MARK: - #225 merged: background runs, wakes and expiry leave a workout's link alone (review-238 B1)
+
+/// `HelioBackgroundLink` that counts what a run does to the link.
+@MainActor
+private final class CountingLink: HelioBackgroundLink {
+    var session: HelioSession?
+    var endedBusy = false
+    var strapTimeline: SyncDeviceID? = .timeline(for: .zeppOS(model: "Helio Strap"), identityID: "STRAP-H")
+    var activeBackgroundRuns = 0
+    var backgroundRunAdoptsNewSessions = false
+    var pendingNightsFinalization: Date?
+    var activeRun: HelioActiveRun?
+    var handOver: HelioHandOver?
+    private(set) var connects = 0
+    private(set) var disconnects = 0
+    private(set) var rearms = 0
+    var onConnect: (() -> Void)?
+    func connectForBackground() -> Bool { connects += 1; onConnect?(); return true }
+    func disconnectForBackground(cancelNow: Bool) {
+        disconnects += 1
+        session?.linkLost()
+        session = nil
+    }
+    func rearmAfterTeardown() { rearms += 1 }
+    func noteBackgroundRunStarted(at date: Date) {}
+}
+
+@MainActor
+final class StrapWorkoutBackgroundTests: XCTestCase {
+    private var clock = t0
+    private var containers: [ModelContainer] = []
+    private let ownership = OwnershipOverride()
+    private var recorders: [StrapWorkoutRecorder] = []
+    /// Sessions hold their transport weakly: kept here for the test's length.
+    private var transports: [WorkoutStrapTransport] = []
+
+    override func setUp() {
+        super.setUp()
+        ownership.install(.strapOwnsAllTime)
+    }
+
+    override func tearDown() {
+        for recorder in recorders { recorder.cancel() }
+        recorders.removeAll()
+        transports.removeAll()
+        ownership.restore()
+        containers.removeAll()
+        super.tearDown()
+    }
+
+    private func connect(sink: HelioStoreSink? = nil,
+                         workoutHolds: @escaping @MainActor () -> Bool = { false }) -> (HelioSession, WorkoutStrapTransport) {
+        let device = FakeZeppDevice(authKey: ZeppHex.bytes(keyHex)!, privateKey: Array(UInt8(0x81)...UInt8(0x98)),
+                                    random: Array(UInt8(0xf0)...UInt8(0xff)), writeLength: 244)
+        device.services = [(0x0000, 0), (0x000A, 1), (0x000F, 0), (0x001A, 1), (0x001D, 0), (0x0029, 0),
+                           (0x0043, 0), (0x0047, 0), (0x004B, 0), (0x0082, 0)]
+        device.deviceInfoReply = [0x02, 0x01, 0x0c, 0, 0, 0, 0, 0, 0, 0] + Array("9.9.9.9".utf8) + [0] + Array("1.2.3.4".utf8) + [0]
+        let transport = WorkoutStrapTransport(device: device)
+        let keys = WorkoutKeys()
+        let session = HelioSession(transport: transport, identityID: "5B1E4C2A-0000-4000-8000-0000000000A3",
+                                   key: keys.load(), keyStore: keys, sink: sink, findState: HelioFindState(),
+                                   clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: false,
+                                   workoutHoldsLink: workoutHolds)
+        transport.session = session
+        session.orphanStop = StrapWorkoutOrphanStop(UserDefaults(suiteName: "strap-workout-tests-\(UUID().uuidString)")!)
+        session.start()
+        transport.drain()
+        transports.append(transport)
+        return (session, transport)
+    }
+
+    private func makeSink() throws -> HelioStoreSink {
+        let container = try ModelContainer(
+            for: StoredSample.self, StoredCursor.self, StoredSleepSummary.self, StoredDaily.self, StoredNap.self,
+            StoredPeriodEntry.self, StoredDaytimeTemp.self, StoredStepSample.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        containers.append(container)
+        return HelioStoreSink(store: LocalStore(container.mainContext))
+    }
+
+    /// A recorder that has started a workout on whatever `source` returns.
+    private func startWorkout(on source: @escaping @MainActor () -> (any StrapWorkoutHeartRateSource)?) -> StrapWorkoutRecorder {
+        let recorder = StrapWorkoutRecorder(
+            source: source, health: FakeHealthWriter(), journal: MemoryJournal(), hrStore: { FakeHRStore() },
+            location: FakeLocation(), liveActivity: nil,
+            profile: { UserProfile(age: 40, weightKg: 70, heightCm: 175, sex: .male) }, indoorKeepAlive: { false },
+            orphanStop: StrapWorkoutOrphanStop(UserDefaults(suiteName: "strap-workout-tests-\(UUID().uuidString)")!),
+            clock: { [unowned self] in self.clock }, autoTick: false, managesIdleTimer: false)
+        recorder.selectedSport = .runningIndoor
+        recorder.start()
+        recorders.append(recorder)
+        return recorder
+    }
+
+    private func service(_ link: CountingLink, pause: @escaping @MainActor () async -> Void = {}) -> HelioBackgroundSyncService {
+        HelioBackgroundSyncService(link: link, keyStore: WorkoutKeys(), observability: ObservabilityStore(),
+                                   flush: { _, _, _, _ in nil }, now: { [unowned self] in self.clock },
+                                   pause: pause, grace: {}, appIsActive: { false })
+    }
+
+    func testABackgroundRunDuringAWorkoutTouchesNothing() async {
+        let link = CountingLink()
+        let (session, transport) = connect(workoutHolds: { StrapWorkoutRecorder.holdsStrapLink })
+        link.session = session
+        let recorder = startWorkout(on: { link.session })
+        XCTAssertTrue(StrapWorkoutRecorder.holdsStrapLink)
+        XCTAssertEqual(session.liveHeartRateOwner, .workout)
+        let commandsBefore = transport.heartRateCommands.count
+
+        let run = await service(link).run(kind: .appRefresh, timeout: 30, wake: .healthDelivery)
+        XCTAssertEqual(run.ending, .workoutHoldsStrap)
+        XCTAssertEqual(link.disconnects, 0, "no disconnectForBackground")
+        XCTAssertEqual(link.rearms, 0, "no teardown re-arm")
+        XCTAssertEqual(link.connects, 0)
+        XCTAssertFalse(session.syncing, "no sync on the workout's link")
+        XCTAssertTrue(session.isLinkConnected)
+        XCTAssertTrue(session.liveHeartRateRunning, "the stream keeps going")
+        XCTAssertEqual(transport.heartRateCommands.count, commandsBefore, "not even a 04 00")
+        XCTAssertTrue(run.breadcrumb(kind: .appRefresh).contains("ending=workoutHoldsStrap"), "the breadcrumb names the hold")
+        XCTAssertTrue(run.detail.contains("a strap workout holds the strap"))
+        XCTAssertTrue(run.success, "busy recording, not a failure")
+        XCTAssertTrue(recorder.isRecording)
+    }
+
+    /// A run already waiting for its session when the workout takes the strap ends at its next turn,
+    /// before an expiry or a sync is considered, and without a teardown.
+    func testARunInFlightEndsWithoutATeardownWhenAWorkoutTakesTheStrap() async {
+        let link = CountingLink()
+        var recorder: StrapWorkoutRecorder?
+        let run = await service(link, pause: { [unowned self] in
+            if recorder == nil {
+                let (session, _) = self.connect(workoutHolds: { StrapWorkoutRecorder.holdsStrapLink })
+                link.session = session
+                recorder = self.startWorkout(on: { link.session })
+            }
+        }).run(kind: .processing, timeout: 60, wake: .processing)
+        XCTAssertEqual(run.ending, .workoutHoldsStrap)
+        XCTAssertEqual(link.disconnects, 0)
+        XCTAssertEqual(link.rearms, 0)
+        XCTAssertEqual(link.session?.liveHeartRateRunning, true)
+        XCTAssertEqual(link.session?.backgroundRunOwnsSyncs, false, "handed back to its own hooks")
+    }
+
+    func testAnExpiryDuringAWorkoutLeavesTheLinkAlone() {
+        let link = CountingLink()
+        let (session, _) = connect(workoutHolds: { StrapWorkoutRecorder.holdsStrapLink })
+        link.session = session
+        _ = startWorkout(on: { link.session })
+        link.tearDownForExpiry()
+        XCTAssertEqual(link.disconnects, 0)
+        XCTAssertEqual(link.rearms, 0)
+        XCTAssertTrue(session.liveHeartRateRunning)
+        XCTAssertTrue(session.isLinkConnected)
+    }
+
+    func testEveryWakeSkipsDuringAWorkout() {
+        let sources: [HelioWake] = [.reconnect, .restoration, .idleTraffic, .strapEvent, .healthDelivery]
+        for wake in sources {
+            for appIsActive in [false, true] {
+                XCTAssertEqual(HelioWakePolicy.action(for: wake, strapChosen: true, appIsActive: appIsActive, runActive: false,
+                                                      lastCompletedSync: nil, lastBackgroundRunStart: nil, now: clock,
+                                                      workoutHoldsStrap: true),
+                               .skip(HelioWakePolicy.workoutHoldsStrapReason), "\(wake) app active \(appIsActive)")
+            }
+        }
+        // Without a workout the same wakes still catch up (nothing else changed).
+        XCTAssertEqual(HelioWakePolicy.action(for: .healthDelivery, strapChosen: true, appIsActive: false, runActive: false,
+                                              lastCompletedSync: nil, lastBackgroundRunStart: nil, now: clock), .catchUp)
+        // The stream's own traffic on the held link is never evaluated as a wake.
+        var gate = HelioIdleTrafficGate()
+        XCTAssertFalse(gate.shouldCheck(now: clock, appIsActive: false, syncing: false, runActive: false, workoutHoldsStrap: true))
+        XCTAssertTrue(gate.shouldCheck(now: clock, appIsActive: false, syncing: false, runActive: false))
+    }
+
+    func testTheCoordinatorRunsNoCatchUpDuringAWorkout() {
+        var runs = 0
+        var notes: [String] = []
+        let coordinator = HelioWakeCoordinator(.init(
+            strapChosen: { true }, appIsActive: { false }, runActive: { false },
+            state: HelioWakeState(UserDefaults(suiteName: "strap-workout-tests-\(UUID().uuidString)")!),
+            now: { [unowned self] in self.clock }, syncInForeground: { runs += 1 },
+            beginAssertion: { _ in 1 }, endAssertion: { _ in }, run: { _ in runs += 1; return nil },
+            expire: { runs += 1 }, afterRun: { _ in }, note: { _, text in notes.append(text) },
+            workoutHoldsStrap: { true }))
+        var done = 0
+        for wake in [HelioWake.reconnect, .restoration, .idleTraffic, .strapEvent, .healthDelivery] {
+            coordinator.wake(wake) { done += 1 }
+        }
+        XCTAssertEqual(runs, 0)
+        XCTAssertEqual(done, 5, "every completion handler is still called")
+        XCTAssertEqual(notes.count, 5)
+        XCTAssertTrue(notes.allSatisfy { $0.contains(HelioWakePolicy.workoutHoldsStrapReason) })
+    }
+
+    /// #225's app-open sync (review-225e SF-1): nothing while a workout holds the link, and it doesn't
+    /// count as an attempt.
+    func testTheAppOpenSyncWaitsForTheWorkoutAndIsNotCounted() {
+        var gate = HelioActivationSync()
+        XCTAssertFalse(gate.shouldSync(phase: .ready, syncing: false, finding: false, liveHeartRate: false,
+                                       lastCompletedSync: nil, now: clock, workoutHoldsStrap: true))
+        XCTAssertNil(gate.lastStarted)
+        XCTAssertTrue(gate.shouldSync(phase: .ready, syncing: false, finding: false, liveHeartRate: false,
+                                      lastCompletedSync: nil, now: clock))
+    }
+
+    /// The sync the workout held back runs once, at End (the T6 re-arm), on the merged code.
+    func testAfterEndOneSyncRuns() async throws {
+        let (session, transport) = connect(sink: try makeSink(), workoutHolds: { StrapWorkoutRecorder.holdsStrapLink })
+        let recorder = startWorkout(on: { session })
+        session.syncHistory(manual: false)            // a wake, an app open, a pull-to-refresh: deferred
+        session.syncHistory(manual: true)
+        XCTAssertFalse(session.syncing)
+        XCTAssertFalse(transport.notifyChanges.contains { $0.0 == .activityControl && $0.1 })
+        clock = clock.addingTimeInterval(60)
+        await recorder.end()
+        XCTAssertTrue(session.syncing, "the held-back sync starts at End")
+        XCTAssertEqual(transport.notifyChanges.filter { $0.0 == .activityControl && $0.1 }.count, 1, "exactly one")
+    }
+
+    /// Review-238 S1: Bluetooth turned off mid-workout. `HelioConnection` gets only `.poweredOff` (no
+    /// `didDisconnectPeripheral`): the link counts as lost (the keep-alive stops, the workout opens a
+    /// gap), a reconnect waits for power-on, and the reconnected strap is adopted.
+    func testBluetoothOffMidWorkoutOpensAGapAndTheReconnectIsAdopted() async {
+        let connection = HelioConnection(keyStore: WorkoutKeys())
+        let (session, _) = connect(workoutHolds: { StrapWorkoutRecorder.holdsStrapLink })
+        connection.installSessionForTesting(session)
+        let recorder = startWorkout(on: { connection.session })
+        for s in 1...30 {
+            clock = t0.addingTimeInterval(Double(s))
+            session.received(.heartRateMeasurement, [0x00, 140])
+            await recorder.tick(now: clock)
+        }
+        connection.centralStateChanged(.poweredOff)
+        XCTAssertNil(connection.session)
+        XCTAssertFalse(session.isLinkConnected)
+        XCTAssertFalse(session.liveHeartRateRunning, "the keep-alive stopped")
+        XCTAssertTrue(connection.reconnectArmedForPowerOn, "power-on reconnects the known strap")
+        clock = t0.addingTimeInterval(31)
+        await recorder.tick(now: clock)
+        XCTAssertTrue(recorder.linkDown, "the gap is open")
+        XCTAssertTrue(recorder.isRecording)
+
+        let (back, _) = connect(workoutHolds: { StrapWorkoutRecorder.holdsStrapLink })
+        connection.installSessionForTesting(back)   // what power-on's reconnect builds
+        clock = t0.addingTimeInterval(90)
+        await recorder.tick(now: clock)
+        XCTAssertFalse(recorder.linkDown, "the gap is closed")
+        XCTAssertEqual(back.liveHeartRateOwner, .workout, "the stream restarted on the reconnected strap")
+        XCTAssertEqual(recorder.ledger?.gaps, [DateInterval(start: t0.addingTimeInterval(31), end: t0.addingTimeInterval(90))])
     }
 }

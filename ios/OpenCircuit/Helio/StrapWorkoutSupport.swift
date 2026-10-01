@@ -109,8 +109,8 @@ final class StrapWorkoutHealthWriter: StrapWorkoutHealthWriting {
 // MARK: - Journal files
 
 /// The journal in Application Support/StrapWorkout: the small journal (rewritten on the heartbeat),
-/// the readings (appended, one line each), and the landing queue. Nothing is created until a strap
-/// workout starts, so a ring-only install never gets the folder.
+/// the readings (appended, one line each), the parked interrupted workouts, and the landing queue.
+/// Nothing is created until a strap workout starts, so a ring-only install never gets the folder.
 @MainActor
 final class StrapWorkoutFileJournal: StrapWorkoutJournalStoring {
     private let folder: URL
@@ -123,6 +123,7 @@ final class StrapWorkoutFileJournal: StrapWorkoutJournalStoring {
     private var journalURL: URL { folder.appendingPathComponent("journal.json") }
     private var samplesURL: URL { folder.appendingPathComponent("readings.csv") }
     private var landingURL: URL { folder.appendingPathComponent("landing.json") }
+    private var parkedURL: URL { folder.appendingPathComponent("parked.json") }
 
     private func ensureFolder() {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
@@ -160,6 +161,27 @@ final class StrapWorkoutFileJournal: StrapWorkoutJournalStoring {
     func clearRunning() {
         try? FileManager.default.removeItem(at: journalURL)
         try? FileManager.default.removeItem(at: samplesURL)
+    }
+
+    func parkRunning() {
+        guard let running = loadJournal() else { return clearRunning() }
+        saveParked(loadParked() + [StrapWorkoutParked(journal: running, samples: loadSamples())])
+        clearRunning()
+    }
+
+    func loadParked() -> [StrapWorkoutParked] {
+        guard let data = try? Data(contentsOf: parkedURL) else { return [] }
+        return (try? JSONDecoder().decode([StrapWorkoutParked].self, from: data)) ?? []
+    }
+
+    func saveParked(_ parked: [StrapWorkoutParked]) {
+        if parked.isEmpty {
+            try? FileManager.default.removeItem(at: parkedURL)
+            return
+        }
+        guard let data = try? JSONEncoder().encode(parked) else { return }
+        ensureFolder()
+        try? data.write(to: parkedURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     func loadLanding() -> [StrapWorkoutLandingBatch] {

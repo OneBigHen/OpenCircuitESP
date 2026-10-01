@@ -7,9 +7,9 @@
 //     zones never count time the person paused, and a link drop is MARKED instead of papered over;
 //   • `StrapWorkoutSummaryBuilder`: the ring's summary maths over the active segments only;
 //   • `StrapWorkoutJournal` + `StrapWorkoutRecovery`: what a fresh process may claim about a workout
-//     that was running when the app was killed: it closes at its LAST SAMPLE (never at "now");
-//   • `StrapWorkoutHRLanding`: when the workout's heart rate may enter `LocalStore` without moving
-//     the strap's own sync watermarks.
+//     that was running when the app was killed: it closes at its LAST SAMPLE (never at "now").
+// (How the readings enter `LocalStore` without moving the strap's watermarks, or reaching Apple Health
+// a second time, is the app's: `LocalStore+StrapWorkout.swift`.)
 //
 // Same honesty rules as the ring's workout (#45): only real readings are recorded, gaps are never
 // interpolated, and no number is reported that was not measured.
@@ -295,37 +295,5 @@ public enum StrapWorkoutRecovery {
         guard end <= now else { return .discard(.endsInTheFuture) }
         return .offer(RecoveredStrapWorkout(sport: journal.sport, ledger: journal.ledger, end: end,
                                             samples: inSpan.filter { $0.end <= end }, timelineRaw: journal.timelineRaw))
-    }
-}
-
-// MARK: - Heart rate into LocalStore
-
-/// When a strap workout's readings may become `LocalStore` rows on the strap's timeline.
-///
-/// WHY NOT RIGHT AWAY. The strap's history is stored through `LocalStore.ingest`, which keeps only
-/// samples NEWER than the timeline's heart-rate watermark, and mirrored to Apple Health only when
-/// newer than its Health watermark. Workout readings stored before the strap has synced the hours
-/// leading up to the workout would move both watermarks past history that has not arrived yet:
-/// those minutes would be dropped at ingest and never reach Health. So readings are stored without
-/// touching either watermark, and only once the strap's activity history (which carries its
-/// per-minute heart rate) has been fetched past them. By then Health already has that span, and the
-/// workout's own `HKWorkout` carries these readings, so they are not written to Health a second time.
-public enum StrapWorkoutHRLanding {
-    /// After this long a reading is stored whatever the strap's history says (a strap that is never
-    /// synced again, e.g. after switching back to the ring, must not hold them forever).
-    public static let maxWait: TimeInterval = 2 * 86_400
-
-    /// Split pending readings into those to store now and those to keep waiting.
-    /// - Parameter coveredThrough: the strap's activity fetch watermark (the minute after the last
-    ///   record it delivered), or nil when it has never synced.
-    public static func split(_ pending: [HRSample], coveredThrough: Date?, now: Date)
-        -> (land: [HRSample], keep: [HRSample]) {
-        var land: [HRSample] = []
-        var keep: [HRSample] = []
-        for sample in pending {
-            let covered = coveredThrough.map { sample.start < $0 } ?? false
-            if covered || now.timeIntervalSince(sample.end) >= maxWait { land.append(sample) } else { keep.append(sample) }
-        }
-        return (land, keep)
     }
 }

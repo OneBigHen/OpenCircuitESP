@@ -234,6 +234,8 @@ final class HelioSession: WearableSession {
     @ObservationIgnored private let workoutHoldsLink: @MainActor () -> Bool
     /// Every valid heart-rate reading, as it arrives (the workout recorder, #227).
     @ObservationIgnored var heartRateObserver: (@MainActor (Int, Date) -> Void)?
+    /// The `04 00` owed after an interrupted workout (#227, review-238 SF2).
+    @ObservationIgnored var orphanStop = StrapWorkoutOrphanStop()
 
     // MARK: Protocol state
 
@@ -769,6 +771,7 @@ final class HelioSession: WearableSession {
     private func setupFinished() {
         phase = .ready
         helioLog.notice("helio: ready (clock \(self.clockSet ? "set" : "NOT set", privacy: .public), controls: find \(self.controlCapabilities.isSupported(.findDevice), privacy: .public), alarms \(self.controlCapabilities.isSupported(.alarms), privacy: .public))")
+        sendOwedOrphanStop()   // before any stream or sync (review-238 SF2)
         if autoSyncOnConnect { syncHistory(manual: false) }
     }
 
@@ -1023,7 +1026,9 @@ final class HelioSession: WearableSession {
     /// §16.5: standard heart rate that nothing on this connection asked for. Do what Gadgetbridge does,
     /// once: `04 00` on `0x001D` (with a key) and unsubscribe. It only stops a stream.
     private func heartRateFailSafe() {
-        guard !heartRateFailSafeSent else { return }
+        // Never the workout's own stream (#227, review-238 B1 d). It can't reach here today (a running
+        // stream is never "unasked for"); the guard keeps it that way.
+        guard !heartRateFailSafeSent, liveHeartRateOwner != .workout else { return }
         heartRateFailSafeSent = true
         if isAuthenticated, services?.contains(ZeppEndpoint.heartRate) == true {
             send(ZeppEndpoint.heartRate, ZeppHeartRateControl.stop)
@@ -1051,7 +1056,8 @@ final class HelioSession: WearableSession {
     }
 
     private func stopTierZero() {
-        guard tierZeroSubscribed else { return }
+        // The 0x2A37 subscription is the workout stream's too: never dropped under it (#227).
+        guard tierZeroSubscribed, liveHeartRateOwner != .workout else { return }
         tierZeroSubscribed = false
         transport?.setNotify(.heartRateMeasurement, enabled: false)
     }
@@ -1099,13 +1105,18 @@ final class HelioSession: WearableSession {
         stopLiveHeartRate()
     }
 
-    /// The previous process died mid-workout and its interrupted workout is being closed: send `04 00`
-    /// (§7.1) once, unless this connection runs a stream of its own. Transient and harmless (§15.1).
-    // SPEC-GAP: whether the strap keeps streaming once the 1 s keep-alive stops is not specified, so
-    // the stop is sent rather than assumed.
-    func stopOrphanedHeartRate() {
-        guard canStreamHeartRate, !liveHeartRateRunning else { return }
-        send(ZeppEndpoint.heartRate, ZeppHeartRateControl.stop)
+    /// Review-238 SF2: a killed process's workout stream is owed one `04 00` (§7.1), set by the
+    /// recorder's launch recovery (`StrapWorkoutOrphanStop`). Sent at this connection's first
+    /// authenticated `ready` (`setupFinished`, before any stream or sync) or at once if already ready,
+    /// then cleared. A stream this connection runs itself means the strap streams for us now: nothing
+    /// to stop, so it's only cleared. A strap without the heart-rate endpoint never streamed: cleared.
+    func sendOwedOrphanStop() {
+        guard orphanStop.owed, isAuthenticated else { return }
+        if canStreamHeartRate, !liveHeartRateRunning {
+            send(ZeppEndpoint.heartRate, ZeppHeartRateControl.stop)
+            helioLog.notice("helio: sent the 04 00 owed since an interrupted workout")
+        }
+        orphanStop.owed = false
     }
 
     func stopLiveHeartRate() {

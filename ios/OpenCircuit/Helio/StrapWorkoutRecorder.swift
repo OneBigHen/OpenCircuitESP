@@ -41,8 +41,9 @@ protocol StrapWorkoutHeartRateSource: AnyObject {
     var heartRateObserver: (@MainActor (Int, Date) -> Void)? { get set }
     func startWorkoutHeartRate()
     func stopWorkoutHeartRate()
-    /// Close a stream a killed process left running (`04 00`), unless this connection streams itself.
-    func stopOrphanedHeartRate()
+    /// Send the `04 00` a killed process's stream is owed (`StrapWorkoutOrphanStop`), if it is owed and
+    /// this connection is authenticated; a connection that isn't sends it at its own `ready`.
+    func sendOwedOrphanStop()
     func syncHistory(manual: Bool)
 }
 
@@ -63,23 +64,51 @@ protocol StrapWorkoutHealthWriting: AnyObject {
     func save(_ write: StrapWorkoutWrite) async -> Bool
 }
 
-/// The durable journal of a running workout, and the readings still waiting to land in `LocalStore`.
+/// The durable journal of a running workout, interrupted workouts the person postponed ("Not now"),
+/// and readings still waiting to be stored in `LocalStore` (a store that wasn't available at End).
 @MainActor
 protocol StrapWorkoutJournalStoring: AnyObject {
     func loadJournal() -> StrapWorkoutJournal?
     func saveJournal(_ journal: StrapWorkoutJournal)
     func appendSamples(_ samples: [HRSample])
     func loadSamples() -> [HRSample]
-    /// Remove the running workout's journal and readings (not the landing queue).
+    /// Remove the running workout's journal and readings (not the parked ones, not the landing queue).
     func clearRunning()
+    /// Move the running journal and its readings aside, so a new workout can start without deleting an
+    /// interrupted one the person was told they'd be asked about again (review-238 N1).
+    func parkRunning()
+    func loadParked() -> [StrapWorkoutParked]
+    func saveParked(_ parked: [StrapWorkoutParked])
     func loadLanding() -> [StrapWorkoutLandingBatch]
     func saveLanding(_ batches: [StrapWorkoutLandingBatch])
 }
 
-/// Readings of one workout waiting for the strap's history to cover them (`StrapWorkoutHRLanding`).
+/// An interrupted workout set aside by a new workout's start, offered again at the next launch.
+struct StrapWorkoutParked: Codable, Equatable {
+    var journal: StrapWorkoutJournal
+    var samples: [HRSample]
+}
+
+/// Readings of one workout not yet stored in `LocalStore` (retried at launch and the next End).
 struct StrapWorkoutLandingBatch: Codable, Equatable {
     var timelineRaw: String
     var samples: [HRSample]
+}
+
+/// Review-238 SF2: one `04 00` owed to the strap after a killed process's workout stream (§7.1).
+/// Persisted, because the recovery offer is answered at launch, usually before the strap is connected:
+/// the next authenticated `ready` sends it (`HelioSession.sendOwedOrphanStop`) and clears it.
+// SPEC-GAP: whether the strap keeps streaming once the 1 s keep-alive stops is not specified, so the
+// stop is sent rather than assumed. It is transient and harmless (§15.1).
+struct StrapWorkoutOrphanStop {
+    nonisolated static let key = "strapWorkout.orphanStopOwed.v1"
+    let defaults: UserDefaults
+    init(_ defaults: UserDefaults = .standard) { self.defaults = defaults }
+
+    var owed: Bool {
+        get { defaults.bool(forKey: Self.key) }
+        nonmutating set { if newValue { defaults.set(true, forKey: Self.key) } else { defaults.removeObject(forKey: Self.key) } }
+    }
 }
 
 /// The phone's location for a workout: the route outdoors, or the indoor keep-alive.
@@ -122,6 +151,9 @@ final class StrapWorkoutRecorder {
     private(set) var ledger: WorkoutActivityLedger?
     /// A workout the previous process was running when it died, offered back (save or discard).
     private(set) var recoverable: RecoveredStrapWorkout?
+    /// Where `recoverable` came from, so Save/Discard clear exactly that journal.
+    @ObservationIgnored private var recoverableSlot: RecoverySlot?
+    private enum RecoverySlot: Equatable { case running, parked(Int) }
 
     var isRecording: Bool { state == .active }
     var isPaused: Bool { ledger?.isPaused == true }
@@ -155,6 +187,7 @@ final class StrapWorkoutRecorder {
     @ObservationIgnored private let autoTick: Bool
     @ObservationIgnored private let managesIdleTimer: Bool
     @ObservationIgnored private let indoorKeepAlive: () -> Bool
+    @ObservationIgnored private let orphanStop: StrapWorkoutOrphanStop
 
     // MARK: Session state
 
@@ -180,6 +213,7 @@ final class StrapWorkoutRecorder {
          indoorKeepAlive: @escaping () -> Bool = {
              UserDefaults.standard.bool(forKey: WorkoutSessionManager.indoorKeepAliveEnabledKey)
          },
+         orphanStop: StrapWorkoutOrphanStop = StrapWorkoutOrphanStop(),
          clock: @escaping () -> Date = Date.init,
          autoTick: Bool = true,
          managesIdleTimer: Bool = true) {
@@ -191,10 +225,16 @@ final class StrapWorkoutRecorder {
         self.liveActivity = liveActivity
         self.profile = profile
         self.indoorKeepAlive = indoorKeepAlive
+        self.orphanStop = orphanStop
         self.clock = clock
         self.autoTick = autoTick
         self.managesIdleTimer = managesIdleTimer
     }
+
+    /// The app's one recorder, built the first time it is used (review-238 N2: a `@State` initial value
+    /// is evaluated on every `ContentView` init). Nothing in it touches CoreLocation, CoreBluetooth or
+    /// the journal files until a strap workout starts or the launch looks for an interrupted one.
+    static let shared = live(store: { OpenCircuitApp.sharedContainer.map { LocalStore($0.mainContext) } })
 
     /// The app's recorder: the shared strap connection, Apple Health, files in Application Support.
     static func live(store: @escaping @MainActor () -> LocalStore?) -> StrapWorkoutRecorder {
@@ -232,7 +272,9 @@ final class StrapWorkoutRecorder {
         liveZoneBreakdown = WorkoutZoneBreakdown()
         hrSampleCount = 0
         tickCount = 0
-        journal.clearRunning()
+        // Review-238 N1: an interrupted workout still waiting for the person's answer ("Not now") is set
+        // aside, never deleted; the next launch offers it again.
+        if journal.loadJournal() != nil { journal.parkRunning() } else { journal.clearRunning() }
         persistJournal(now: now)
         attach(session, now: now)
         if sport.isOutdoor {
@@ -382,6 +424,8 @@ final class StrapWorkoutRecorder {
         // Queue the readings for LocalStore BEFORE dropping the journal, so a kill in between loses
         // nothing; then drop the journal BEFORE the Health write, as the ring drops its snapshot: a
         // kill during the write costs this one workout's recovery offer, never a duplicate in Health.
+        // They are stored after the write; Health never gets them a second time from the store
+        // (`StrapWorkoutHealthExclusions`).
         enqueueLanding(counted, timeline: timeline)
         journal.clearRunning()
 
@@ -455,21 +499,55 @@ final class StrapWorkoutRecorder {
 
     // MARK: Recovery
 
-    /// At launch: offer back a workout the previous process was running when it died. Never while a
-    /// workout runs in this process.
+    /// At launch: offer back a workout the previous process was running when it died, or one a new
+    /// workout set aside after "Not now". Never while a workout runs in this process.
     func resolveOrphan(now: Date? = nil) {
         guard state == .idle, recoverable == nil else { return }
         let now = now ?? clock()
-        switch StrapWorkoutRecovery.decide(journal: journal.loadJournal(), samples: journal.loadSamples(), now: now) {
-        case .nothingToRecover:
-            break
-        case .discard(let refusal):
-            helioLog.notice("helio: discarding an interrupted workout journal (\(refusal.rawValue, privacy: .public))")
-            journal.clearRunning()
-        case .offer(let recovered):
-            helioLog.notice("helio: offering an interrupted workout back")
-            recoverable = recovered
+        if let running = journal.loadJournal() {
+            // Review-238 SF2: whatever the answer (Save, Discard, Not now, or a refusal below), the dead
+            // process's stream is owed one `04 00`, sent at the strap's next authenticated `ready`.
+            orphanStop.owed = true
+            switch StrapWorkoutRecovery.decide(journal: running, samples: journal.loadSamples(), now: now) {
+            case .nothingToRecover:
+                break
+            case .discard(let refusal):
+                helioLog.notice("helio: discarding an interrupted workout journal (\(refusal.rawValue, privacy: .public))")
+                journal.clearRunning()
+            case .offer(let recovered):
+                helioLog.notice("helio: offering an interrupted workout back")
+                recoverable = recovered
+                recoverableSlot = .running
+            }
         }
+        if recoverable == nil {
+            // A workout set aside by a new one's start after "Not now"; one with no defensible span is dropped.
+            var parked = journal.loadParked()
+            let before = parked.count
+            while let first = parked.first {
+                if case .offer(let recovered) = StrapWorkoutRecovery.decide(journal: first.journal, samples: first.samples, now: now) {
+                    helioLog.notice("helio: offering a postponed interrupted workout back")
+                    recoverable = recovered
+                    recoverableSlot = .parked(0)
+                    break
+                }
+                parked.removeFirst()
+            }
+            if parked.count != before { journal.saveParked(parked) }
+        }
+        if orphanStop.owed, let session = source(), session.ready { session.sendOwedOrphanStop() }
+    }
+
+    private func clearRecoverableSlot() {
+        switch recoverableSlot {
+        case .running?: journal.clearRunning()
+        case .parked(let index)?:
+            var parked = journal.loadParked()
+            if parked.indices.contains(index) { parked.remove(at: index) }
+            journal.saveParked(parked)
+        case nil: break
+        }
+        recoverableSlot = nil
     }
 
     /// Save the interrupted workout: one `HKWorkout` over the recovered span, with its readings. Its
@@ -484,8 +562,7 @@ final class StrapWorkoutRecorder {
             distanceMeters: nil, hasRoute: false, profile: profile())
         let counted = StrapWorkoutSummaryBuilder.activeSamples(recovered.samples, ledger: recovered.ledger, end: recovered.end)
         enqueueLanding(counted, timeline: timeline)
-        journal.clearRunning()   // before the write: a second offer can never write it twice
-        source()?.stopOrphanedHeartRate()
+        clearRecoverableSlot()   // before the write: a second offer can never write it twice
         let saved = await health.save(StrapWorkoutWrite(summary: summary, samples: counted, route: [], timeline: timeline))
         helioLog.notice("helio: interrupted workout saved to Health \(saved, privacy: .public)")
         landPendingHeartRate()
@@ -494,13 +571,13 @@ final class StrapWorkoutRecorder {
 
     func discardRecovered() {
         recoverable = nil
-        journal.clearRunning()
-        source()?.stopOrphanedHeartRate()
+        clearRecoverableSlot()
     }
 
     /// "Not now": asked again at the next launch.
     func postponeRecovered() {
         recoverable = nil
+        recoverableSlot = nil
     }
 
     // MARK: Heart rate into LocalStore
@@ -512,26 +589,22 @@ final class StrapWorkoutRecorder {
         journal.saveLanding(batches)
     }
 
-    /// Store queued workout readings the strap's history now covers (`StrapWorkoutHRLanding`). Called
-    /// after a workout ends, at launch, and after every strap sync.
-    func landPendingHeartRate(now: Date? = nil) {
+    /// Store queued workout readings in `LocalStore` (`insertWorkoutHeartRate`: no watermark moves, and
+    /// they never reach Health again). Called after End and a recovered Save, and at launch for a
+    /// batch a store that wasn't available left behind.
+    func landPendingHeartRate() {
         let batches = journal.loadLanding()
         guard !batches.isEmpty, let store = hrStore() else { return }
-        let now = now ?? clock()
         var kept: [StrapWorkoutLandingBatch] = []
         for batch in batches {
-            let timeline = SyncDeviceID(rawValue: batch.timelineRaw)
-            let split = StrapWorkoutHRLanding.split(batch.samples,
-                                                    coveredThrough: store.activityCoveredThrough(timeline: timeline), now: now)
             do {
-                if !split.land.isEmpty { try store.insertWorkoutHeartRate(split.land, timeline: timeline) }
-                if !split.keep.isEmpty { kept.append(StrapWorkoutLandingBatch(timelineRaw: batch.timelineRaw, samples: split.keep)) }
+                try store.insertWorkoutHeartRate(batch.samples, timeline: SyncDeviceID(rawValue: batch.timelineRaw))
             } catch {
                 helioLog.error("helio: storing workout heart rate failed; kept for next time")
                 kept.append(batch)
             }
         }
-        if kept != batches { journal.saveLanding(kept) }
+        journal.saveLanding(kept)
     }
 
     // MARK: Live Activity
