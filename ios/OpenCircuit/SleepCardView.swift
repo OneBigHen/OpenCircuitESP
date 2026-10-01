@@ -312,8 +312,16 @@ struct SleepCardView: View {
     /// would target the older night while the button appeared attached to the newer one.
     private var editableSleepSummary: StoredSleepSummary? {
         guard let latest, let night, latest.night == night.nightKey,
-              latest.inBedEnd > latest.inBedStart else { return nil }
+              latest.inBedEnd > latest.inBedStart,
+              Self.ringMayEdit(latest, log: LocalStore.ownershipLog()) else { return nil }
         return latest
+    }
+
+    /// Edit re-stages the RING's epoch archive over the night (`RingSession.applySleepEdit`), so it is
+    /// offered only on a night the ring owns: one the strap keeps would take the ring's readings of
+    /// strap time (decision 28; review-224d U-1). Always true with an empty log (a ring-only install).
+    static func ringMayEdit(_ row: StoredSleepSummary, log: DeviceOwnershipLog) -> Bool {
+        log.isEmpty || log.owner(ofNightFrom: row.inBedStart, to: row.inBedEnd) == .ringConn
     }
 
     /// Recency of the night on screen, resolved by the shared kit predicate so this card and the

@@ -885,4 +885,19 @@ final class DeviceOwnershipAppTests: XCTestCase {
         XCTAssertFalse(outcomes.contains(.ownedByOtherDevice) || outcomes.contains(.ownedByOtherDeviceNoRow))
         XCTAssertTrue(store.nightKeeping(.ringConn, inBedStart: at(-1), inBedEnd: at(7)).keep)
     }
+
+    // MARK: Review-224d U-1: Edit only on a night the ring owns
+
+    func testEditIsOfferedOnlyOnANightTheRingOwns() throws {
+        let log = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: at(-2)), .init(family: .ringConn, since: at(8))])
+        ownership.install(log)
+        let store = try makeStore()
+        XCTAssertEqual(try saveNight(store, strapTimeline, -0.5, 6.5), .inserted)
+        XCTAssertEqual(try saveNight(store, .ringConn, 22, 31), .inserted)   // the next night, the ring's
+        let rows = try store.context.fetch(FetchDescriptor<StoredSleepSummary>(sortBy: [SortDescriptor(\.inBedStart)]))
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertFalse(SleepCardView.ringMayEdit(rows[0], log: log), "the strap's kept night: no ring Edit over it")
+        XCTAssertTrue(SleepCardView.ringMayEdit(rows[1], log: log), "the ring's own night stays editable")
+        XCTAssertTrue(SleepCardView.ringMayEdit(rows[0], log: DeviceOwnershipLog()), "ring-only: always editable, as before")
+    }
 }
