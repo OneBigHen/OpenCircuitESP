@@ -306,8 +306,8 @@ struct HealthNotificationCenter {
 
         // Both the instantaneous high-HR and the sustained-while-inactive rule read the non-exercising
         // series. SpO2 (`spo2`) is passed unfiltered — its rule is unaffected by the activity gate.
-        // LIVE OR NOT AT ALL (decision 32, #234): only a reading that ended at most 30 minutes ago,
-        // outside quiet hours and newer than the kind's watermark, can become a candidate.
+        // LIVE OR NOT AT ALL (decisions 32 and 37, #234): only a reading that ended at most 90 minutes
+        // ago, outside quiet hours and newer than the kind's watermark, can become a candidate.
         let live = LiveHealthAlerts.evaluate(hr: nonExercisingHR, spo2: spo2,
                                              inactiveHR: nonExercisingHR,
                                              thresholds: thresholds,
@@ -894,11 +894,12 @@ struct HealthNotificationCenter {
 
     /// When a reading was taken, worded so it can never be mistaken for a different day.
     ///
-    /// The instant alerts only ever cite a reading from the last 30 minutes (decision 32, #234), so
-    /// the time is nearly always today's and reads "at 6:06 PM". The one live case that crosses a day
-    /// is a reading just before midnight notified just after it, which reads "yesterday at
-    /// 11:50 PM" — `timeStyle = .short` alone would make that look like tonight. The weekday branch
-    /// is kept so the phrase stays true for any older date a future caller passes.
+    /// The instant alerts only ever cite a reading from the last 90 minutes (decisions 32 and 37,
+    /// #234), so the time is nearly always today's and reads "at 6:06 PM". The live case that crosses
+    /// a day is a reading late in the evening notified after midnight — a 23:10 reading at 00:20 —
+    /// which reads "yesterday at 11:10 PM"; `timeStyle = .short` alone would make that look like
+    /// tonight. The weekday branch is kept so the phrase stays true for any older date a future
+    /// caller passes.
     /// Returns the WHOLE trailing phrase including its preposition ("at 6:06 PM" / "yesterday at
     /// 6:06 PM"), not a bare clock time, so no call site can assemble "at yesterday at 6:06 PM".
     /// Empty string when there is no reading to cite.

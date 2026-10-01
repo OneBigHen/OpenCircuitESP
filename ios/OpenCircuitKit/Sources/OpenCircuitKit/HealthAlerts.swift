@@ -477,9 +477,10 @@ public struct LiveHealthAlert: Equatable, Sendable {
 /// happen").
 ///
 /// The rule, in full:
-///  - FRESH ONLY. An alert notifies only for a reading that ended at most `maxReadingAge` before the
-///    evaluation's `now`. A crossing that arrives late (an hourly drain, a link that dropped all
-///    evening) or that happened inside quiet hours never notifies. It stays in the charts.
+///  - FRESH ONLY. An alert notifies only for a reading that ended at most `maxReadingAge` (90 min,
+///    decision 37) before the evaluation's `now`. A crossing that arrives later than that (a link
+///    that dropped all evening, a catch-up after hours) or that happened inside quiet hours never
+///    notifies. It stays in the charts.
 ///  - THE READING'S OWN TIME. Freshness is measured from the sample's end, never from when it
 ///    synced. An end after `now` (clock skew) is clamped to `now`; a reading that has not even
 ///    STARTED by `now` is dropped, as the app always has.
@@ -492,9 +493,14 @@ public struct LiveHealthAlert: Equatable, Sendable {
 ///    still spaces genuinely new crossings; the watermark is what stops the same one returning
 ///    once the backoff has expired.
 ///
-/// What this deliberately gives up: all-day heart rate reaches the phone on ~hourly background
-/// drains, so a crossing in the older half of a drain arrives too old to notify. That is the
-/// decision. For a live heart-rate alert on the strap, the strap buzzes on its own thresholds (#230).
+/// What this covers, and what it gives up (decision 37): by day a crossing reaches the phone on the
+/// first regular background sync after it — the ring drains about hourly (`HistoryDrainCadence`,
+/// day arm) and the strap syncs about hourly — and 90 minutes is one such sync plus 30 minutes of
+/// wake-timing slack, so those crossings notify, on the ring and the strap alike. A catch-up after a
+/// long gap (overnight, the app closed for hours) brings readings too old to notify; that is the
+/// decision. KNOWN LIMIT, documented and not changed: a ring in battery saver drains every 3 h by
+/// day, so some of its crossings still arrive too old. For a truly live heart-rate alert the strap
+/// also buzzes on its own thresholds (#230).
 ///
 /// Night-level notifications (skin temperature, fever, headache signs, the morning summary),
 /// reminders and battery are NOT instant alerts and are untouched by this: they describe a night or
@@ -502,14 +508,20 @@ public struct LiveHealthAlert: Equatable, Sendable {
 public enum LiveHealthAlerts {
 
     /// How old a reading may be and still notify: its end at most this long before `now`,
-    /// INCLUSIVE (a reading exactly 30 minutes old still notifies — decision 32 says "at most").
-    /// Decision 32, #234. The one number to change if the rule ever moves.
-    public static let maxReadingAge: TimeInterval = 30 * 60
+    /// INCLUSIVE (a reading exactly 90 minutes old still notifies — the decision says "at most").
+    /// Decision 32 (#234), widened from 30 to 90 minutes by decision 37: one hourly background sync
+    /// plus 30 minutes of slack, the same for every device. The one number to change if the rule
+    /// ever moves.
+    public static let maxReadingAge: TimeInterval = 90 * 60
 
     /// How far back the caller fetches readings. NOT a delivery window: nothing older than
     /// `maxReadingAge` can notify. It exists so a rule that needs a run has the run's earlier
-    /// readings — an elevated stretch that began 40 minutes ago and is still going, or a low-SpO2
-    /// run whose first qualifying reading predates the fresh one.
+    /// readings — an elevated stretch that began before the freshness limit and is still going, or a
+    /// low-SpO2 run whose first qualifying reading predates the fresh one.
+    ///
+    /// INVARIANT: at least `maxReadingAge` plus the longest rule window (the 30-minute low-SpO2
+    /// window). Below that, the oldest fresh reading's run loses its early readings and silently
+    /// fails to qualify. Pinned by `testTheContextWindowCoversTheFreshnessLimitPlusTheLongestRuleWindow`.
     public static let contextWindow: TimeInterval = 2 * 3600
 
     /// The kinds this rule governs. Disjoint from the night-level and reminder families by design.

@@ -455,8 +455,8 @@ struct UserProfileSettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Text("Heart rate and blood oxygen alerts are sent only for readings from the last "
-                     + "30 minutes. Older readings, such as ones that sync later, appear in your "
-                     + "charts without an alert.")
+                     + "hour and a half. Older readings, such as ones that sync after a long gap, "
+                     + "appear in your charts without an alert.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Skin-temp & fever alerts", isOn: $tempFeverEnabled)
                     .onChange(of: tempFeverEnabled) { _, on in escalateNotifAuth(enabled: on) }

@@ -11,12 +11,24 @@ final class LiveHealthAlertsTests: XCTestCase {
     }
     private func hr(_ bpm: Int, _ h: Int, _ m: Int) -> HRSample { HRSample(bpm: bpm, start: at(h, m)) }
 
-    func testTheFreshnessLimitIsThirtyMinutesInclusive() {
-        XCTAssertEqual(LiveHealthAlerts.maxReadingAge, 30 * 60)
-        XCTAssertTrue(LiveHealthAlerts.isFresh(end: at(11, 30), now: at(12, 0)))
-        XCTAssertFalse(LiveHealthAlerts.isFresh(end: at(11, 29), now: at(12, 0)))
+    /// Decision 37: 90 minutes, inclusive.
+    func testTheFreshnessLimitIsNinetyMinutesInclusive() {
+        XCTAssertEqual(LiveHealthAlerts.maxReadingAge, 90 * 60)
+        XCTAssertTrue(LiveHealthAlerts.isFresh(end: at(10, 30), now: at(12, 0)))
+        XCTAssertFalse(LiveHealthAlerts.isFresh(end: at(10, 30), now: at(12, 0).addingTimeInterval(1)))
+        XCTAssertFalse(LiveHealthAlerts.isFresh(end: at(10, 29), now: at(12, 0)))
         XCTAssertTrue(LiveHealthAlerts.isFresh(end: at(13, 0), now: at(12, 0)), "a future end is clamped")
         XCTAssertEqual(LiveHealthAlerts.readingTime(end: at(13, 0), now: at(12, 0)), at(12, 0))
+    }
+
+    /// The fetch must reach back far enough to rebuild the run of the OLDEST fresh reading. If a
+    /// later edit widens the freshness limit or a rule window without widening the context window,
+    /// this fails here instead of silently dropping a run's early readings.
+    func testTheContextWindowCoversTheFreshnessLimitPlusTheLongestRuleWindow() {
+        let t = HealthAlertThresholds()
+        let longestRuleWindow = [t.lowSpO2Window, t.lowSpO2MaxGap, t.elevatedSustained, t.elevatedMaxGap].max()!
+        XCTAssertGreaterThanOrEqual(LiveHealthAlerts.contextWindow,
+                                    LiveHealthAlerts.maxReadingAge + longestRuleWindow)
     }
 
     /// The rule governs exactly the three instant alerts, and none of the night-level, reminder or

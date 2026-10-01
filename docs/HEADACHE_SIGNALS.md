@@ -605,7 +605,7 @@ Severity mapping (verified against the installed SDK, `HKCategoryValues.h:206-21
 
 **Idempotence is structural, not aspirational.** `insertRiskDayIfAbsent` is a no-op once the day is frozen; the per-day notification ledger is a no-op once the day is alerted. The evaluator is polled several times an hour and must tolerate it.
 
-**Do NOT add a device-timestamp "freshness" window to this verdict.** It describes a night that is already over, and its per-day ledger is its only de-dupe. (The instant heart-rate and SpO₂ alerts are the opposite case: since decision 32, #234, they notify only for a reading at most 30 minutes old — see `LiveHealthAlerts` in `HealthAlerts.swift`. That rule does not apply here.)
+**Do NOT add a device-timestamp "freshness" window to this verdict.** It describes a night that is already over, and its per-day ledger is its only de-dupe. (The instant heart-rate and SpO₂ alerts are the opposite case: since decisions 32 and 37 (#234), they notify only for a reading at most 90 minutes old — see `LiveHealthAlerts` in `HealthAlerts.swift`. That rule does not apply here.)
 
 **Cost control:** the expensive input is the 30-day heart-rate fetch feeding `RestingHR.dailyValues`. `HealthNotificationCenter.suspectedFever` **already** performs exactly that fetch on every pass. Grafted from *parity*: refactor it into `restingHRDailySeries(store:) -> [RestingHR.DailyValue]` with the fever and headache paths as two consumers of **one** fetch. `StoredSample` has no index on `start`, so this is not a nicety.
 

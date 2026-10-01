@@ -21,14 +21,14 @@ final class HealthAlertCopyTests: XCTestCase {
 
     // MARK: The time named must be on the right day
 
-    /// Instant alerts only cite a reading from the last 30 minutes (decision 32, #234), so the one
-    /// live case that crosses a day is a reading just before midnight notified just after it. A bare
-    /// "11:50 PM" would read as tonight.
+    /// Instant alerts only cite a reading from the last 90 minutes (decisions 32 and 37, #234), so
+    /// the live case that crosses a day is a late-evening reading notified after midnight: a 23:10
+    /// reading at 00:20, 70 minutes old. A bare "11:10 PM" would read as tonight.
     func testCopyNamesTheDayForAReadingFromAPreviousDay() {
         let cal = Calendar(identifier: .gregorian)
-        let now = cal.date(from: DateComponents(year: 2026, month: 8, day: 12, hour: 0, minute: 5))!
+        let now = cal.date(from: DateComponents(year: 2026, month: 8, day: 12, hour: 0, minute: 20))!
         let beforeMidnight = cal.date(from: DateComponents(year: 2026, month: 8, day: 11,
-                                                          hour: 23, minute: 50))!
+                                                          hour: 23, minute: 10))!
         let hit = HealthAlertHit(notification: .highHR, value: 128, time: beforeMidnight)
         let (_, body) = HealthNotificationCenter.copy(for: .highHR, hit: hit, now: now)
         XCTAssertTrue(body.contains("yesterday at"),

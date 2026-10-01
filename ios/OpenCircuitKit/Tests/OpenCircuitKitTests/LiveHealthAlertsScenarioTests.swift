@@ -4,8 +4,8 @@ import XCTest
 /// Decision 32 (#234): the instant alerts are live or not at all. Each scenario runs whole evaluate
 /// passes through `InstantAlertHarness`. SYNTHETIC-ONLY readings.
 ///
-/// The boundary is INCLUSIVE: a reading that ended exactly 30 minutes before the pass notifies,
-/// because the decision says "at most 30 minutes".
+/// The limit is 90 minutes (decision 37 widened decision 32's 30) and INCLUSIVE: a reading that ended
+/// exactly 90 minutes before the pass notifies, because the decision says "at most".
 final class LiveHealthAlertsScenarioTests: XCTestCase {
 
     private let cal = Calendar(identifier: .gregorian)
@@ -57,28 +57,62 @@ final class LiveHealthAlertsScenarioTests: XCTestCase {
         XCTAssertEqual(h.delivered.first?.value, 145)
     }
 
-    func testAThirtyOneMinuteOldCrossingDoesNotNotify() {
+    func testANinetyOneMinuteOldCrossingDoesNotNotify() {
         let h = harness(highHROnly)
-        h.hr = [hr(145, at(11, 29))]
+        h.hr = [hr(145, at(10, 29))]
         XCTAssertEqual(h.pass(now: at(12, 0)), [])
     }
 
-    /// INCLUSIVE: exactly 30 minutes old still notifies.
-    func testACrossingExactlyThirtyMinutesOldNotifies() {
+    /// INCLUSIVE: exactly 90 minutes old still notifies.
+    func testACrossingExactlyNinetyMinutesOldNotifies() {
         let h = harness(highHROnly)
-        h.hr = [hr(145, at(11, 30))]
+        h.hr = [hr(145, at(10, 30))]
         XCTAssertEqual(h.pass(now: at(12, 0)).map(\.notification), [.highHR])
         // …and one second past the boundary does not.
         let late = harness(highHROnly)
-        late.hr = [hr(145, at(11, 30))]
+        late.hr = [hr(145, at(10, 30))]
         XCTAssertEqual(late.pass(now: at(12, 0, 1)), [])
     }
 
     /// Freshness runs from when the reading ENDED, not when it started.
     func testFreshnessIsMeasuredFromTheReadingsEnd() {
         let h = harness(highHROnly)
-        h.hr = [hr(145, at(11, 20), end: at(11, 35))]   // started 40 min ago, ended 25 min ago
+        h.hr = [hr(145, at(10, 20), end: at(10, 35))]   // started 100 min ago, ended 85 min ago
         XCTAssertEqual(h.pass(now: at(12, 0)).map(\.notification), [.highHR])
+    }
+
+    // MARK: Both devices' hourly syncs are covered (decision 37)
+
+    // Every device path calls the one shared `HealthNotificationCenter.evaluate`, which this harness
+    // mirrors; the two tests differ in what each path hands it.
+
+    /// The ring's post-drain pass (`RingSession`, `session: self`): an hourly background drain lands
+    /// a crossing 65 minutes old, and the pass sees the batch twice — committed to the store AND
+    /// still in `session.historySamples`.
+    func testARingCrossingAnHourOldNotifiesOnThePostDrainPass() {
+        let h = harness(highHROnly)
+        let drained = [hr(88, at(10, 52, 30)), hr(146, at(10, 55)), hr(90, at(10, 57, 30))]
+        h.hr = drained + drained
+        XCTAssertEqual(h.pass(now: at(12, 0)).map(\.value), [146])
+        XCTAssertEqual(h.delivered.count, 1)
+    }
+
+    /// A strap sync's alert pass (`session: nil`, store only): one-minute heart-rate samples from an
+    /// hourly sync, the crossing ending 84 minutes before the pass.
+    func testAStrapCrossingEightyFourMinutesOldNotifiesOnTheSyncPass() {
+        let h = harness(highHROnly)
+        h.hr = [hr(92, at(10, 39), end: at(10, 40)), hr(141, at(10, 40), end: at(10, 41)),
+                hr(95, at(10, 41), end: at(10, 42))]
+        XCTAssertEqual(h.pass(now: at(12, 5)).map(\.value), [141])
+    }
+
+    /// Across midnight: a reading at 23:10 is still live at 00:20.
+    func testACrossingBeforeMidnightIsLiveAfterIt() {
+        let h = harness(highHROnly)
+        h.hr = [hr(145, at(23, 10, day: 16))]
+        let posted = h.pass(now: at(0, 20))
+        XCTAssertEqual(posted.map(\.notification), [.highHR])
+        XCTAssertEqual(posted.first?.time, at(23, 10, day: 16))
     }
 
     // MARK: Quiet hours
@@ -176,9 +210,9 @@ final class LiveHealthAlertsScenarioTests: XCTestCase {
         let h = harness(lowSpO2Only)
         h.spo2 = [spo2(88, at(5, 0)), spo2(86, at(5, 5))]
         XCTAssertEqual(h.pass(now: at(12, 0)), [])
-        // Within the context window but past 30 minutes: still stale.
+        // Within the context window but past 90 minutes: still stale.
         let recent = harness(lowSpO2Only)
-        recent.spo2 = [spo2(88, at(11, 0)), spo2(86, at(11, 5))]
+        recent.spo2 = [spo2(88, at(10, 20)), spo2(86, at(10, 25))]
         XCTAssertEqual(recent.pass(now: at(12, 0)), [])
     }
 
@@ -191,13 +225,13 @@ final class LiveHealthAlertsScenarioTests: XCTestCase {
     }
 
     /// The depth and time named are a FRESH reading's. A deeper reading earlier in the same run is
-    /// older than 30 minutes, so it is in the charts, not in the notification.
+    /// older than 90 minutes, so it is in the charts, not in the notification.
     func testALowSpO2AlertNamesTheLowestFreshReading() {
         let h = harness(lowSpO2Only)
-        h.spo2 = [spo2(84, at(11, 0)), spo2(89, at(11, 15)), spo2(88, at(11, 35)), spo2(89, at(11, 50))]
+        h.spo2 = [spo2(84, at(10, 10)), spo2(89, at(10, 25)), spo2(88, at(10, 40)), spo2(89, at(10, 55))]
         let posted = h.pass(now: at(12, 0))
         XCTAssertEqual(posted.map(\.value), [88])
-        XCTAssertEqual(posted.first?.time, at(11, 35))
+        XCTAssertEqual(posted.first?.time, at(10, 40))
     }
 
     func testALowSpO2RunInsideQuietHoursIsNotDeliveredLater() {
@@ -215,8 +249,8 @@ final class LiveHealthAlertsScenarioTests: XCTestCase {
         h.hr = run(110, from: at(5, 0), to: at(5, 12))
         XCTAssertEqual(h.pass(now: at(12, 0)), [])
         let recent = harness(elevatedOnly)
-        recent.hr = run(110, from: at(11, 0), to: at(11, 21))
-        XCTAssertEqual(recent.pass(now: at(12, 0)), [], "ended 39 minutes ago")
+        recent.hr = run(110, from: at(10, 0), to: at(10, 21))
+        XCTAssertEqual(recent.pass(now: at(12, 0)), [], "ended 99 minutes ago")
     }
 
     func testAFreshElevatedRunNotifiesOnce() {
@@ -227,10 +261,10 @@ final class LiveHealthAlertsScenarioTests: XCTestCase {
         XCTAssertEqual(h.delivered.count, 1)
     }
 
-    /// A run that became sustained over 30 minutes ago but is still going is live now.
+    /// A run that became sustained over 90 minutes ago but is still going is live now.
     func testAnOngoingElevatedRunIsLive() {
         let h = harness(elevatedOnly)
-        h.hr = run(110, from: at(11, 0), to: at(11, 57))
+        h.hr = run(110, from: at(10, 5), to: at(11, 59))
         XCTAssertEqual(h.pass(now: at(12, 0)).map(\.notification), [.elevatedHRInactive])
     }
 
