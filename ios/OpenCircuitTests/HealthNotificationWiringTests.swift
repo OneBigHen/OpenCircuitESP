@@ -103,6 +103,18 @@ final class HealthNotificationWiringTests: XCTestCase {
         XCTAssertEqual(pass(hr: [], nightLevel: [.fever], quiet: nightQuiet, now: at(3, 0)).fire, [])
     }
 
+    /// The LIVE RULE also gets the quiet hours it was given, not just the gate: a reading taken at
+    /// 06:50, inside 22:00–07:00, and first seen at 07:10 is still fresh and the gate is open, yet it
+    /// must never fire (decision 32). A reading taken at 07:01 fires. Catches the live rule handed no
+    /// quiet hours, or ones other than the pass's (review-236b SF-1, mutant D1).
+    func testAReadingFromInsideQuietHoursSeenAfterThemNeverFires() {
+        XCTAssertEqual(pass(hr: [HRSample(bpm: 146, start: at(6, 50))], quiet: nightQuiet,
+                            now: at(7, 10)).fire, [])
+        XCTAssertEqual(store.liveWatermark(), [:], "nothing fired, so nothing is claimed")
+        XCTAssertEqual(pass(hr: [HRSample(bpm: 146, start: at(7, 1))], quiet: nightQuiet,
+                            now: at(7, 10)).fire, [.highHR])
+    }
+
     /// Night-level candidates route through the same gate and claim no watermark: on the morning
     /// pass after quiet hours they fire, hours after the night they describe.
     func testNightLevelCandidatesFireAfterQuietHoursAndClaimNoWatermark() {

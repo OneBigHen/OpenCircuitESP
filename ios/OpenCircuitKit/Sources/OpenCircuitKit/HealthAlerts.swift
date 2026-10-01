@@ -489,7 +489,7 @@ public struct LiveHealthAlert: Equatable, Sendable {
 ///    separately holds everything while `now` is inside the window, as before.)
 ///  - AT MOST ONCE. Freshness plus the 2 h backoff already give this today: by the time the backoff
 ///    lets a kind through again, every reading that notified is older than `maxReadingAge`. The
-///    WATERMARK keeps it true where that argument breaks — if the backoff is ever made shorter than
+///    WATERMARK keeps it true where that argument breaks — if the backoff is ever made no longer than
 ///    `maxReadingAge`, or for a reading whose end was clamped to `now` (a clock-skewed future end,
 ///    which stays "fresh" until real time passes it). A reading is NEW only if it started after the
 ///    kind's watermark: the end of the latest reading that already notified, clamped to `now`. The
@@ -502,8 +502,12 @@ public struct LiveHealthAlert: Equatable, Sendable {
 /// wake-timing slack, so those crossings notify, on the ring and the strap alike. A catch-up after a
 /// long gap (overnight, the app closed for hours) brings readings too old to notify; that is the
 /// decision. KNOWN LIMIT, documented and not changed: a ring in battery saver drains every 3 h by
-/// day, so some of its crossings still arrive too old. For a truly live heart-rate alert the strap
-/// also buzzes on its own thresholds (#230).
+/// day, so some of its crossings still arrive too old. The strap's "about hourly" depends on its
+/// wakes (#225: reconnect, idle-link traffic, BGTasks, the iPhone's step-count delivery); while the
+/// wearer is sedentary with the phone set down, step delivery may not fire, so an
+/// elevated-while-inactive crossing can age past the limit before a sync (unmeasured; build 60's
+/// `helio-link` breadcrumbs will show it). For a truly live heart-rate alert the strap also buzzes
+/// on its own thresholds (#230).
 ///
 /// Night-level notifications (skin temperature, fever, headache signs, the morning summary),
 /// reminders and battery are NOT instant alerts and are untouched by this: they describe a night or

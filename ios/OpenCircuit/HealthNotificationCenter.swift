@@ -188,8 +188,8 @@ struct HealthNotificationStore {
     // Once-only ledger for the instant alerts (decision 32, #234): per kind, the end of the latest
     // reading that notified. Separate from `lastFired`, which only spaces notifications. Today the
     // 2 h backoff outlasts the 90-minute freshness limit, so a notified reading is stale before its
-    // kind can fire again; this ledger keeps "at most once" true if the backoff is ever shortened
-    // below that limit, and for a reading whose future end was clamped to `now`.
+    // kind can fire again; this ledger keeps "at most once" true if the backoff is ever made no
+    // longer than that limit, and for a reading whose future end was clamped to `now`.
     private static let liveKey = "alerts.health.liveWatermark"   // [HealthNotification.rawValue: epoch]
 
     func liveWatermark() -> [HealthNotification: Date] {
