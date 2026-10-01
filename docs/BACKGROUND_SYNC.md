@@ -237,7 +237,10 @@ completed while the app was `.inactive`) makes a session that doesn't sync on co
 the last completed strap sync is at least `ForegroundAutoSync.interval` (300 s, one constant with
 the ring's foreground auto-sync) old, with the ring's throttle, so a flapping `.inactive`/`.active`
 gives one sync. If the app leaves before that sync ends, the sync-end hook runs its alert pass
-(review-236 S1), once.
+(review-236 S1), once per sync: the claim that keeps ContentView's foreground hook from running a
+second one lives on the session (`HelioSession.alertPassClaimedSync`). Until review-225f SF-1 it was
+a global keyed by the session's `ObjectIdentifier`, and a reconnect's new session (often at the freed
+one's address, its sync count back at 0) had its first pass refused by both hooks.
 
 One run: connect by identifier if the link isn't up (never a scan) → auth with the Keychain key
 (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`) → clock → fetch, every round acked `03 09`

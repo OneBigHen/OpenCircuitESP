@@ -336,8 +336,9 @@ final class HelioConnection: NSObject {
     /// - Otherwise the sync is flushed here. Review-236 S1: if it ended with the app not active (it
     ///   started in front, the person left), ContentView's foreground hook may not run until the app is
     ///   next opened, and since #236 a missed pass is a lost alert, not a late one. So the body-alert
-    ///   pass runs here too, once per sync (`StrapSyncAlertPass`, shared with that hook). Ending with the
-    ///   app active, the foreground hook runs it, and this path doesn't.
+    ///   pass runs here too, once per sync (`StrapSyncAlertPass`, shared with that hook; the claim is
+    ///   the session's own, so a reconnect's new session is never refused, review-225f SF-1). Ending
+    ///   with the app active, the foreground hook runs it, and this path doesn't.
     static func syncEnded(_ result: HelioSyncResult, session: HelioSession?, appIsActive: Bool,
                           flush: @MainActor () async -> Void, alertPass: @MainActor () async -> Void) async {
         guard !result.endedInBackgroundRun else { return }
@@ -477,21 +478,21 @@ private final class SessionReference {
 }
 
 /// Review-236 S1: one body-alert pass per strap sync, whichever path gets there first: the sync-end
-/// hook (`HelioConnection.syncEnded`, app not active) or ContentView's foreground hook.
+/// hook (`HelioConnection.syncEnded`, app not active) or ContentView's foreground hook. Both run on the
+/// main actor, so they can't both claim the same sync.
+///
+/// The claim lives on the session (`HelioSession.alertPassClaimedSync`), never in a global keyed by
+/// `ObjectIdentifier` (review-225f SF-1): an identifier is unique only while its object lives, a
+/// reconnect's new session usually gets the freed one's address with `syncsFinished` back at 0, so its
+/// first sync matched the old claim and both hooks skipped the pass. A new session starts unclaimed.
 @MainActor
 enum StrapSyncAlertPass {
-    private static var claimed: (session: ObjectIdentifier, sync: Int)?
-
     /// true the first time it's asked for the session's latest finished sync; false after that.
     static func claim(_ session: HelioSession) -> Bool {
-        let key = (session: ObjectIdentifier(session), sync: session.syncsFinished)
-        if let claimed, claimed.session == key.session, claimed.sync == key.sync { return false }
-        claimed = key
+        if session.alertPassClaimedSync == session.syncsFinished { return false }
+        session.alertPassClaimedSync = session.syncsFinished
         return true
     }
-
-    /// Tests only.
-    static func reset() { claimed = nil }
 }
 
 // MARK: - Session events (#233)
