@@ -167,7 +167,7 @@ touches the strap's connection.
 | Wake | Strap path | Where |
 |---|---|---|
 | BGAppRefreshTask / BGProcessingTask (the two existing ids) | `HelioBackgroundSyncService.run` (28 s / 150 s budgets, as the ring) | `AppDelegate.handleStrap`; `Background/HelioBackgroundSyncService.swift` |
-| Sleep Focus ending | the same run, short window, the strap's nights finalized (skip the 20-min margin, as the ring's `sleepFinalized`) | `SleepFocusSyncRunner.runStrap` |
+| Sleep Focus ending | the same run, short window, the strap's nights finalized (skip the 20-min margin, as the ring's `sleepFinalized`), but only by a Health flush that starts within 30 min of the Focus end (decision 31) | `SleepFocusSyncRunner.runStrap` |
 | CoreBluetooth state restoration | `HelioConnection`'s own central (restore id `com.standardsoftwaresolutions.opencircuit.helio`) re-adopts the strap; a session that connects syncs on connect and flushes Health itself | `Helio/HelioConnection.swift` |
 
 One run: connect by identifier if the link isn't up (never a scan) → auth with the Keychain key

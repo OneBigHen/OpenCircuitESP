@@ -79,10 +79,13 @@ protocol HelioBackgroundLink: AnyObject {
     /// teardown or Health flush, or once the run is over) is never the run's: it flushes and logs its
     /// own syncs through the connection's post-sync hook.
     var backgroundRunAdoptsNewSessions: Bool { get set }
-    /// A Sleep Focus run that gives up waiting for its turn leaves its "the night is over" here for the
-    /// run holding the link (review-225b N-a). That run ORs it into its flush or hand-off, and it is
-    /// cleared when that run returns, used or not (review-225c SF-1), so it never reaches a later run.
-    /// A waiter that iOS expires leaves nothing.
+    /// A Sleep Focus run that gives up waiting for its turn leaves its "the night is over" (its Focus
+    /// end time T) here for the run holding the link (review-225b N-a). That run takes it into its
+    /// flush or its hand-off, and it is cleared when that run returns, used or not (review-225c SF-1),
+    /// so it never reaches a later run's flush through the link. A hand-off moves it onto the
+    /// handed-over sync (`HelioSession.finalizeNightsOnHandOff`), which ends whenever that sync does.
+    /// Decision 31 bounds both: whichever flush receives T finalizes only if it starts within 30
+    /// minutes of it (`SleepFocusFinalization`). A waiter that iOS expires leaves nothing.
     var pendingNightsFinalization: Date? { get set }
     /// Arm a connect to the saved strap by identifier (no scan). false when there is none.
     func connectForBackground() -> Bool
