@@ -496,3 +496,18 @@ public struct ZeppHealthConfigEditor {
         return Output(messages: [Self.message(Self.readRequest)], events: [.writeNotAcknowledged(change, failure)])
     }
 }
+
+extension ZeppHealthSettings {
+    /// The recording switches from a settings read, so the recording warnings follow what the strap
+    /// holds after a change. Heart-rate sharing (`0x05`) is not part of that read: nil, never warned.
+    public init(_ config: ZeppHealthConfig) {
+        func bool(_ setting: ZeppHealthSetting) -> Bool? { config.isOn(setting) }
+        if case .byte(let v)? = config.value(.heartRateMonitoring) { heartRateMonitoring = v } else { heartRateMonitoring = nil }
+        heartRateDuringActivity = bool(.activeHeartRateMonitoring)
+        heartRateSharing = nil
+        highAccuracySleep = bool(.highAccuracySleep)
+        sleepBreathingQuality = bool(.sleepBreathingQuality)
+        stressMonitoring = bool(.stressMonitoring)
+        allDaySpO2 = bool(.allDaySpO2)
+    }
+}

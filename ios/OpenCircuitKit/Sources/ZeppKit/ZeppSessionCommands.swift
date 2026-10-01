@@ -204,7 +204,7 @@ public enum ZeppBatteryLevelCharacteristic {
 // file never decides to write: `ZeppHapticAlertSettings` only builds a write for a value the strap
 // itself offered.
 
-public enum ZeppConfigValue: Equatable {
+public enum ZeppConfigValue: Hashable {
     case bool(Bool)
     case byte(UInt8)
     case byteList([UInt8])

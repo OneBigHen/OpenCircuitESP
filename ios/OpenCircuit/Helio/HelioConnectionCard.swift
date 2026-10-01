@@ -46,7 +46,7 @@ struct HelioConnectionCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("The strap isn't recording everything").font(.caption.weight(.semibold))
                     ForEach(warnings, id: \.self) { Text($0).font(.caption2).foregroundStyle(.secondary) }
-                    Text("Turn these on in the Zepp app's health monitoring settings.").font(.caption2).foregroundStyle(.secondary)
+                    Text("Turn these on in Helio Strap ▸ Measurement.").font(.caption2).foregroundStyle(.secondary)
                 }
             }
         }

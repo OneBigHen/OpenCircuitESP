@@ -2269,7 +2269,7 @@ struct ContentView: View {
                     }
                     KeylineGlyph(.chevronRight, size: 12, relativeTo: .caption).foregroundStyle(.tertiary)
                 }
-                Text("Battery, key, Find My Strap, alarms").font(.subheadline).foregroundStyle(.secondary)
+                Text("Battery, key, settings, Find My Strap, alarms").font(.subheadline).foregroundStyle(.secondary)
             }
         }
         .buttonStyle(.plain)
