@@ -79,6 +79,14 @@ public enum IntradaySeries {
         /// with no readings has no entry.
         public let averages: [DeviceOwnershipLog.Family: Double]
 
+        public init(series: [Series], averages: [DeviceOwnershipLog.Family: Double]) {
+            self.series = series
+            self.averages = averages
+        }
+
+        /// No readings, no series.
+        public static let empty = Day(series: [], averages: [:])
+
         public var points: [Point] { series.flatMap(\.points) }
         public var isEmpty: Bool { series.allSatisfy { $0.points.isEmpty } }
         /// The devices with readings this day, in the order they first appear.

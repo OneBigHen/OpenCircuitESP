@@ -6,6 +6,8 @@ import SwiftUI
 struct HelioConnectionCard: View {
     let connection: HelioConnection
     var onSetUp: () -> Void = {}
+    /// Opens today's stress chart (#239). The stress reading is a button only when this is set.
+    var onStress: (() -> Void)?
 
     /// Cached like `HelioSetupView`'s (review-224 N8): `hasKey` is a Keychain query, so it is read on
     /// appear and whenever the link or session phase moves, not on every render.
@@ -109,7 +111,19 @@ struct HelioConnectionCard: View {
         if result?.latestStress != nil || result?.latestPAI != nil {
             HStack(spacing: 16) {
                 if let stress = result?.latestStress {
-                    reading("Stress", value: "\(Int(stress.value))", at: stress.at)
+                    if let onStress {
+                        Button(action: onStress) {
+                            HStack(alignment: .center, spacing: 4) {
+                                reading("Stress", value: "\(Int(stress.value))", at: stress.at)
+                                KeylineGlyph(.chevronRight, size: 12, relativeTo: .caption2).foregroundStyle(.tertiary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Opens today's stress chart")
+                    } else {
+                        reading("Stress", value: "\(Int(stress.value))", at: stress.at)
+                    }
                 }
                 if let pai = result?.latestPAI {
                     reading("PAI", value: "\(Int(pai.value.rounded()))", at: pai.at)

@@ -1,7 +1,8 @@
 // Today metric tiles (#216) — the view: a dense two-column grid, each tile reading top to bottom as
 // label + freshness → large value with a small unit → delta vs usual with its arrow → a 14-day
 // sparkline over the shaded usual range → the labelled usual range. Tapping a tile opens its
-// 14/30-day trend chart. Model and honesty rules live in `TodayTiles`.
+// detail on today's day chart, with the 14/30-day trend one segment away (#239); the row under the
+// grid opens today's timeline. Model and honesty rules live in `TodayTiles`.
 //
 // The delta arrow is deliberately colour-neutral (secondary): "above usual" is good news for HRV and
 // bad news for resting HR, and the tile has no business deciding which on the user's behalf — the
@@ -15,6 +16,8 @@ struct MetricTilesSection: View {
     /// The shared trends load hasn't landed yet: draw placeholders, not "No data yet".
     var isLoading = false
     var onSelect: (TodayTile.Metric) -> Void = { _ in }
+    /// Opens today's timeline, every metric through the day (#239). No row when nil.
+    var onTimeline: (() -> Void)?
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -37,7 +40,31 @@ struct MetricTilesSection: View {
                 }
             }
             .redacted(reason: isLoading ? .placeholder : [])
+            if let onTimeline {
+                Button(action: onTimeline) { TodayTimelineRow() }
+                    .buttonStyle(.plain)
+            }
         }
+    }
+}
+
+/// The one-tap way from Today to today's timeline (#239): every metric's day chart, stacked.
+struct TodayTimelineRow: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            KeylineGlyph(.activity, size: 16).foregroundStyle(Theme.accent)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Today's timeline").font(.subheadline.weight(.semibold))
+                Text("Every metric through the day").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            KeylineGlyph(.chevronRight, size: 14).foregroundStyle(.tertiary)
+        }
+        .ocCardSurface(padding: 12)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens every metric's chart for today")
+        .accessibilityAddTraits(.isButton)
     }
 }
 
@@ -98,7 +125,7 @@ struct MetricTileView: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(tile.accessibilityLabel)
-        .accessibilityHint("Opens the \(tile.title) trend chart")
+        .accessibilityHint("Opens today's \(tile.title) chart and its trend")
         .accessibilityAddTraits(.isButton)
     }
 }

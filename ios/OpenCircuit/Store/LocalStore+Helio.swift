@@ -173,7 +173,8 @@ final class HelioStoreSink: HelioHistorySink {
     }
 
     func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date] {
-        store.helioFetchCursors(device: timeline)
+        store.applyHelioStressBackfillIfNeeded(device: timeline)   // #239: once per strap, before the plan
+        return store.helioFetchCursors(device: timeline)
     }
 
     /// Decision 28: the strap's current ownership start. If it doesn't own the present (switched
@@ -226,6 +227,8 @@ final class HelioStoreSink: HelioHistorySink {
                 if let last = minutes.last(where: { $0.level != nil }), let level = last.level {
                     latestStress = HelioReading(value: Double(level), at: last.time)
                 }
+                // #239: every minute is kept as `.stress` history, in the app only (no Health type).
+                _ = try store.ingest(owned(ZeppMetricMapping.storedSamples(from: round.parsed), timeline), device: timeline)
             case .pai(let records):
                 if let last = records.last { latestPAI = HelioReading(value: Double(last.totalPAI), at: last.time) }
             default:
