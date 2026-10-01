@@ -186,8 +186,10 @@ struct HealthNotificationStore {
     }
 
     // Once-only ledger for the instant alerts (decision 32, #234): per kind, the end of the latest
-    // reading that notified. Separate from `lastFired`, which only spaces notifications: this is what
-    // stops the SAME crossing notifying again once that backoff has expired.
+    // reading that notified. Separate from `lastFired`, which only spaces notifications. Today the
+    // 2 h backoff outlasts the 90-minute freshness limit, so a notified reading is stale before its
+    // kind can fire again; this ledger keeps "at most once" true if the backoff is ever shortened
+    // below that limit, and for a reading whose future end was clamped to `now`.
     private static let liveKey = "alerts.health.liveWatermark"   // [HealthNotification.rawValue: epoch]
 
     func liveWatermark() -> [HealthNotification: Date] {
@@ -227,8 +229,9 @@ struct HealthNotificationCenter {
     /// verdict changes.
     func evaluate(store localStore: LocalStore, session: RingSession?, now: Date = Date(),
                   restingHRDaily: [RestingHR.DailyValue]? = nil) async {
+        // The night-level candidates (#85, #183). The instant ones (#73) are decided at the gate, in
+        // `decideAndClaim`, from the series gathered below.
         var candidates: [HealthNotification] = []
-        var hitByNotif: [HealthNotification: HealthAlertHit] = [:]
 
         // --- #73: high HR / low SpO2 / elevated-HR-while-inactive --------------------------------
         let thresholds = HealthAlertDefaults.thresholds()
@@ -238,7 +241,6 @@ struct HealthNotificationCenter {
         // Context only, not a delivery window: runs need their earlier readings, but nothing older
         // than `LiveHealthAlerts.maxReadingAge` can notify (decision 32, #234).
         let instantSince = now.addingTimeInterval(-LiveHealthAlerts.contextWindow)
-        let lastFired = store.lastFired()
         // Fetch the recent window (stored + the just-synced in-memory batch). The future guard
         // (`start <= now`) is applied uniformly to HR and SpO2.
         var hr = ((try? localStore.recentSamples(kind: .heartRate, since: instantSince)) ?? [])
@@ -306,17 +308,7 @@ struct HealthNotificationCenter {
 
         // Both the instantaneous high-HR and the sustained-while-inactive rule read the non-exercising
         // series. SpO2 (`spo2`) is passed unfiltered — its rule is unaffected by the activity gate.
-        // LIVE OR NOT AT ALL (decisions 32 and 37, #234): only a reading that ended at most 90 minutes
-        // ago, outside quiet hours and newer than the kind's watermark, can become a candidate.
-        let live = LiveHealthAlerts.evaluate(hr: nonExercisingHR, spo2: spo2,
-                                             inactiveHR: nonExercisingHR,
-                                             thresholds: thresholds,
-                                             watermark: store.liveWatermark(),
-                                             quietHours: quiet, now: now)
-        for alert in live {
-            candidates.append(alert.hit.notification)
-            hitByNotif[alert.hit.notification] = alert.hit
-        }
+        // The rules themselves run at the gate below (`decideAndClaim`).
 
         // Read the per-night / per-day ledger ONCE. The #85 temp family and the #183 morning verdict
         // share the single `alerts.health.lastNight` map — it is keyed by `rawValue`, so the two
@@ -365,24 +357,17 @@ struct HealthNotificationCenter {
         }
 
         // --- Route survivors through the ONE shared gate (quiet hours + backoff) ---------------
-        // `quiet` is the SAME value read at the top of this pass, where the live rule also used it.
-        // Re-reading it here would let a settings change mid-pass produce a live rule and a gate
-        // that disagree about the same night.
-        let fire = gate.filter(candidates, now: now, lastFired: lastFired, quietHours: quiet)
+        // Decided AND claimed in one synchronous call, before the first `await` below — see
+        // `decideAndClaim`. `quiet` is the SAME value read at the top of this pass.
+        let routed = Self.decideAndClaim(hr: nonExercisingHR, spo2: spo2, inactiveHR: nonExercisingHR,
+                                         nightLevel: candidates, thresholds: thresholds,
+                                         quiet: quiet, store: store, gate: gate, now: now)
+        let fire = routed.fire
         guard !fire.isEmpty else { return }
-        // Reserve the survivors against the anti-spam backoff SYNCHRONOUSLY — there is no `await`
-        // between reading `lastFired` above and this write, so on the main actor a second concurrent
-        // evaluate() (the app-open scene-active probe and the sync-complete trigger both fire and
-        // each starts its own Task) reads the mark and is gated out, instead of both passing and
-        // double-posting the same alert. This must stay BEFORE the ensureAuthorized() suspension —
-        // that's what closes the window. `markNight`, by contrast, is deferred until AFTER auth
-        // succeeds: unlike the 2h backoff the night ledger has no time-based self-heal (it only
-        // re-arms on a strictly newer night), so claiming a night here would silently swallow a
-        // real fever/skin-temp flag for the whole day if auth was denied and nothing was posted.
-        store.markFired(fire, at: now)
-        // The once-only watermark (decision 32) is claimed in the same synchronous stretch, for the
-        // same reason: a racing pass must already see these readings as notified.
-        store.markLiveWatermark(LiveHealthAlerts.watermarks(fired: fire, from: live))
+        // `markNight`, by contrast, is deferred until AFTER auth succeeds: unlike the 2h backoff the
+        // night ledger has no time-based self-heal (it only re-arms on a strictly newer night), so
+        // claiming a night here would silently swallow a real fever/skin-temp flag for the whole day
+        // if auth was denied and nothing was posted.
         guard await ensureAuthorized() else { return }
         if let tempNightKey { store.markNight(fire.filter(Self.isTempFever), night: tempNightKey) }
         // Same deferral, same reason (#183): the day ledger only re-arms on a strictly NEWER day, so
@@ -402,7 +387,45 @@ struct HealthNotificationCenter {
             // exactly, so a recomputed key would silently mark nothing.
             if let headacheRowDay { try? localStore.markRiskAlerted(day: headacheRowDay) }
         }
-        for n in fire { await post(n, hit: hitByNotif[n], signals: headacheSignals) }
+        for n in fire { await post(n, hit: routed.hits[n], signals: headacheSignals) }
+    }
+
+    /// The synchronous heart of `evaluate`: decide the instant alerts (#73) under the live rule, route
+    /// them with the night-level candidates through the ONE shared gate, and claim both ledgers.
+    /// Returns what fires, in gate order, and the hit behind each instant alert. Static and free of
+    /// `LocalStore` so `OpenCircuitTests` can drive the real wiring (`HealthNotificationWiringTests`).
+    ///
+    /// Everything here is synchronous ON PURPOSE, and the caller must call it before its first
+    /// `await`. On the main actor a second concurrent `evaluate()` (the app-open scene-active probe
+    /// and the sync-complete trigger each start their own Task) then reads both marks and is gated
+    /// out, instead of both passing and double-posting the same alert.
+    ///  - `quiet` is read ONCE by the caller and used for both the live rule and the gate. Re-reading
+    ///    it here would let a settings change mid-pass produce a rule and a gate that disagree.
+    ///  - `markFired` (the 2 h backoff) and `markLiveWatermark` (decision 32's once-only ledger) are
+    ///    written for the gate's survivors only — never for a candidate the gate held back.
+    static func decideAndClaim(hr: [HRSample], spo2: [SpO2Reading], inactiveHR: [HRSample],
+                               nightLevel: [HealthNotification],
+                               thresholds: HealthAlertThresholds, quiet: QuietHours,
+                               store: HealthNotificationStore, gate: NotificationGate,
+                               now: Date, calendar: Calendar = .current)
+        -> (fire: [HealthNotification], hits: [HealthNotification: HealthAlertHit]) {
+        let lastFired = store.lastFired()
+        // LIVE OR NOT AT ALL (decisions 32 and 37, #234): only a reading that ended at most 90 minutes
+        // ago, outside quiet hours and newer than the kind's watermark, can become a candidate.
+        let live = LiveHealthAlerts.evaluate(hr: hr, spo2: spo2, inactiveHR: inactiveHR,
+                                             thresholds: thresholds,
+                                             watermark: store.liveWatermark(),
+                                             quietHours: quiet, now: now, calendar: calendar)
+        let fire = gate.filter(live.map(\.hit.notification) + nightLevel, now: now,
+                               lastFired: lastFired, quietHours: quiet, calendar: calendar)
+        guard !fire.isEmpty else { return ([], [:]) }
+        store.markFired(fire, at: now)
+        store.markLiveWatermark(LiveHealthAlerts.watermarks(fired: fire, from: live))
+        var hits: [HealthNotification: HealthAlertHit] = [:]
+        for alert in live where fire.contains(alert.hit.notification) {
+            hits[alert.hit.notification] = alert.hit
+        }
+        return (fire, hits)
     }
 
     /// Stable-order de-duplication on a `(Date, Int)` identity — first occurrence wins, order is

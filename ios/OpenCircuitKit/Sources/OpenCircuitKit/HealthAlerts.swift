@@ -487,11 +487,14 @@ public struct LiveHealthAlert: Equatable, Sendable {
 ///  - QUIET HOURS. A reading taken inside the quiet window never notifies, even once the window
 ///    ends and the reading is still fresh — it is suppressed, never delivered later. (The gate
 ///    separately holds everything while `now` is inside the window, as before.)
-///  - AT MOST ONCE. A reading is NEW only if it started after the kind's watermark: the end of the
-///    latest reading that already notified. The caller persists `LiveHealthAlert.watermark`
-///    synchronously, before its first `await`, alongside the gate's `lastFired`. The 2 h backoff
-///    still spaces genuinely new crossings; the watermark is what stops the same one returning
-///    once the backoff has expired.
+///  - AT MOST ONCE. Freshness plus the 2 h backoff already give this today: by the time the backoff
+///    lets a kind through again, every reading that notified is older than `maxReadingAge`. The
+///    WATERMARK keeps it true where that argument breaks — if the backoff is ever made shorter than
+///    `maxReadingAge`, or for a reading whose end was clamped to `now` (a clock-skewed future end,
+///    which stays "fresh" until real time passes it). A reading is NEW only if it started after the
+///    kind's watermark: the end of the latest reading that already notified, clamped to `now`. The
+///    caller persists `LiveHealthAlert.watermark` synchronously, before its first `await`,
+///    alongside the gate's `lastFired`.
 ///
 /// What this covers, and what it gives up (decision 37): by day a crossing reaches the phone on the
 /// first regular background sync after it — the ring drains about hourly (`HistoryDrainCadence`,

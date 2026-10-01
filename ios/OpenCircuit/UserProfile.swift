@@ -534,9 +534,9 @@ struct UserProfileSettingsView: View {
                     DatePicker("To", selection: timeBinding($quietEnd),
                                displayedComponents: .hourAndMinute)
                 }
-                Text("Alerts are muted during this window. Skin temperature and fever alerts arrive "
-                     + "once it ends; heart rate and blood oxygen alerts from inside it are not sent "
-                     + "later.")
+                Text("Health alerts are muted during this window. Skin temperature and fever alerts, "
+                     + "and the headache Morning signal, are held and arrive once it ends; heart rate "
+                     + "and blood oxygen alerts from inside it are not sent later.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
