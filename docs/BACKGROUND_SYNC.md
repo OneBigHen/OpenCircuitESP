@@ -205,7 +205,10 @@ Guide, "Core Bluetooth Background Processing for iOS Apps", and Technical Q&A QA
   sync run past that.
 - A terminated app comes back **only through state restoration** (iOS 11+: after the system ended
   it, a crash, or a reboot after the first unlock), and only for an event it was pending on.
-- **A force-quit or a Bluetooth power toggle ends every strap wake** until the person opens the app.
+- **For a terminated app, a force-quit or a Bluetooth power toggle ends every strap wake** until the
+  person opens the app: restoration doesn't relaunch it after either. An app that is still alive
+  (suspended) is a different case: when Bluetooth comes back on, `HelioConnection` reconnects
+  (`pendingAction = .reconnect`), and that connect is a wake (review-225e N-1).
 
 **Two tasks granted together coalesce** (#233 item 3): no run sits out its window. A later run whose
 deadline isn't more than 5 s later than the active run's completes at once, successfully ("helio
@@ -213,13 +216,28 @@ strap: coalesced into the processing run"); a Sleep Focus run leaves its finaliz
 run (decision 31 bounds it). A later run with a later deadline takes the sync over: the active run
 hands it over at its next turn (nothing torn down or sent; its task completes successfully, "handed
 its sync to the processing run (larger budget)") and the later run finishes and flushes that one
-sync. A coalesced task runs no alert passes; the run holding the strap does.
+sync. A coalesced task runs no alert passes; the run holding the strap does. A coalesced or
+handed-over task reports success even if the run it deferred to then expires with nothing synced
+(review-225e N-2; harmless to data, left as is).
 
 **A night held by its margin** (#233 item 5): when a strap flush holds a night back (its last
 segment ended under 20 min before the flush, and no Sleep Focus finalization applied), the next
 app-refresh request is aimed at the margin's end (`BackgroundRefreshScheduler.scheduleRefresh`,
 strap only; at least a minute away); after a woke-up catch-up, at least 30 min later, as the night's
-record may be late (`ZEPP_PROTOCOL.md` §21.4). The ring's requests are unchanged.
+record may be late (`ZEPP_PROTOCOL.md` §21.4). The pending date is persisted (strap only,
+`StrapNightRefresh`) and submitted again after the app's own `schedule()` (scene → background,
+`applicationDidEnterBackground`, the start of every BGTask), which would otherwise replace it within
+seconds (review-225e SF-3); it is cleared once it passes or a flush finds no night waiting. The
+ring's requests are unchanged.
+
+**Opening the app syncs an idle strap session** (review-225e SF-1): a link that came back in the
+background (a teardown's re-arm, a reconnect or restoration inside the wake gates, a connect that
+completed while the app was `.inactive`) makes a session that doesn't sync on connect. On
+`didBecomeActive` the connection syncs a ready, idle session (no sync, find or live heart rate) when
+the last completed strap sync is at least `ForegroundAutoSync.interval` (300 s, one constant with
+the ring's foreground auto-sync) old, with the ring's throttle, so a flapping `.inactive`/`.active`
+gives one sync. If the app leaves before that sync ends, the sync-end hook runs its alert pass
+(review-236 S1), once.
 
 One run: connect by identifier if the link isn't up (never a scan) → auth with the Keychain key
 (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`) → clock → fetch, every round acked `03 09`
@@ -230,6 +248,12 @@ Safety invariants specific to the strap:
   expires the task: the open round is acked `03 09`, committed rows stay, the link is dropped
   (a running find gets its `06` first) and the rest stays on the strap. An expiry skips the Health
   flush; the task is completed only after that teardown (or 2 s after the expiry at the latest).
+  A catch-up's expiry (its `beginBackgroundTask` assertion ending) tears down inside the expiry
+  handler, since iOS suspends the app when it returns (review-225e SF-2): the `03 09` is queued, the
+  fetch ends, the link cancel is issued in that call, and the standing connect is armed; its
+  `connect` goes out when the cancel lands (`didDisconnectPeripheral`, itself a wake). A `03 09`
+  still in the write queue may be lost with the cancel, which is safe: an unacked round stays on
+  the strap.
 - **Key states (decision 7).** No key, a rejected key (persisted), or a strap that ended "busy"
   earlier in this app launch end the run before any radio work; a session that turns out keyless,
   rejected, busy or unsupported ends it. No retry, no store or Health write, and the run log says
