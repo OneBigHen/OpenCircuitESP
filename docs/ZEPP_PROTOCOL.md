@@ -1004,6 +1004,15 @@ to connect (phone Bluetooth off) so that every message seen is the strap's.
     within a minute of it. The one alert that needs no setting change and can be provoked: hold an
     idle link while the strap's battery drains past 20 %; it buzzes there (§13.4). Does anything
     arrive on `…0017`, `0x2A19` or `…0010`? Promotes §20.1.
+29. **Naps** (§21). On a day with a normal night, take a 30–60 minute nap in the afternoon, more
+    than an hour after waking, and check that the Zepp app shows it as a nap. Then fetch `0x48`
+    over the last 24 h (ack `09`). Record the number of 594-byte records and, for each, only its
+    structure: the bytes at `0x008` and `0x009`, whether the "midnight" field (`0x004`) is the same
+    for the nap and the night, and whether any other byte outside the stage table and the HR /
+    score fields differs systematically. Don't record times or values. Separately, on one night,
+    fetch `0x48` while asleep (from an automated run) and again after waking with the same *since*:
+    is a partial record delivered, and does it come back later with the same session timestamp
+    and different content? Promotes §21.3 and §21.4.
 
 ### 10.1 Results from a real strap (2026-09-30)
 
@@ -2280,6 +2289,76 @@ length of anything unknown) is how it would be found.
 
 ---
 
+## 21. Naps (#231)
+
+### 21.1 What Amazfit says
+
+The Helio records **night sleep and naps**. Sleep that overlaps the user's **sleep plan** (set in
+the Zepp app) is the day's **main sleep**; with no plan, the window is **00:00–08:00**. Sleep
+**more than 60 minutes apart** from the main sleep is recorded as a **nap**. Sleep **shorter than
+20 minutes** is not recorded. 🟡 `AMZ-M p.9`
+
+### 21.2 What the references say
+
+| Fact | Tag / source |
+|---|---|
+| **Neither reference mentions naps.** Gadgetbridge's Huami and Zepp OS code has no nap concept; HelioCore doesn't fetch sleep sessions (`0x48`) at all. | 🟡 `GB/devices/huami/HuamiSleepSessionSampleProvider.java` (whole file), `FOP/SleepSession:45-106`; `HC:908,1156-1163` (its fetch list has no `0x48`) |
+| A `0x48` round may hold **several 594-byte records**. Gadgetbridge splits them and stores each one keyed by its own session timestamp (offset `0x000`), so any number of sessions per day fits its storage. | 🟡 `FOP/SleepSession:59-84` |
+| Gadgetbridge overlays the stages of **every** session record in the requested window onto the activity minutes, the same way for each record. Nothing in the record is read as "nap" or "main sleep". | 🟡 `HuamiSleepSessionSampleProvider.java:70-95` |
+| Nothing else about naps appears in either source: no nap fetch type in Gadgetbridge's list of types (§6.5), and no nap arg in its config groups. | 🟡 `GB/service/devices/huami/operations/fetch/HuamiFetchDataType.java`, `SVC/Config:467-577` |
+
+### 21.3 How a nap probably appears (🔴 until §10 item 29)
+
+- **As its own `0x48` record** (🔴 most likely): the record format holds one sleep span (start and
+  end minutes, §6.6) with its own stages. A day with a nap would then deliver two records, possibly
+  with the **same "midnight" reference** (`0x004`), because both belong to the same day.
+- **Candidate flag bytes**: `0x008` and `0x009` are "both `01` in observed data, unexplained"
+  (§6.6). A main-sleep / nap marker is one plausible meaning. 🔴 pure hypothesis: compare a nap
+  record with a night record.
+- **In the activity minutes** (`0x01`, §6.5): the per-minute sleep bytes and the "sleep" kind `0x78`
+  carry no nap marker that any reference knows. A nap shows up there as sleep minutes in the
+  daytime.
+- The hardware run of 2026-09-30 got exactly one 594-byte record in a 12-hour window (§10.1). That
+  says nothing about naps.
+
+### 21.4 When a session record exists, and re-fetching it
+
+- 🔴 Whether the strap writes a session record only after the session ends, or also while it is
+  in progress, is unknown for Zepp OS. On another vendor's band, Gadgetbridge has fetched an
+  in-progress sleep file at 04:25 and never received the completed night. Its maintainer's fix
+  idea was to stop marking such a file synced (`GB#6484`, Xiaomi, 2026-07-28 to 2026-08-26). Also, a nap can
+  only be told apart from a main sleep once the main sleep is known (§21.1).
+- Gadgetbridge's cursor for `0x48` moves past each round's last record (§6.4). A record the strap
+  later **rewrites with the same session timestamp** would therefore never be fetched again.
+  🔴 whether the strap ever does that.
+
+**OpenCircuit rule** (🔴 recommendation):
+- Keep acking `0x48` rounds with `09` (keep, §6.3). Start each sleep fetch from the start of the
+  **latest session that ended less than 24 h ago**, not from after it: with `09`, overlapping data
+  is re-delivered (🟢 for temperature, §6.3).
+- Store sessions keyed by their session timestamp (`0x000`), and **replace** a stored session when a
+  record with the same key arrives with different content.
+- After a `06 00` wake event (§16.2), expect the night's record to be late or partial. Fetch again
+  later.
+
+### 21.5 Telling a nap from the night (🔴 recommendation)
+
+Until §10 item 29 finds a marker in the record, apply Amazfit's rule on the phone:
+
+1. Take every session of the local day, in strap-local time (§6.4).
+2. The **main sleep** is the session that overlaps the sleep-plan window. OpenCircuit can't read
+   Zepp's sleep plan (no known config arg), so use **00:00–08:00**, as the strap does without a
+   plan, and let the user change it. If several overlap, take the longest.
+3. Any other session that starts or ends **more than 60 minutes** from the main sleep is a **nap**.
+   One within 60 minutes belongs to the main sleep (merge the two).
+4. Drop sessions under 20 minutes. The strap shouldn't send them; if one arrives, it's a sign that
+   the rule above is wrong. Log it.
+5. HealthKit has no nap type: write a nap's stages as ordinary `sleepAnalysis` samples
+   (`HEALTHKIT_MAPPING.md`, `0x48` row). Mark the nap as such only in OpenCircuit's own model,
+   e.g. to keep it out of "last night".
+
+---
+
 ## Changelog
 
 - 2026-09-30: first version (zepp-spec agent, #215 Phase 0). All claims 🟡/🔴.
@@ -2314,3 +2393,6 @@ length of anything unknown) is how it would be found.
 - 2026-10-01: parity addendum, part 5 (zepp-parity-spec agent, #230): §20, strap alert events:
   no message is known for any strap-side alert; how to infer them from history instead; capture
   item 28.
+- 2026-10-01: parity addendum, part 6 (zepp-parity-spec agent, #231): §21, naps: Amazfit's nap
+  rule, what the references say (nothing), how a nap probably appears in `0x48`, re-fetching
+  sessions, the phone-side nap rule; capture item 29.
