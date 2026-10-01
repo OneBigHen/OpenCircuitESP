@@ -489,9 +489,14 @@ public struct ZeppSettingsEditor {
     }
 
     /// A decoded payload from the config endpoint.
-    public mutating func receive(_ payload: [UInt8], now: Date) -> Output {
+    ///
+    /// `mayWrite` is the caller's §17.8 step 1 check made NOW, when a pre-read's reply would release
+    /// the write: no history fetch running, the app in front. The tap's check is a round trip old by
+    /// then; a sync or backgrounding in between ends the change with `.refused(change, .busy)` and
+    /// nothing is sent (review-240 S1, S2).
+    public mutating func receive(_ payload: [UInt8], now: Date, mayWrite: Bool = true) -> Output {
         switch payload.first {
-        case 0x04: return receiveRead(payload, now: now)
+        case 0x04: return receiveRead(payload, now: now, mayWrite: mayWrite)
         case 0x06: return receiveAck(ZeppConfig.parseWriteAck(payload), now: now)
         default: return Output()
         }
@@ -548,7 +553,7 @@ public struct ZeppSettingsEditor {
         return reply
     }
 
-    private mutating func receiveRead(_ payload: [UInt8], now: Date) -> Output {
+    private mutating func receiveRead(_ payload: [UInt8], now: Date, mayWrite: Bool) -> Output {
         switch pending {
         case .reading(let group, let arguments, _):
             pending = .none
@@ -569,6 +574,10 @@ public struct ZeppSettingsEditor {
             snapshot.merge(reply, requested: Self.familyArguments(change.setting))
             readFailures[group] = nil
             var events: [Event] = [.read(group: group)]
+            guard mayWrite else {
+                events.append(.refused(change, .busy))
+                return Output(events: events)
+            }
             let current = snapshot.value(change.setting)
             guard current == change.from else {
                 events.append(.changedOnStrap(change, current: current))

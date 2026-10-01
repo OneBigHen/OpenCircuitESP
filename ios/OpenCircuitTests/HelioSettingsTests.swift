@@ -3,9 +3,9 @@ import OpenCircuitKit
 import ZeppKit
 @testable import OpenCircuit
 
-// The strap's settings and alerts in the app (#228, #230): `HelioSession` drives
-// `ZeppHealthConfigEditor` against the simulated strap (`FakeZeppDevice`). Every key and setting is
-// made up.
+// The strap's settings in the app (#228, #229, #230): `HelioSession` drives `ZeppSettingsEditor`
+// against the simulated strap (`FakeZeppDevice`), including review-240's probes of a sync or
+// backgrounding that lands between the tap and the write. Every key and setting is made up.
 
 private let keyHex = "00112233445566778899aabbccddeeff"
 
@@ -181,7 +181,7 @@ final class HelioSettingsTests: XCTestCase {
         XCTAssertNil(session.changeStrapSetting(.allDaySpO2, from: .bool(false), to: .bool(true)))
         transport.drain()
         XCTAssertEqual(device.configWrites, [[0x05, 0x08, 0x03, 0x00, 0x01, 0x31, 0x0b, 0x01]])
-        XCTAssertEqual(session.settingsNotice, "Saved on the strap.")
+        XCTAssertEqual(session.settingsNotice?.text, "Saved on the strap.")
         XCTAssertEqual(session.settingsEditor?.snapshot.value(.allDaySpO2), .bool(true))
         XCTAssertEqual(session.settingsEditor?.snapshot.availability(.lowSpO2Alert), .available)
         XCTAssertEqual(session.recordingWarnings, [], "the warning follows the strap's new value")
@@ -197,7 +197,7 @@ final class HelioSettingsTests: XCTestCase {
         transport.drain()
         XCTAssertEqual(device.configWrites.count, 1, "never retried")
         XCTAssertEqual(session.settingsEditor?.snapshot.value(.highHeartRateAlert), .byte(0), "the re-read value")
-        XCTAssertEqual(session.settingsNotice,
+        XCTAssertEqual(session.settingsNotice?.text,
                        "The strap didn't take the change. Its current value is shown. Nothing was retried.")
     }
 
@@ -211,7 +211,7 @@ final class HelioSettingsTests: XCTestCase {
         transport.drain()
         XCTAssertEqual(device.configWrites, [])
         XCTAssertEqual(session.settingsEditor?.snapshot.value(.highHeartRateAlert), .byte(120))
-        XCTAssertTrue(session.settingsNotice?.contains("changed on the strap") == true)
+        XCTAssertTrue(session.settingsNotice?.text.contains("changed on the strap") == true)
     }
 
     func testRefusedChangesSendNothing() throws {
@@ -239,7 +239,7 @@ final class HelioSettingsTests: XCTestCase {
         XCTAssertNil(session.changeStrapSetting(.workoutDetectionAlert, from: .bool(false), to: .bool(true)))
         transport.drain()
         XCTAssertEqual(device.configWrites, [[0x05, 0x09, 0x01, 0x00, 0x01, 0x41, 0x0b, 0x01]], "WORKOUT v1 echoed, one entry")
-        XCTAssertEqual(session.settingsNotice, "Saved on the strap.")
+        XCTAssertEqual(session.settingsNotice?.text, "Saved on the strap.")
         XCTAssertFalse(device.configWrites.contains { $0.count > 5 && $0[1] == 0x09 && $0[5] == 0x40 }, "categories never written")
     }
 
@@ -310,5 +310,133 @@ final class HelioSettingsTests: XCTestCase {
             }
             XCTAssertFalse(text.unicodeScalars.contains { $0.properties.isEmojiPresentation }, "no emoji")
         }
+    }
+
+    // MARK: review-240: the write itself is gated, not only the tap (§17.8 step 1)
+
+    /// S1: a sync (pull-to-refresh, "Sync now", #225's wake or BGTask run) that starts while a
+    /// change's pre-read is in flight. The write must not go out during the fetch.
+    func testASyncStartingMidChangeLetsNoWriteOut() {
+        let device = makeStrap()
+        let (session, transport) = connect(device, sink: NullSink())
+        session.readStrapSettings(groups: [0x08])
+        transport.drain()
+        var phaseAtWrite: HelioSession.Phase?
+        device.onConfigWrite = { [unowned session] _ in phaseAtWrite = session.phase }
+        XCTAssertNil(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
+        session.syncHistory(manual: false)
+        XCTAssertEqual(session.phase, .syncing, "a sync never waits on the settings editor")
+        transport.drain()
+        XCTAssertEqual(device.configWrites, [], "a config write went out with phase \(String(describing: phaseAtWrite))")
+        XCTAssertEqual(session.settingsNotice?.text, "Not saved: a sync started. Try again when it finishes.")
+        XCTAssertEqual(session.settingsNotice?.setting, .stressMonitoring)
+        XCTAssertEqual(session.settingsEditor?.isBusy, false)
+        XCTAssertEqual(session.settingsEditor?.snapshot.value(.stressMonitoring), .bool(true), "the last read value stays")
+    }
+
+    /// S2: the app goes to the background while a change's pre-read is in flight.
+    func testBackgroundingMidChangeLetsNoWriteOut() {
+        let device = makeStrap()
+        let (session, transport) = connect(device)
+        session.readStrapSettings(groups: [0x08])
+        transport.drain()
+        XCTAssertNil(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
+        session.appDidEnterBackground()
+        transport.drain()
+        XCTAssertEqual(device.configWrites, [], "a config write went out after appDidEnterBackground")
+        XCTAssertTrue(session.settingsNotice?.text.contains("background") == true)
+        // And a tap from the background is refused outright.
+        XCTAssertFalse(session.canChangeStrapSettings)
+        XCTAssertEqual(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)),
+                       "Settings can be changed with the app open.")
+        // Back in front, the same change goes out.
+        session.appDidBecomeActive()
+        XCTAssertNil(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
+        transport.drain()
+        XCTAssertEqual(device.configWrites, [[0x05, 0x08, 0x03, 0x00, 0x01, 0x13, 0x0b, 0x00]])
+    }
+
+    /// Two quick taps before any reply: one write. A re-read that disagrees never says "saved", and a
+    /// change built on the stale screen value writes nothing.
+    func testTwoQuickTapsWriteOnce() {
+        let device = makeStrap()
+        let (session, transport) = connect(device)
+        session.readStrapSettings(groups: [0x08])
+        transport.drain()
+        XCTAssertNil(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
+        XCTAssertEqual(session.changeStrapSetting(.highHeartRateAlert, from: .byte(0), to: .byte(110)),
+                       "Another change is still being saved.")
+        transport.drain()
+        XCTAssertEqual(device.configWrites, [[0x05, 0x08, 0x03, 0x00, 0x01, 0x13, 0x0b, 0x00]])
+        XCTAssertNotEqual(session.settingsNotice?.text, "Saved on the strap.", "the fake strap didn't apply it")
+        XCTAssertNil(session.changeStrapSetting(.stressMonitoring, from: .bool(false), to: .bool(true)))
+        transport.drain()
+        XCTAssertEqual(device.configWrites.count, 1, "stale from: nothing written")
+    }
+
+    /// The re-read times out after a `06 01`: never "saved".
+    func testAReReadTimeoutNeverSaysSaved() {
+        let device = makeStrap()
+        let (session, transport) = connect(device)
+        session.readStrapSettings(groups: [0x08])
+        transport.drain()
+        XCTAssertNil(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
+        var reads = 0
+        device.configReadHandler = { [strap = self.strap] request in
+            reads += 1
+            return reads == 1 ? strap.answer(request) : [0x04, 0x02]
+        }
+        transport.drain()
+        XCTAssertEqual(device.configWrites.count, 1)
+        now = now.addingTimeInterval(6)
+        session.tick(now: now)
+        transport.drain()
+        XCTAssertNotEqual(session.settingsNotice?.text, "Saved on the strap.")
+        XCTAssertEqual(session.settingsEditor?.isBusy, false)
+    }
+
+    /// N2: a notice belongs to its setting, and a fresh read clears it.
+    func testANoticeIsKeyedToItsSettingAndAFreshReadClearsIt() {
+        let device = makeStrap()
+        device.onConfigWrite = { [strap = self.strap] in strap.apply($0) }
+        let (session, transport) = connect(device)
+        session.readStrapSettings(groups: [0x08])
+        transport.drain()
+        XCTAssertNil(session.changeStrapSetting(.allDaySpO2, from: .bool(false), to: .bool(true)))
+        transport.drain()
+        let notice = session.settingsNotice
+        XCTAssertEqual(notice?.text, "Saved on the strap.")
+        XCTAssertEqual(notice?.belongs(to: ZeppSetting.measurement), true)
+        XCTAssertEqual(notice?.belongs(to: ZeppSetting.workoutDetection), false, "not shown on another screen")
+        XCTAssertEqual(notice?.belongs(to: ZeppSetting.alerts), false)
+        session.readStrapSettings(groups: [0x08])
+        XCTAssertNil(session.settingsNotice, "a fresh read clears the last outcome")
+    }
+
+    /// N3: the Today card points at Measurement only when that screen can change the switches now.
+    func testTheTodayCardPointsAtMeasurementOnlyWhenItCanFixIt() {
+        strap.spo2 = false
+        let device = makeStrap()
+        let (session, transport) = connect(device)
+        XCTAssertFalse(session.canFixRecordingWarningsHere, "not read yet: unknown, so not claimed")
+        session.readStrapSettings(groups: [0x08])
+        transport.drain()
+        XCTAssertTrue(session.canFixRecordingWarningsHere)
+        session.appDidEnterBackground()
+        XCTAssertFalse(session.canFixRecordingWarningsHere)
+        let (keyless, _) = connect(makeStrap(), key: nil)
+        XCTAssertFalse(keyless.canFixRecordingWarningsHere)
+    }
+
+    /// N1, N4: an inactive child reads as text, and an all-day HR byte outside §17.9 isn't guessed.
+    func testInactiveValuesAndUnknownIntervals() {
+        XCTAssertEqual(HelioSettingsCopy.inactiveValue(.bool(true), for: .relaxReminder, availability: .needs(.stressMonitoring)),
+                       "On (inactive: needs stress monitoring on)")
+        XCTAssertEqual(HelioSettingsCopy.inactiveValue(.byte(110), for: .highHeartRateAlert, availability: .needs(.heartRateMonitoring)),
+                       "Above 110 bpm (inactive: needs all-day heart rate on)")
+        XCTAssertEqual(HelioSettingsCopy.inactiveValue(.bool(false), for: .stressMonitoring, availability: .readOnly), "Off (read-only)")
+        XCTAssertEqual(HelioSettingsCopy.value(.byte(0x78), for: .heartRateMonitoring), "Every 120 min")
+        XCTAssertEqual(HelioSettingsCopy.value(.byte(0x79), for: .heartRateMonitoring), "Unknown (0x79)")
+        XCTAssertEqual(HelioSettingsCopy.value(.byte(0xfd), for: .heartRateMonitoring), "Unknown (0xfd)")
     }
 }

@@ -1,7 +1,11 @@
-// ZeppSettingsEditor (#228, #229, #230): the §17.8 config write sequence as a pure machine, the
-// spec's worked examples I, J, K (§17.10–§17.12) and M (§19.4) byte for byte, example I's encrypted
-// write on the wire, then the editor over the simulated strap's real chunking and encryption. Every
-// value and allowed list is made up.
+// ZeppSettingsEditor (#228, #229, #230): the §17.8 config write sequence as a pure machine; the
+// spec's worked examples I, J, K (§17.10–§17.12) and M (§19.4); example I's encrypted write on the
+// wire; then the editor over the simulated strap's real chunking and encryption. Every value and
+// allowed list is made up.
+//
+// The examples' WRITES are reproduced byte for byte. Their reads are too, except example K's: the
+// editor's pre-read and re-read for the high-HR alert also ask for arg `01` (§17.7's SPEC-GAP, see
+// `ZeppSetting.requirement`), so it sends `03 01 08 02 01 02` where K shows `03 01 08 01 02`.
 
 import XCTest
 @testable import ZeppKit
@@ -244,12 +248,13 @@ final class SettingsTests: XCTestCase {
             XCTAssertEqual($0 as? ZeppSettingsEditor.Error, .valueNotAllowed(.highHeartRateAlert, .byte(0x7d)))
         }
         let change = ZeppSettingsEditor.Change(setting: .highHeartRateAlert, from: .byte(0x78), to: .byte(0x82))
-        _ = try e.change(change, now: t0)
-        // No arg 01 on this strap: the family read is the pre-read; the HR requirement doesn't apply.
+        // NOT example K's `03 01 08 01 02`: the editor adds the parent arg `01` (§17.7 SPEC-GAP). This
+        // strap doesn't report `01`, so the HR requirement doesn't apply and the write is K's.
+        XCTAssertEqual(payloads(try e.change(change, now: t0)), [hex("03 01 08 02 01 02")])
         XCTAssertEqual(payloads(e.receive(read, now: t0)), [hex("05 08 03 00 01 02 10 82")])
         var out = e.receive(hex("06 02"), now: t0)
         XCTAssertEqual(out.events, [.writeNotAcknowledged(change, .status(0x02))])
-        XCTAssertEqual(payloads(out), [ZeppSettingsEditor.familyRequest(.highHeartRateAlert)], "re-read, never retry")
+        XCTAssertEqual(payloads(out), [hex("03 01 08 02 01 02")], "re-read (K: 03 01 08 01 02, see above), never retry")
         out = e.receive(read, now: t0)
         guard case .writeChecked(let check)? = out.events.first else { return XCTFail("\(out.events)") }
         XCTAssertFalse(check.tookChange)

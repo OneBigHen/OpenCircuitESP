@@ -33,6 +33,32 @@ enum HelioSettingsDisplayCache {
     static func entry(strap: String) -> Entry? { entries[strap] }
 }
 
+/// The outcome of the last settings action, keyed to the setting it is about (review-240 N2), or to
+/// the groups a read was for. A screen shows only the notices about its own settings.
+struct HelioSettingsNotice: Equatable {
+    let setting: ZeppSetting?
+    let groups: [UInt8]
+    let text: String
+
+    init(setting: ZeppSetting, text: String) {
+        self.setting = setting
+        groups = [setting.group]
+        self.text = text
+    }
+
+    init(groups: [UInt8], text: String) {
+        setting = nil
+        self.groups = groups
+        self.text = text
+    }
+
+    /// Shown on a screen listing `settings`.
+    func belongs(to settings: [ZeppSetting]) -> Bool {
+        if let setting { return settings.contains(setting) }
+        return settings.contains { groups.contains($0.group) }
+    }
+}
+
 /// The plain-language side of the settings screens: labels, values, what each setting does, its
 /// battery cost (in words: no figures are known), and why the controls are unavailable.
 enum HelioSettingsCopy {
@@ -113,11 +139,26 @@ enum HelioSettingsCopy {
         case (.heartRateMonitoring, .byte(0xff)): return "Smart"
         case (.heartRateMonitoring, .byte(0xfe)): return "Continuous"
         case (.heartRateMonitoring, .byte(1)): return "Every minute"
-        case (.heartRateMonitoring, .byte(let n)): return "Every \(n) min"
+        case (.heartRateMonitoring, .byte(let n)) where n <= 0x78: return "Every \(n) min"
+        // Outside §17.9's defined set: don't guess a meaning (review-240 N4).
+        case (.heartRateMonitoring, .byte(let n)): return String(format: "Unknown (0x%02x)", n)
         case (.highHeartRateAlert, .byte(let n)): return "Above \(n) bpm"
         case (.lowHeartRateAlert, .byte(let n)): return "Below \(n) bpm"
         case (.lowSpO2Alert, .byte(let n)): return "Below \(n) %"
         default: return "Not reported"
+        }
+    }
+
+    /// A setting that can't be changed now, shown as text: "On (inactive: needs stress monitoring
+    /// on)" for a child whose parent is off (§17.7), "On (read-only)" for an undescribed version.
+    static func inactiveValue(_ value: ZeppConfigValue, for setting: ZeppSetting,
+                              availability: ZeppSettingsSnapshot.Availability) -> String {
+        let shown = Self.value(value, for: setting)
+        switch availability {
+        case .needs(.heartRateMonitoring): return shown + " (inactive: needs all-day heart rate on)"
+        case .needs(let parent): return shown + " (inactive: needs \(label(parent).lowercasedFirst) on)"
+        case .readOnly: return shown + " (read-only)"
+        default: return shown
         }
     }
 
@@ -220,7 +261,14 @@ private struct HelioSettingRow: View {
             let availability = snapshot.availability(setting)
             let usable = enabled && availability == .available && !snapshot.options(setting).isEmpty
             VStack(alignment: .leading, spacing: 6) {
-                control(current: current).disabled(!usable)
+                switch availability {
+                case .needs, .readOnly:
+                    // Not a greyed switch that reads as "on" (review-240 N1): the stored value as text.
+                    LabeledContent(HelioSettingsCopy.label(setting),
+                                   value: HelioSettingsCopy.inactiveValue(current, for: setting, availability: availability))
+                default:
+                    control(current: current).disabled(!usable)
+                }
                 Text(HelioSettingsCopy.explanation(setting)).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 switch availability {
@@ -314,8 +362,8 @@ private struct HelioSettingsList: View {
             }
             if model.isBusy, model.editor?.changeInFlight != nil {
                 Section { Text("Saving to the strap…").font(.caption) }
-            } else if model.canRead, let notice = model.session?.settingsNotice {
-                Section { Text(notice).font(.caption) }
+            } else if model.canRead, let notice = model.session?.settingsNotice, notice.belongs(to: settings) {
+                Section { Text(notice.text).font(.caption) }
             }
         }
         .toolbar {
