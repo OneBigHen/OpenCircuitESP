@@ -110,12 +110,13 @@ enum ExportIntentError: Error, CustomLocalizedStringResourceConvertible {
 ///
 /// Mirrors `quickLogStore()` in HeadacheLogIntent.swift (which is file-private there): reuse the
 /// process-wide container the `App` published at launch, and fall back to the NON-destructive
-/// `makeContainerOrThrow()`. `makeContainer()` is never called here — its wipe-and-recover path
+/// `makeContainerOrThrow()`, whose container is then published for later sites to reuse
+/// (`sharedOrFallbackContainer`). `makeContainer()` is never called here — its wipe-and-recover path
 /// would delete un-resyncable history on a transient open failure, with no UI present to say so
 /// (#40/#131). An export must never be able to destroy the thing it is exporting.
 @MainActor
 private func exportStore() throws -> LocalStore {
-    guard let container = try? (OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()) else {
+    guard let container = try? OpenCircuitApp.sharedOrFallbackContainer() else {
         throw ExportIntentError.storeUnavailable
     }
     // `container:` keeps a fallback-built container alive for as long as the returned store.

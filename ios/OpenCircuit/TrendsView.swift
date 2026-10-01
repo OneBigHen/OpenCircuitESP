@@ -78,7 +78,7 @@ struct TrendsView: View {
             Image(systemName: "chart.line.uptrend.xyaxis")
                 .font(.system(size: 44)).foregroundStyle(.secondary)
             Text("No trend data yet").font(.headline)
-            Text("Sync from the ring a few times to build your history.")
+            Text("Sync your device a few times to build your history.")
                 .font(.subheadline).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }

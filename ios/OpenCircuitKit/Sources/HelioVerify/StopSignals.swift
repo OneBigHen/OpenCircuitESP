@@ -20,6 +20,14 @@ enum StopSignals {
     /// The shell convention: 130 for SIGINT, 143 for SIGTERM, 129 for SIGHUP.
     static func exitCode(_ signal: Int32) -> Int32 { 128 + signal }
 
+    /// SIGPIPE ignored (review-223 N2): with stdout piped to a reader that has gone away (a `| tee`
+    /// whose terminal closed), a log line printed before the stop would otherwise kill the process
+    /// with SIGPIPE, and the find stop would never go out. Ignored, the write just fails and the run
+    /// carries on to send the stop. Call once, first thing at startup.
+    static func ignoreBrokenPipe() {
+        signal(SIGPIPE, SIG_IGN)
+    }
+
     /// Ignores each signal's default action and calls `handler` on the main queue instead. Keep the
     /// returned sources alive for the whole run.
     static func install(_ handler: @escaping (Int32) -> Void) -> [DispatchSourceSignal] {

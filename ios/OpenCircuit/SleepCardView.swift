@@ -414,7 +414,7 @@ struct SleepCardView: View {
     private var notSyncedYetNotice: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "arrow.triangle.2.circlepath").font(.caption2).foregroundStyle(.secondary)
-            Text("Last night hasn’t synced yet. Open OpenCircuit near the ring to pull it in — showing your most recent recorded night until then.")
+            Text("Last night hasn’t synced yet. Open OpenCircuit near your device to pull it in — showing your most recent recorded night until then.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(.vertical, 6).padding(.horizontal, 8)
@@ -428,7 +428,7 @@ struct SleepCardView: View {
     private var missedNightNotice: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "moon.zzz").font(.caption2).foregroundStyle(.orange)
-            Text("No sleep recorded for last night. Showing your most recent recorded night — wear the ring to bed and sync in the morning.")
+            Text("No sleep recorded for last night. Showing your most recent recorded night — wear your device to bed and sync in the morning.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(.vertical, 6).padding(.horizontal, 8)
@@ -465,6 +465,9 @@ struct SleepCardView: View {
                 recencyNotice
                 content(night)
             } else {
+                // Review-224d N-1: with no stored night at all, a night the strap owns but never stored
+                // still gets its notice, not only the generic empty state.
+                if sleepPersistOutcome == .ownedByOtherDeviceNoRow { unsavedNightNotice }
                 emptyState
             }
         }
@@ -1053,11 +1056,27 @@ struct SleepCardView: View {
             // as a defect.
             HStack(spacing: 6) {
                 Image(systemName: "thermometer.medium").font(.caption2).foregroundStyle(.tertiary)
-                Text("No skin temperature for this night — it's only recorded while the ring stays connected, and there weren't enough readings to compare.")
+                Text(Self.noSkinTempNote(nightOwner: latest.map {
+                    LocalStore.ownershipLog().owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd)
+                } ?? .ringConn))
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.top, 2)
+        }
+    }
+
+    /// Why a staged night has no skin temperature, for the device that keeps the night (decision 28a:
+    /// the device you went to bed with, `owner(ofNightFrom:to:)`; the ring for every ring-only
+    /// install). The
+    /// ring's reason is its live-only temperature above; the strap's temperature is in its history,
+    /// but only its worn minutes inside its own sleep window, 30–42 °C, count (decisions 12, 25).
+    static func noSkinTempNote(nightOwner: DeviceOwnershipLog.Family) -> String {
+        switch nightOwner {
+        case .zeppOS:
+            return "No skin temperature for this night — the strap recorded too few usable readings while worn during this sleep to compare."
+        case .ringConn:
+            return "No skin temperature for this night — it's only recorded while the ring stays connected, and there weren't enough readings to compare."
         }
     }
 
@@ -1597,7 +1616,7 @@ struct SleepCardView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Your sleep appears here after an overnight sync")
                     .font(.subheadline.weight(.medium))
-                Text("Wear the ring to bed and connect in the morning. Once it syncs, last night's sleep stays here all day.")
+                Text("Wear your device to bed and connect in the morning. Once it syncs, last night's sleep stays here all day.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
