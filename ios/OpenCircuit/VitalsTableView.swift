@@ -35,6 +35,8 @@ struct VitalsTableView: View {
     @Query private var storedDaily: [StoredDaily]
     /// Live session (optional) — its readings override stored ones while connected.
     var session: RingSession?
+    /// The Helio Strap's Measure (decision 30), used only while no ring session exists.
+    var strapLive: StrapLiveHeartRate?
 
     /// The user's sleep window (from the manual schedule, or the iOS Sleep schedule once
     /// HealthKit is authorized) — the preferred bound for the night-temp window. Resolved
@@ -52,8 +54,9 @@ struct VitalsTableView: View {
     /// versus all history.
     private static let tempWindowDays: TimeInterval = 3
 
-    init(session: RingSession? = nil) {
+    init(session: RingSession? = nil, strapLive: StrapLiveHeartRate? = nil) {
         self.session = session
+        self.strapLive = strapLive
 
         // Anchor the time windows to the start of the current hour so the @Query descriptors stay
         // stable across rapid SwiftUI re-renders (only re-fetching hourly or when data changes),
@@ -216,10 +219,14 @@ struct VitalsTableView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            measurableRow("Heart Rate", value: hrText, mode: .hr, active: hrActive,
-                          time: hrActive && settledLiveHR == nil
-                              ? (session?.livePreparing == true ? "preparing…" : "measuring…")
-                              : timeFor(.heartRate, live: hrLive))
+            if session == nil, let strapLive {
+                strapHeartRateRow(strapLive)
+            } else {
+                measurableRow("Heart Rate", value: hrText, mode: .hr, active: hrActive,
+                              time: hrActive && settledLiveHR == nil
+                                  ? (session?.livePreparing == true ? "preparing…" : "measuring…")
+                                  : timeFor(.heartRate, live: hrLive))
+            }
             divider
             spo2Row
             divider
@@ -344,6 +351,23 @@ struct VitalsTableView: View {
     }
 
     private var divider: some View { Divider().opacity(0.4) }
+
+    /// The heart-rate row with the strap's Measure (decision 30): the same layout and control as the
+    /// ring's `measurableRow`, the live reading while it streams, else the latest stored one.
+    private func strapHeartRateRow(_ live: StrapLiveHeartRate) -> some View {
+        let reading = live.liveHR
+        let time = live.measuring && reading == nil ? "measuring…" : timeFor(.heartRate, live: reading != nil)
+        return HStack(spacing: 10) {
+            Text("Heart Rate").font(.subheadline).foregroundStyle(.primary)
+            Spacer()
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(reading.map { "\($0) bpm" } ?? hrText).font(.subheadline.weight(.semibold)).monospacedDigit()
+                if let time { Text(time).font(.caption2).foregroundStyle(.secondary) }
+            }
+            if live.canMeasure { StrapMeasureButton(live: live) }
+        }
+        .padding(.vertical, 8)
+    }
 
     // MARK: value formatting (live user reads override stored values)
 

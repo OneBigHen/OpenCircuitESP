@@ -158,6 +158,8 @@ struct ContentView: View {
     /// surface keyed on it stays hidden.
     private var session: RingSession? { ringActive ? scanner.session : nil }
     private var helioSession: HelioSession? { ringActive ? nil : helio.session }
+    /// The strap's Measure (decision 30); nil with the ring chosen.
+    private var strapLive: StrapLiveHeartRate? { helioSession.map { StrapLiveHeartRate(session: $0) } }
     private var connected: Bool {
         guard ringActive else { return false }
         if case .connected = scanner.state { return true } else { return false }
@@ -202,6 +204,12 @@ struct ContentView: View {
             // The Helio Strap (#215): one modifier, so this chain stays within the type-checker's reach.
             .modifier(HelioDashboardHooks(
                 syncing: helioSession?.syncing, choice: deviceChoice.current, showSetup: $showHelioSetup,
+                // The strap's live heart rate feeds the same liveline card as the ring's (decision 30).
+                liveHRAt: helioSession?.liveHRAt, liveRunning: helioSession?.liveHeartRateRunning,
+                onLiveReading: {
+                    if let hr = strapLive?.liveHR { appendLive(Double(hr)) }
+                },
+                onLiveRunningChanged: { resetLive() },
                 // Its connection already wrote the store and flushed Apple Health; refresh the dashboard
                 // and run the post-sync passes the ring's `session.syncing` hook runs (review-224b F-1).
                 onSyncFinished: {
@@ -492,6 +500,17 @@ struct ContentView: View {
                                 unit: isHR ? "bpm" : "%",
                                 emptyText: "Hold still — getting a reading…")
                     .frame(height: 150)
+            }
+        } else if let strapLive, strapLive.measuring {
+            // The strap's measurement on the same card (decision 30); heart rate only, no SpO₂.
+            OCCard {
+                OCSectionHeader("Live Heart Rate", systemImage: "heart.fill", tint: Theme.hr)
+                LiveVitalReadout(value: strapLive.liveHR, unit: "bpm", tint: Theme.hr,
+                                 pulses: true, sessionRange: liveRange)
+                LiveVitalsChart(buffer: liveBuffer, color: Theme.hr, window: 90, unit: "bpm",
+                                emptyText: "Hold still — getting a reading…")
+                    .frame(height: 150)
+                Text(StrapLiveHeartRate.durationCopy).font(.caption2).foregroundStyle(.secondary)
             }
         }
     }
@@ -1701,10 +1720,10 @@ struct ContentView: View {
         card {
             Text("VITALS").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             recorderStallNotice
-            VitalsTableView(session: session)
+            VitalsTableView(session: session, strapLive: strapLive)
             Text(ringActive
                  ? "Home shows the latest recorded readings and when they were recorded. Heart-rate and SpO₂ also support on-demand reads while the ring link is ready."
-                 : "Home shows the latest readings synced from the strap and when they were recorded.")
+                 : "Home shows the latest readings synced from the strap and when they were recorded. Heart rate also supports a live measurement while the strap is connected.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .padding(.top, 8)
@@ -2508,6 +2527,10 @@ private struct HelioDashboardHooks: ViewModifier {
     let syncing: Bool?
     let choice: ActiveDeviceChoice
     @Binding var showSetup: Bool
+    let liveHRAt: Date?
+    let liveRunning: Bool?
+    let onLiveReading: () -> Void
+    let onLiveRunningChanged: () -> Void
     let onSyncFinished: () -> Void
     let onChoiceChanged: (ActiveDeviceChoice) -> Void
 
@@ -2516,6 +2539,9 @@ private struct HelioDashboardHooks: ViewModifier {
             // true → false (finished) or true → nil (the link dropped mid-sync and the session went).
             .onChange(of: syncing) { old, now in if HelioSyncEndStep.syncEnded(from: old, to: now) { onSyncFinished() } }
             .onChange(of: choice) { _, now in onChoiceChanged(now) }
+            // Each strap reading has its own timestamp, so a steady heart rate still plots every second.
+            .onChange(of: liveHRAt) { _, _ in onLiveReading() }
+            .onChange(of: liveRunning) { _, _ in onLiveRunningChanged() }
             .sheet(isPresented: $showSetup) { NavigationStack { HelioSetupView() } }
     }
 }

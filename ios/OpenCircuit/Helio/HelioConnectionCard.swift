@@ -85,27 +85,20 @@ struct HelioConnectionCard: View {
         }
     }
 
-    /// Only what the strap actually sent (decision 7): nothing, until a reading arrives.
+    /// Keyless heart rate only (decision 7, Tier 0): what the strap pushes without a key, shown as a
+    /// readout, never a control. With the key, live heart rate is the Measure control on the Vitals
+    /// card and the Live Heart Rate card, exactly like the ring's (decision 30).
     @ViewBuilder
     private var liveHeartRate: some View {
-        if let session {
-            if let bpm = session.liveHR, let at = session.liveHRAt, Date().timeIntervalSince(at) < 120 {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    KeylineGlyph(.heart, size: 14).foregroundStyle(Theme.hr)
-                    Text("\(bpm)").font(.title2.weight(.semibold).monospacedDigit())
-                    Text("bpm, live").font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    if session.liveHeartRateRunning {
-                        Button("Stop") { session.stopLiveHeartRate() }.font(.caption)
-                    }
-                }
-                .accessibilityElement(children: .combine)
-            } else if session.canStreamHeartRate, !session.liveHeartRateRunning {
-                Button("Live heart rate for a minute") { session.startLiveHeartRate() }
-                    .font(.subheadline)
-            } else if session.liveHeartRateRunning {
-                Text("Waiting for the strap's heart rate…").font(.caption).foregroundStyle(.secondary)
+        if let session, !session.canStreamHeartRate,
+           let bpm = session.liveHR, let at = session.liveHRAt, Date().timeIntervalSince(at) < 120 {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                KeylineGlyph(.heart, size: 14).foregroundStyle(Theme.hr)
+                Text("\(bpm)").font(.title2.weight(.semibold).monospacedDigit())
+                Text("bpm, live").font(.caption).foregroundStyle(.secondary)
+                Spacer()
             }
+            .accessibilityElement(children: .combine)
         }
     }
 

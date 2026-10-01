@@ -900,4 +900,49 @@ final class DeviceOwnershipAppTests: XCTestCase {
         XCTAssertTrue(SleepCardView.ringMayEdit(rows[1], log: log), "the ring's own night stays editable")
         XCTAssertTrue(SleepCardView.ringMayEdit(rows[0], log: DeviceOwnershipLog()), "ring-only: always editable, as before")
     }
+
+    // MARK: Decision 30: the strap's live heart rate works like the ring's Measure
+
+    func testTheStrapsMeasureStartsStopsRestartsAndStopsItselfAfterTheRingsBudget() throws {
+        ownership.install(.strapOwnsAllTime)
+        let (session, transport) = connect(makeStrap(), store: nil, autoSync: false)
+        defer { withExtendedLifetime(transport) {} }   // the session holds its transport weakly
+        let live = StrapLiveHeartRate(session: session)
+        XCTAssertTrue(live.canMeasure, "authenticated, with the heart-rate endpoint: the control shows")
+        XCTAssertFalse(live.measuring)
+        XCTAssertFalse(live.disabled)
+
+        session.received(.heartRateMeasurement, [0x00, 61])   // an earlier reading
+        live.toggle()
+        XCTAssertTrue(live.measuring)
+        XCTAssertNil(live.liveHR, "a new measurement shows only its own readings")
+        session.received(.heartRateMeasurement, [0x00, 72])
+        XCTAssertEqual(live.liveHR, 72)
+
+        live.toggle()
+        XCTAssertFalse(live.measuring, "stop")
+        XCTAssertNil(live.liveHR)
+        live.toggle()
+        XCTAssertTrue(live.measuring, "and restart")
+
+        XCTAssertEqual(StrapLiveHeartRate.duration, 90, "the ring's heart-rate Measure budget")
+        clock = clock.addingTimeInterval(StrapLiveHeartRate.duration - 1)
+        session.tick(now: clock)
+        XCTAssertTrue(live.measuring)
+        clock = clock.addingTimeInterval(2)
+        session.tick(now: clock)
+        XCTAssertFalse(live.measuring, "stops by itself, as the live card says")
+    }
+
+    func testAKeylessStrapHasNoMeasureControl() throws {
+        let transport = OwnershipTransport(device: makeStrap())
+        let session = HelioSession(transport: transport, identityID: strapID, key: nil, keyStore: OwnershipKeys(),
+                                   sink: nil, findState: HelioFindState(), clock: { oNow },
+                                   autoTick: false, autoSyncOnConnect: false)
+        transport.session = session
+        session.start()
+        transport.drain()
+        XCTAssertEqual(session.phase, .keyless)
+        XCTAssertFalse(StrapLiveHeartRate(session: session).canMeasure, "nothing to start without the key")
+    }
 }
