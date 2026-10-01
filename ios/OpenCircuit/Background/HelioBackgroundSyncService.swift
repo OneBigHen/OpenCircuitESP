@@ -316,9 +316,15 @@ struct HelioBackgroundSyncService {
             link.session?.backgroundRunOwnsSyncs = false   // one made during the loop's last turn, not yet watched
             // Review-225b S-B: the Sleep Focus run's "the night is over" goes with the sync, so the
             // hook's flush writes the night without the 20-minute margin, as this run would have.
+            // Review-225d SF-A: only a session whose next sync end IS the handed-over sync gets it: one
+            // that is syncing, or still connecting (it syncs on connect). An idle session (its sync
+            // already ended, say in the loop's last pause before iOS expired the task) gets nothing,
+            // so the next, unrelated sync on it is not finalized. Decision 31 bounds it anyway.
             if let focusEnd = takeNightsFinalized(nightsFinalized) {
-                watched?.finalizeNightsOnHandOff = SleepFocusFinalization.latest(watched?.finalizeNightsOnHandOff, focusEnd)
-                link.session?.finalizeNightsOnHandOff = SleepFocusFinalization.latest(link.session?.finalizeNightsOnHandOff, focusEnd)
+                // `watched` and `link.session` are usually the same session; `latest` makes that harmless.
+                for session in [watched, link.session].compactMap({ $0 }) where Self.handOffEndsWithItsNextSync(session) {
+                    session.finalizeNightsOnHandOff = SleepFocusFinalization.latest(session.finalizeNightsOnHandOff, focusEnd)
+                }
             }
             run.ending = .handedToApp
             return record(run, kind: kind)
@@ -359,6 +365,15 @@ struct HelioBackgroundSyncService {
             if run.flush?.wroteAnything == true { observability.recordHealthWrite() }
         }
         return record(run, kind: kind)
+    }
+
+    /// The session's next sync end is the sync being handed over: it is syncing, or still connecting
+    /// (it syncs on connect). An idle, connected session is not (review-225d SF-A).
+    private static func handOffEndsWithItsNextSync(_ session: HelioSession) -> Bool {
+        switch session.phase {
+        case .syncing, .starting, .authenticating, .settingUp: return true
+        case .ready, .keyless, .keyRejected, .strapBusy, .unsupported: return false
+        }
     }
 
     /// This run's Focus end, or the one a waiting Sleep Focus run left on the link, whichever is later
