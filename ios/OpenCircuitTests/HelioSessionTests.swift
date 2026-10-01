@@ -1627,7 +1627,8 @@ final class HelioBackgroundSyncTests: XCTestCase {
         let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
         var flushes: [FlushCall] = []
         let refresh = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
-        let focus = service(link, store: store, flushes: { flushes.append($0) }, pause: {})
+        // The Focus run only waits: it must not move the shared fake clock itself (review-225c F-1).
+        let focus = waitingService(link, store: store, flushes: { flushes.append($0) })
         let a = Task { @MainActor in await refresh.run(kind: .processing, timeout: RingBackgroundSyncService.processingTimeout) }
         for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
         let b = Task { @MainActor in
@@ -1656,7 +1657,8 @@ final class HelioBackgroundSyncTests: XCTestCase {
         let device = makeStrap()
         let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
         let active = service(link, store: store, pause: { link.transport?.drainSteps(1) })
-        let waiting = service(link, store: store, pause: {})
+        // Only waits: it must not move the shared fake clock itself (review-225c F-1).
+        let waiting = waitingService(link, store: store)
         let a = Task { @MainActor in await active.run(kind: .processing, timeout: 3600) }
         for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
         let b = Task { @MainActor in await waiting.run(kind: .appRefresh, timeout: 3600) }
