@@ -220,12 +220,13 @@ enum HeadacheQuickLogError: Error, CustomLocalizedStringResourceConvertible {
 /// Resolve the store the intents write to.
 ///
 /// Reuses the process-wide container the `App` published at launch, exactly as the BGTask handler
-/// does (AppDelegate.swift:127), and falls back to the NON-destructive `makeContainerOrThrow()`.
+/// does (`OpenCircuitApp.sharedOrFallbackContainer`), and falls back to the NON-destructive
+/// `makeContainerOrThrow()`, whose container is then published for later sites to reuse.
 /// `makeContainer()` is never called here: its wipe-and-recover path would delete un-resyncable
 /// history on a transient open failure, with no UI present to tell the user (#40/#131).
 @MainActor
 private func quickLogStore() throws -> LocalStore {
-    guard let container = try? (OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()) else {
+    guard let container = try? OpenCircuitApp.sharedOrFallbackContainer() else {
         throw HeadacheQuickLogError.storeUnavailable
     }
     // `container:` keeps a fallback-built container alive for as long as the returned store.

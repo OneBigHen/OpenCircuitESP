@@ -52,6 +52,9 @@ public enum ZeppRoundFailure: Equatable {
     /// The start reply announced more bytes (length × the type's unit) than
     /// `Configuration.maxRoundBytes` allows. Rejected before any data is buffered.
     case announcedLengthTooLarge(announced: Int, limit: Int)
+    /// The start reply announced more records than `Configuration.maxRecordsPerRound` allows (the
+    /// announced bytes over the type's record length). Rejected before any data is buffered.
+    case tooManyRecords(announced: Int, limit: Int)
     /// A data packet counter was skipped or repeated (§9 #9).
     case packetCounterGap(expected: UInt8, got: UInt8)
     /// More data than the start reply announced. Both counts are bytes: for activity, `expected`
@@ -78,6 +81,8 @@ extension ZeppRoundFailure: CustomStringConvertible {
         case .malformedStartReply: return "malformed start reply"
         case .announcedLengthTooLarge(let announced, let limit):
             return "announced length too large, announced \(announced) B, limit \(limit) B"
+        case .tooManyRecords(let announced, let limit):
+            return "too many records, announced \(announced), limit \(limit)"
         case .packetCounterGap(let expected, let got):
             return String(format: "packet counter gap, expected %02x, got %02x", expected, got)
         case .dataOverflow(let expected, let received):
@@ -152,14 +157,35 @@ public struct ZeppHistoryFetch {
         /// real round: a 100-day activity backlog is 144,000 records × 8 B = 1,152,000 B, and the
         /// real 12 h activity round was 5760 B (§10.1).
         public var maxRoundBytes = 4 << 20
+        /// Upper bound on one round's records, checked with the byte cap (#215 phase 4, review-223
+        /// N1). The byte cap bounds the raw buffer, not what parsing makes of it: a type with 1-byte
+        /// records (automatic stress, `0x13`) at 4 MiB parses to 4,194,304 records, about 64 MiB of
+        /// structs (+115 MiB measured while held), which risks a jetsam kill in a background task.
+        /// The bound is a generous real backlog, every type at most one record a minute: 100 days ×
+        /// 1440 minutes × 4 = 576,000. The first sync reaches 7 days back (`HelioFetchPlan`), a
+        /// 100-day activity backlog is 144,000 records, and no type records more than once a minute
+        /// (§6.4, §6.5), so a real round never gets near it.
+        public var maxRecordsPerRound = defaultMaxRecordsPerRound
+        public static let defaultMaxRecordsPerRound = 100 * 1440 * 4
 
         public init(ackPolicy: ZeppAckPolicy = .keepOnDevice, maxRoundsPerType: Int = 11,
-                    maxRetriesPerType: Int = 1, timeZone: TimeZone = .current, maxRoundBytes: Int = 4 << 20) {
+                    maxRetriesPerType: Int = 1, timeZone: TimeZone = .current, maxRoundBytes: Int = 4 << 20,
+                    maxRecordsPerRound: Int = Configuration.defaultMaxRecordsPerRound) {
             self.ackPolicy = ackPolicy
             self.maxRoundsPerType = maxRoundsPerType
             self.maxRetriesPerType = maxRetriesPerType
             self.timeZone = timeZone
             self.maxRoundBytes = maxRoundBytes
+            self.maxRecordsPerRound = maxRecordsPerRound
+        }
+
+        /// The largest round of `type` accepted, in bytes: both bounds together (never above the
+        /// byte cap). Automatic stress 576,000 B, manual stress 2,880,000 B, the 6-byte heart-rate
+        /// and HRV types 3,456,000 B; every other type is held by the 4 MiB byte cap.
+        public func roundByteLimit(for type: ZeppFetchType) -> Int {
+            let (records, overflow) = maxRecordsPerRound.multipliedReportingOverflow(by: type.wireRecordLength)
+            guard !overflow else { return maxRoundBytes }
+            return min(maxRoundBytes, type.headerLength + records)
         }
     }
 
@@ -301,12 +327,17 @@ public struct ZeppHistoryFetch {
             phase = .awaitingAckReply
             return [.noData(type: type), .sendControl(ZeppFetchCommand.ack(.keep))]
         }
-        // Checked in bytes from here on: activity announces records (§6.2). The cap bounds the
-        // memory a strap can make us hold for one round; the round is kept on the strap.
+        // Checked in bytes from here on: activity announces records (§6.2). The byte cap bounds the
+        // raw buffer, the record cap what parsing makes of it; either way the round is kept on the
+        // strap (`03 09`) and nothing is buffered.
         let (announced, overflow) = Int(length).multipliedReportingOverflow(by: type.startReplyLengthUnit)
         guard !overflow, announced <= configuration.maxRoundBytes else {
             return failRound(type, .announcedLengthTooLarge(announced: overflow ? .max : announced,
                                                             limit: configuration.maxRoundBytes))
+        }
+        let records = type.recordCount(bytes: announced)
+        guard records <= configuration.maxRecordsPerRound else {
+            return failRound(type, .tooManyRecords(announced: records, limit: configuration.maxRecordsPerRound))
         }
         guard let start = ZeppFetchTimestamp.decode(bytes[7..<15]) else {
             return failRound(type, .malformedStartReply)
@@ -334,7 +365,8 @@ public struct ZeppHistoryFetch {
             let expected = reader.u32() ?? 0
             let computed = ZeppCRC32.checksum(buffer)
             // Checked for every type. Gadgetbridge skips the check for activity (0x01) without saying
-            // why, but on the Helio the activity CRC matches like every other type's: 60 records
+            // why, but on the Helio the activity CRC matches like every type that has delivered data
+            // (0x02, 0x12 and 0x3d have only answered empty, so theirs was never seen): 60 records
             // (480 B) and a full 12 h round of 720 records (5760 B) (§6.5, §10.1, HW 2026-09-30
             // 13:35). A mismatch keeps the data on the strap, and the failure carries the
             // announced and the computed CRC.

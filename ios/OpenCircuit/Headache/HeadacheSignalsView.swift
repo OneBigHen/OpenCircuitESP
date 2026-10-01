@@ -409,11 +409,11 @@ struct HeadacheSignalsView: View {
                 // single-signal cap (HeadacheSignals.swift:350-355, :487-504) — and nothing can
                 // grow one. We can't tell which applied, so we don't claim.
                 if abs(contribution.effectiveWeight - feature.weight) > 0.005 {
-                    Text("Counted at \(Int((contribution.effectiveWeight * 100).rounded()))% — reduced because the ring may have cut this night short, or by the cap that stops any one signal dominating.")
+                    Text("Counted at \(Int((contribution.effectiveWeight * 100).rounded()))% — reduced because your device may have cut this night short, or by the cap that stops any one signal dominating.")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
                 if feature == .perimenstrual {
-                    Text("Context, not a measurement: its weight is added on top of the eight ring signals rather than taken from them, it never counts toward the minimum number of ring signals, and no single signal may supply more than 35 % of a night's score.")
+                    Text("Context, not a measurement: its weight is added on top of the eight measured signals rather than taken from them, it never counts toward the minimum number of measured signals, and no single signal may supply more than 35 % of a night's score.")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
             } else if let reason {
@@ -431,7 +431,7 @@ struct HeadacheSignalsView: View {
     /// structural rather than incidental: the unsigned scoring, the confusable false-positive class
     /// and the accuracy ceiling are properties of the design, not bugs waiting to be fixed.
     private var disclaimerFooter: some View {
-        Text("These signals are a statistical estimate computed on your device from your own 7–60 night baseline. They measure how unusual a night was for you, in either direction — not how bad it was, so an unusually restful night scores like a rough one. A hangover, a late night out and a hard training day look exactly the same to a ring. OpenCircuit is not a medical device, this is not a diagnosis, and it does not predict headaches. If your headaches are new, worsening or severe, consult a qualified healthcare professional.")
+        Text("These signals are a statistical estimate computed on your device from your own 7–60 night baseline. They measure how unusual a night was for you, in either direction — not how bad it was, so an unusually restful night scores like a rough one. A hangover, a late night out and a hard training day look exactly the same to a wearable. OpenCircuit is not a medical device, this is not a diagnosis, and it does not predict headaches. If your headaches are new, worsening or severe, consult a qualified healthcare professional.")
             .font(.caption2)
             .foregroundStyle(.tertiary)
     }
@@ -851,9 +851,9 @@ enum HeadacheSignalCopy {
 
         case .interrupted(let since):
             guard let since else {
-                return ("No ring data for over 24 hours", "Last night wasn't assessed.")
+                return ("No data from your device for over 24 hours", "Last night wasn't assessed.")
             }
-            return ("No ring data for over 24 hours",
+            return ("No data from your device for over 24 hours",
                     "Last reading \(since.formatted(.relative(presentation: .named))). Last night wasn't assessed.")
 
         case .insufficientData(let missing):
@@ -1148,7 +1148,7 @@ enum HeadacheMonitorCopy {
             // nothing checkable yet, which is a fact about the calendar rather than about the user.
             let scored = max(0, report.daysNeeded - daysRemaining)
             return ("Still learning — \(scored) of \(report.daysNeeded) nights scored.",
-                    ["With fewer than \(report.daysNeeded) scored nights there is no usual to compare a night against, so nothing here has been measured yet. Wearing the ring overnight is all it needs."])
+                    ["With fewer than \(report.daysNeeded) scored nights there is no usual to compare a night against, so nothing here has been measured yet. Wearing your device overnight is all it needs."])
 
         case .monitoring(let m):
             var lines: [String] = []
@@ -1262,7 +1262,7 @@ enum HeadacheMonitorCopy {
         var out: [String] = []
         // Never scored — outside what the check can see, rather than something it rejected.
         if report.labelsWithNoScore > 0 {
-            out.append("\(count(report.labelsWithNoScore, "headache", "headaches")) fell on a day OpenCircuit hadn't scored — from before you turned this on, imported from Apple Health, or a night the ring wasn't worn or hadn't synced.")
+            out.append("\(count(report.labelsWithNoScore, "headache", "headaches")) fell on a day OpenCircuit hadn't scored — from before you turned this on, imported from Apple Health, or a night your device wasn't worn or hadn't synced.")
         }
         // Scored, then set aside for a stated reason. Each says "scored" out loud so the reader can
         // tell this group from the one above it.

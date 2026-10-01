@@ -139,6 +139,16 @@ extension LocalStore {
                                     extras: extras, device: device)
     }
 
+    /// The span of the night already mirrored to Apple Health under `night`'s key (`mirrorSettledNight`
+    /// records it), if any: the key of the stored summary it overlaps, else the key its window files
+    /// under, as the mirror resolves it.
+    func writtenNightSpan(for night: HelioSleepSelection.Night) -> DateInterval? {
+        let row = try? sleepSummaryOverlapping(start: night.window.start, end: night.window.end)
+        let key = row?.night ?? SleepNightKey.night(inBedStart: night.window.start, inBedEnd: night.window.end)
+        guard let record = mirroredNight(night: key), record.spanEnd > record.spanStart else { return nil }
+        return DateInterval(start: record.spanStart, end: record.spanEnd)
+    }
+
     /// `device`'s stored skin temperatures in `window` (already gated when stored).
     func helioTemperatures(in window: DateInterval, device: SyncDeviceID) -> [TemperatureSample] {
         let kindRaw = MetricKind.temperature.rawValue
@@ -165,11 +175,17 @@ final class HelioStoreSink: HelioHistorySink {
     private var storedNights: [HelioSleepSelection.Night] = []
     /// Daytime sessions already logged this sync (decision 28c), so a re-run logs each once.
     private var notOvernightLogged: Set<DateInterval> = []
+    /// Sleeps kept out of a night already written to Apple Health (28f), logged once per sync.
+    private var keptApartLogged: Set<DateInterval> = []
     private var latestStress: HelioReading?
     private var latestPAI: HelioReading?
 
-    init(store: LocalStore) {
+    /// The strap's link breadcrumbs (`HelioConnection` hands them over); nil in tests.
+    private let breadcrumbs: HelioBreadcrumbs?
+
+    init(store: LocalStore, breadcrumbs: HelioBreadcrumbs? = nil) {
         self.store = store
+        self.breadcrumbs = breadcrumbs
     }
 
     /// The clock the one-time stress backfill measures its week from (#239). Tests set the session's.
@@ -198,6 +214,7 @@ final class HelioStoreSink: HelioHistorySink {
         sessions = []
         storedNights = []
         notOvernightLogged = []
+        keptApartLogged = []
         latestStress = nil
         latestPAI = nil
     }
@@ -213,7 +230,7 @@ final class HelioStoreSink: HelioHistorySink {
                 sessions += records
                 try storeNights(timeline: timeline, now: now)
             case .temperature(let minutes):
-                let windows = HelioSleepSelection.nights(from: sessions, now: now).map(\.window)
+                let windows = ownedNights(timeline: timeline, now: now).map(\.window)
                 let gated = HelioSkinTemperatureGate.samples(temperatures: minutes, activity: activity, sleepWindows: windows)
                 _ = try store.ingest(owned(gated, timeline), device: timeline)
                 // Hold the watermark where a minute may still pass the gate later (no night yet, or
@@ -249,8 +266,21 @@ final class HelioStoreSink: HelioHistorySink {
     }
 
     /// Store every staged night seen so far this sync that the person hasn't edited.
+    /// The strap's own nights in this sync's sessions (review-224e S-1): each session's sleep, kept only
+    /// when the strap owns its OWN window (decision 28/28a), and only then 28f's stitch. Stitching first
+    /// let a doze from before a ring → strap switch drag the strap's own night into ring time, and then
+    /// neither device kept it. Used by `storeNights` and the temperature gate. With an empty log (a
+    /// ring-only install) nothing is the strap's, as before.
+    private func ownedNights(timeline: SyncDeviceID, now: Date) -> [HelioSleepSelection.Night] {
+        let log = LocalStore.ownershipLog()
+        let family = DeviceOwnershipLog.Family(timeline: timeline)
+        let own = sessions.compactMap { HelioSleepSelection.night(from: $0, now: now) }
+            .filter { log.owner(ofNightFrom: $0.window.start, to: $0.window.end) == family }
+        return HelioSleepSelection.stitch(own)
+    }
+
     private func storeNights(timeline: SyncDeviceID, now: Date) throws {
-        let nights = HelioSleepSelection.nights(from: sessions, now: now)
+        let nights = ownedNights(timeline: timeline, now: now)
         guard let first = nights.first?.window.start, let last = nights.last?.window.end else { return }
         let edited = store.manuallyEditedSleepWindows(from: first, to: last)
         // Decision 28a: a night belongs to the device chosen when it began (saveSleepSummary also refuses
@@ -281,11 +311,34 @@ final class HelioStoreSink: HelioHistorySink {
             }
             return false
         }
+        // The ownership check again, on the stitched window: a backstop (`ownedNights` already kept
+        // only the strap's own sleeps).
         for night in HelioSleepSelection.nightsToWrite(overnight, manuallyEdited: edited)
         where log.owner(ofNightFrom: night.window.start, to: night.window.end) == family
             && !storedNights.contains(where: { $0.window == night.window }) {
+            // Decision 28f stitches sessions 60 min or less apart into one night, so a night can grow
+            // after it was written to Apple Health (back to bed within the hour, after the Sleep Focus
+            // finalization or the settle margin let the first part through). The written night stands:
+            // a different night for its key (the stitched one, or another sleep that would replace it)
+            // is kept out, so Health gets no second write of the night and nothing written is silently
+            // replaced. A night not yet written still stitches. The later session is not stored as a
+            // row of its own in v1 (strap naps are 28c's follow-up): an open question for Juan.
+            if let written = store.writtenNightSpan(for: night),
+               abs(written.start.timeIntervalSince(night.window.start)) > 1 || abs(written.end.timeIntervalSince(night.window.end)) > 1 {
+                if keptApartLogged.insert(night.window).inserted {
+                    helioLog.notice("helio: sleep \(Self.clockSpan(night.window, in: night.recordedTimeZone), privacy: .public) would change a night already in Apple Health (\(Self.clockSpan(written, in: night.recordedTimeZone), privacy: .public)); the written night stands")
+                }
+                continue
+            }
             let outcome = try store.saveHelioNight(night, device: timeline)
             if outcome == .inserted || outcome == .updated { storedNights.append(night) }
+            // Review-224e S-2: a sleep more than 60 min from the night's other part is not stitched
+            // (28f), and its key already holds the longer part, so it is stored nowhere until strap naps
+            // (#231). Say so in the breadcrumbs, without its time or length.
+            if outcome == .keptFullerStoredNight,
+               (try? store.sleepSummaryOverlapping(start: night.window.start, end: night.window.end)) == nil {
+                breadcrumbs?.strapSleepKeptOut(nightKey: SleepNightKey.night(inBedStart: night.window.start, inBedEnd: night.window.end))
+            }
         }
     }
 

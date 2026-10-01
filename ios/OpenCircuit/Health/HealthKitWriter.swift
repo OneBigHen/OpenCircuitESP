@@ -414,13 +414,15 @@ final class HealthKitWriter {
     ///
     /// `device` / `mirroredKinds` / `strapNights` are the Helio Strap's pass (#215 phase 3): its own
     /// timeline's pending samples (minus the kinds its policy withholds, `HelioHealthPolicy`) and the
-    /// nights it staged. Their defaults are exactly the ring's pass, unchanged.
+    /// nights it staged. Their defaults are exactly the ring's pass, unchanged. `strapNightsFinalized`
+    /// is `sleepFinalized` for those nights (the Sleep Focus wake, #215 phase 4).
     @discardableResult
     func flushToHealth(store: LocalStore, sleepSegments: [SleepSegment] = [],
                        sleepFinalized: Bool = false,
                        device: SyncDeviceID = .ringConn,
                        mirroredKinds: [MetricKind]? = nil,
-                       strapNights: [[SleepSegment]] = []) async -> FlushResult {
+                       strapNights: [[SleepSegment]] = [],
+                       strapNightsFinalized: Bool = false) async -> FlushResult {
         var result = FlushResult()
         guard isShareAuthorized, !Self.isFlushing else { return result }
         Self.isFlushing = true
@@ -471,7 +473,7 @@ final class HealthKitWriter {
         // mirror and quiet margin as the ring's; `mirrorSettledNight` leaves an edited night alone
         // and is a no-op for a night Health already holds (signature match).
         for night in strapNights where SleepHealthGate.isReadyToWrite(
-            latestSegmentEnd: night.map(\.end).max(), now: Date(), finalized: false) {
+            latestSegmentEnd: night.map(\.end).max(), now: Date(), finalized: strapNightsFinalized) {
             switch await mirrorSettledNight(local: store, segments: night) {
             case .wrote(let count):
                 result.sleepSegments += count

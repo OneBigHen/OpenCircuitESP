@@ -63,6 +63,36 @@ public enum ZeppFetchType: UInt8, CaseIterable, Equatable {
         }
     }
 
+    /// Bytes per record on the wire (§6.5), after `headerLength`. The per-minute types hold one
+    /// record per minute; the others hold one per reading.
+    public var wireRecordLength: Int {
+        switch self {
+        case .activity, .temperature, .sleepRespiratoryRate: return 8
+        case .autoStress: return 1
+        case .manualHeartRate, .restingHeartRate, .maxHeartRate, .hrv: return 6
+        case .manualStress: return 5
+        case .spo2: return ZeppSpO2Reading.recordLength
+        case .sleepSpO2: return ZeppSleepSpO2Reading.recordLength
+        case .sleepSession: return ZeppSleepSession.recordLength
+        case .pai: return ZeppPAIRecord.recordLength
+        }
+    }
+
+    /// Bytes before the first record: the version byte of the SpO₂ types (§6.5).
+    public var headerLength: Int {
+        switch self {
+        case .spo2, .sleepSpO2: return 1
+        default: return 0
+        }
+    }
+
+    /// Records a round of `bytes` holds, counting a trailing partial record as one (the length rule
+    /// rejects it later anyway).
+    public func recordCount(bytes: Int) -> Int {
+        let body = max(0, bytes - headerLength)
+        return (body + wireRecordLength - 1) / wireRecordLength
+    }
+
     /// The length rule enforced before parsing (§6.5); a violation rejects the round.
     public func isValidLength(_ length: Int) -> Bool {
         switch self {

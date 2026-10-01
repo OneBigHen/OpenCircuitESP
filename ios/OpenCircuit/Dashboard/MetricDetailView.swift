@@ -163,12 +163,12 @@ struct MetricDetailView: View {
     /// What the metric's number is, in plain words. Internal so a test can hold it to the math.
     static func what(_ m: TodayTile.Metric) -> String {
         switch m {
-        case .hrv:             return "The average of the ring's heart-rate-variability readings while you slept, one value per night."
+        case .hrv:             return "The average of your device's heart-rate-variability readings while you slept, one value per night."
         case .restingHR:       return "A daily resting heart rate: the day's lowest sustained heart rate (or its lowest reading when readings are sparse), the same estimate Vitals Status uses."
-        case .spo2:            return "The average of the ring's blood-oxygen readings while you slept, one value per night."
-        case .respiratoryRate: return "The average of the ring's breathing-rate readings while you slept, one value per night."
-        case .skinTemp:        return "The ring's skin temperature for each night. Skin temperature runs below core body temperature; what matters is the change from your usual."
-        case .steps:           return "Steps counted by the ring each day. Today's total is still growing, so the comparison uses yesterday, the last complete day."
+        case .spo2:            return "The average of your device's blood-oxygen readings while you slept, one value per night."
+        case .respiratoryRate: return "The average of your device's breathing-rate readings while you slept, one value per night."
+        case .skinTemp:        return "Your device's skin temperature for each night. Skin temperature runs below core body temperature; what matters is the change from your usual."
+        case .steps:           return "Steps counted by your device each day. Today's total is still growing, so the comparison uses yesterday, the last complete day."
         }
     }
 
