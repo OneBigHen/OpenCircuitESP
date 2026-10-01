@@ -27,8 +27,9 @@ import UIKit
 // gives, and never the phone-GPS message of §18.5); the route is the phone's own location only. The
 // totals are OpenCircuit's own (§18.6): no training effect, VO₂ max or recovery time is claimed.
 //
-// Ring-only users never reach any of this: the recorder is built idle, touches no CoreBluetooth and
-// no CoreLocation until a strap workout starts, and its launch checks find no journal.
+// Ring-only users: one recorder is still built per launch (ContentView's hooks are unconditional),
+// and it is inert. It touches no CoreBluetooth and no CoreLocation until a strap workout starts, and
+// its launch checks find no journal (review-238b N-3).
 
 /// What the recorder needs from a strap connection. `HelioSession` conforms.
 @MainActor
