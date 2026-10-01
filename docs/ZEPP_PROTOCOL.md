@@ -993,6 +993,12 @@ to connect (phone Bluetooth off) so that every message seen is the strap's.
     phone's Bluetooth off and connect HelioVerify: does the strap send anything on `0x0019`?
     Later, reconnect Zepp and record how long the workout kept running and whether Zepp could
     still end it. Promotes §16.2 rows 8–9, §18.3 and §18.4.
+27. **Workout detection switch** (§19). In the Zepp app, turn Workout Detection **off**, let Zepp
+    release the strap, and read WORKOUT group `09` with constraints and arg count `00`. Then turn
+    it **on** in Zepp (note the sensitivity Zepp shows) and read again. Diff the two replies: which
+    arg changed (an empty `40` list, or an arg not in §19.1)? Record the group version, the args
+    present with their type codes, and the allowed lists of `40` and `42`. Restore Zepp's original
+    setting. Promotes §19.1 and §19.2.
 
 ### 10.1 Results from a real strap (2026-09-30)
 
@@ -2163,6 +2169,69 @@ connection's 8th message (handle `0x08`), sequence number `0x2933d236`: `OC-vec`
 
 ---
 
+## 19. Workout detection (#229)
+
+Amazfit: with **Workout Detection** on (Zepp › Device › Helio Strap › Workout Detection), the
+strap recognises activity "by continuously monitoring the high heart rate", so a workout no longer
+needs to be started in the app. Its **sensitivity** is adjustable: higher detects faster, lower
+takes longer. Amazfit warns that detection "will greatly reduce the battery life". 🟡 `AMZ-M p.5`
+
+### 19.1 The WORKOUT group (`09`) args
+
+All are written through §17 (endpoint `0x000A`, encrypted). Gadgetbridge knows WORKOUT **version
+1** only (`SVC/Config:400`). The Helio lists group `09` (🟢 `HW:2026-09-30 (hw 0.132.27.2)`), but its
+version wasn't recorded (🔴, §10 item 25).
+
+| Arg | Type | Meaning | Values | Tag / source |
+|---|---|---|---|---|
+| `40` | byte list `11` | **detection categories**: the sports the strap may auto-detect | sport codes from §18.2. Gadgetbridge knows `03` walking, `28` indoor walking, `01` outdoor running, `02` treadmill, `04` outdoor cycling, `06` pool swimming, `09` elliptical, `17` rowing machine. The constraints' allowed list is the authority | 🟡 `SVC/Config:548,1302-1329,1617-1626` |
+| **`41`** | bool `0b` | **detection alert**: Gadgetbridge's label is "Alert: notify when a workout is detected". On a watch that is an on-screen prompt; on the Helio 🔴 probably a buzz when detection starts a workout | `00` off, `01` on | 🟡 `SVC/Config:549`, `GB-res/xml/devicesettings_workout_detection.xml:21-27` (the label is in Gadgetbridge's `values/strings.xml:661-662`, fetched from the pinned commit) |
+| `42` | byte `10` | **detection sensitivity** | `00` high, `01` standard, `02` low (only these three are mapped; the constraints decide what the strap accepts) | 🟡 `SVC/Config:550,1417-1418,1628-1632` |
+| `05` | short list `02` | HR zones (6 bpm bounds; a watch reported count 6–6 and range 30–220) | Gadgetbridge parses it and never writes it | 🟡 `SVC/Config:552`, `GB/service/devices/huami/zeppos/services/config/ConfigShortList.java` |
+| `20`–`23`, `30`, `31` | byte / bool / hh:mm | GPS and AGPS settings | watch features with no meaning on the Helio | 🟡 `SVC/Config:542-547` |
+| `51` | byte | pool length | unexplained ("TODO") in Gadgetbridge | 🔴 `SVC/Config:551` |
+
+### 19.2 What Gadgetbridge does on the Helio
+
+| Fact | Tag / source |
+|---|---|
+| Since `GB@9c85d599` (2026-01-04, "Enable workout detection sensitivity for Helio Strap"), Gadgetbridge shows a workout-detection screen for the Helio with **only the alert (`41`) and the sensitivity (`42`)**. It deliberately hides the categories (`40`) for the strap. | 🟡 `GB/devices/huami/zeppos/straps/AmazfitHelioStrapCoordinator.java:52-65`, `GB/devices/huami/zeppos/ZeppOsCoordinator.java:464-480,659-665`, `GB/devices/huami/zeppos/ZeppOsSettingsCustomizer.java:207-214` |
+| As for every config setting, each of the two is shown only if the strap's read reply contained it with the expected type (§17.1), so the Helio presumably reports `41` and `42` (🔴 until §10 item 25). | 🟡 `ZeppOsSettingsCustomizer.java:181-185,198-205` |
+| **There is no detection on/off arg in Gadgetbridge.** Zepp's single "Workout Detection" switch therefore maps to something Gadgetbridge doesn't model: an empty category list (`40` with n = 0), or a WORKOUT arg it doesn't know. 🔴 (§10 item 27 decides) | 🟡 (absent from `SVC/Config:541-552`) |
+
+### 19.3 Constraints and rules
+
+- Read group `09` with constraints (§17.8 step 2). Offer only the args present with the type codes
+  above. For `40` and `42`, offer only values in the reply's allowed lists (§17.6).
+- **Detection on/off** (🔴 recommendation): don't offer a switch until §10 item 27 identifies the
+  arg. Until then, show the alert and the sensitivity only, as Gadgetbridge does.
+- Don't write `40` on the Helio, even if the strap reports it: Gadgetbridge hides it on purpose, and
+  an incomplete list could silently turn detection off for a sport. Show it read-only.
+- Detection costs battery (Amazfit). Say so next to the setting.
+- An auto-detected workout probably makes the strap enter its workout mode (🔴 whether it sends
+  `11 01`/`11 04`, §16.2 row 9, §10 item 26). OpenCircuit doesn't import the strap's workout
+  records (#226), so detection only affects what the strap and the Zepp app record. The per-minute
+  activity samples (§6.5) are recorded either way.
+
+### 19.4 Worked example M: sensitivity to "standard", alert on (constructed)
+
+The values and allowed lists are invented. The group version echoed is the one read (here 1).
+
+```
+→ 03 01 09 03 40 41 42                    read WORKOUT, constraints on, 3 args
+← 04 01 09 01 01 02                       ok, WORKOUT v1, constraints included, 2 entries (no 40)
+     41 0b 00                             detection alert: bool, off
+     42 10 00 03 00 01 02                 sensitivity: byte, 00 (high); allowed high, standard, low
+→ 05 09 01 00 01 42 10 01                 write WORKOUT v1, arg 42, byte, 01 = standard ✓
+← 06 01
+→ 05 09 01 00 01 41 0b 01                 a separate user action: alert on
+← 06 01
+→ 03 01 09 02 41 42                       re-read
+← 04 01 09 01 01 02 41 0b 01 42 10 01 03 00 01 02
+```
+
+---
+
 ## Changelog
 
 - 2026-09-30: first version (zepp-spec agent, #215 Phase 0). All claims 🟡/🔴.
@@ -2191,3 +2260,6 @@ connection's 8th message (handle `0x08`), sequence number `0x2933d236`: `OC-vec`
   stay unknown), sport type codes, the link during a workout and when it drops, phone GPS,
   per-workout alerts; worked example L; capture item 26. The workout record fetch types
   `0x05`/`0x06` stay out of scope (#226).
+- 2026-10-01: parity addendum, part 4 (zepp-parity-spec agent, #229): §19, workout detection:
+  the WORKOUT group args (`40` categories, `41` detection alert, `42` sensitivity), what
+  Gadgetbridge exposes for the Helio, the missing on/off arg; worked example M; capture item 27.
