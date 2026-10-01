@@ -465,6 +465,9 @@ struct SleepCardView: View {
                 recencyNotice
                 content(night)
             } else {
+                // Review-224d N-1: with no stored night at all, a night the strap owns but never stored
+                // still gets its notice, not only the generic empty state.
+                if sleepPersistOutcome == .ownedByOtherDeviceNoRow { unsavedNightNotice }
                 emptyState
             }
         }
