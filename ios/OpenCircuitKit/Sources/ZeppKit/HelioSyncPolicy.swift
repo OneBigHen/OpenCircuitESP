@@ -414,21 +414,52 @@ public enum HelioFetchPlan {
         return max(previous, clamped)
     }
 
-    // MARK: One-time stress backfill (#239)
+    // MARK: Stress backfill (#239)
 
-    /// How far back the one-time stress backfill reaches. Build 59 fetched the all-day stress
-    /// (`0x13`) on every sync but kept only its latest value, while the type's watermark advanced, so
-    /// no stress history was stored. Moving that watermark back once refetches the last week, so the
-    /// day chart starts with it instead of empty.
+    /// How far back a stress backfill reaches. Build 59 fetched the all-day stress (`0x13`) on every
+    /// sync but kept only its latest value, while the type's watermark advanced, so no stress history
+    /// was stored. Moving that watermark back refetches the last week, so the day chart starts with it
+    /// instead of empty. The same rewind repairs a hole left by a rollback to such a build
+    /// (`stressBackfillIsDue`).
     ///
     /// SPEC-GAP: how much stress history the strap itself still holds is not documented (§6.4 says
     /// nothing about retention). The app always acked `03 09` (keep on strap, decision 8), so nothing
     /// was released; if the strap has rotated older minutes out, those rounds just come back short.
     public static let stressBackfillLookback: TimeInterval = 7 * 86_400
 
-    /// The stress watermark the one-time backfill moves to, or nil when it must not move.
+    /// How big a hole between the stress watermark and the newest stored `.stress` row counts as one
+    /// worth refilling. Smaller than any real gap (a build that stored nothing leaves days), and
+    /// bigger than the ordinary lag between a round's last record and its watermark.
+    public static let stressBackfillGapTolerance: TimeInterval = 3600
+
+    /// Whether a stress backfill is due, from the three facts the store holds for one strap.
     ///
-    /// - `done` (the backfill already ran for this strap): nil, ever after.
+    /// The rule is a CONDITION, not a one-shot flag (review-242 NIT 1). Build 60 fetches `0x13`,
+    /// drops it and still advances the watermark, so 61 → 60 → 61 leaves a hole that a one-shot flag
+    /// would never refill. Due when BOTH hold:
+    ///
+    /// 1. **There is a hole:** the watermark is more than `stressBackfillGapTolerance` newer than the
+    ///    newest stored `.stress` row (no rows at all = the whole watermark is a hole, which is the
+    ///    build-59 case this started as). No watermark at all is never due: a first fetch already
+    ///    reaches `firstSyncLookback` back.
+    /// 2. **It is a NEW hole:** rows have been stored past `lastAttemptThrough`, the watermark the
+    ///    previous backfill tried to fill up to. This is what stops a loop. If the strap has rotated
+    ///    those minutes out, the refetch stores nothing, the newest row does not move past the
+    ///    recorded ceiling, and the same hole is never attempted again — at most one attempt per hole.
+    ///    A stretch the strap recorded as "no reading" (all `ff`) behaves the same way: one refetch,
+    ///    then never again until real rows land past the ceiling.
+    public static func stressBackfillIsDue(watermark: Date?, newestStoredStress: Date?,
+                                           lastAttemptThrough: Date?,
+                                           tolerance: TimeInterval = stressBackfillGapTolerance) -> Bool {
+        guard let watermark else { return false }
+        let newest = newestStoredStress ?? .distantPast
+        guard watermark.timeIntervalSince(newest) > tolerance else { return false }
+        guard let lastAttemptThrough else { return true }
+        return newest > lastAttemptThrough
+    }
+
+    /// The stress watermark a backfill moves to, or nil when it must not move.
+    ///
     /// - No watermark: nil. The type's first fetch already reaches `firstSyncLookback` back.
     /// - Otherwise the floored minute of `now − stressBackfillLookback`, but never before `notBefore`
     ///   (decision 28: the strap's current ownership start, rounded up to its minute) and never later
@@ -437,8 +468,8 @@ public enum HelioFetchPlan {
     ///
     /// `plan(cursors:now:notBefore:)` bounds every start by `notBefore` again, so even a watermark
     /// stored before this rule existed cannot reach time the ring owned.
-    public static func stressBackfillCursor(current: Date?, done: Bool, now: Date, notBefore: Date?) -> Date? {
-        guard !done, let current else { return nil }
+    public static func stressBackfillCursor(current: Date?, now: Date, notBefore: Date?) -> Date? {
+        guard let current else { return nil }
         var target = floorToMinute(now.addingTimeInterval(-stressBackfillLookback))
         // Rounded UP to the minute, so the target never lies even seconds before the ownership start.
         if let notBefore { target = max(target, Date(timeIntervalSince1970: (notBefore.timeIntervalSince1970 / 60).rounded(.up) * 60)) }

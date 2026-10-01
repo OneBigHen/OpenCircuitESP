@@ -11,6 +11,14 @@
 // Loaded on demand by the view that shows it, through the store, every time it appears and every time
 // a sync finishes (`SyncRevision`). Never seeded from a parent's snapshot: that froze a detail view in
 // #222 (review S1).
+//
+// The load runs OFF the main actor (`loadAsync`), the way `TrendsData.loadAsync` does: a fresh
+// `ModelContext` over the same container inside a detached task, handing this value type back. It is
+// a day-bounded read, but it grows with history — review-242 (SF-2) measured ~110 ms for all metrics
+// against 30 days of per-minute strap rows on disk — and it re-runs after every finished sync while a
+// day chart is open, so it must never be a main-thread hitch. Like the trends load, the second context
+// sees only SAVED rows, which is what every caller here wants: ingest and the sync hooks commit before
+// the `.syncFinished` bump that triggers the reload.
 
 import Foundation
 import OpenCircuitKit
@@ -73,17 +81,56 @@ struct DayTimeline {
         return DateInterval(start: start, end: end)
     }
 
-    /// Read `metrics` for the local day containing `day` from `store`.
-    @MainActor
-    static func load(store: LocalStore, day: Date, metrics: Set<Metric> = Set(Metric.allCases),
-                     calendar: Calendar = .current) -> DayTimeline {
+    /// The metrics a screen showing every card needs to load, given the ownership log.
+    ///
+    /// Stress is the strap's, and `showsStress` can only be true when the log holds a strap entry: a
+    /// day's owners come from the same log, and stress rows only ever exist for time the strap owned
+    /// (they are ingested through the ownership filter). So a ring-only install skips that fetch
+    /// entirely and still renders exactly the cards it rendered before (review-242 SF-2).
+    static func metricsToLoad(log: DeviceOwnershipLog) -> Set<Metric> {
+        var out: Set<Metric> = [.heartRate, .hrv, .spo2, .respiratoryRate, .skinTemp, .steps]
+        if log.entries.contains(where: { $0.family == .zeppOS }) { out.insert(.stress) }
+        return out
+    }
+
+    /// Read `metrics` for the local day containing `day`, off the main actor.
+    ///
+    /// The ownership log is snapshotted on the main actor (it is `@MainActor`-isolated state) and
+    /// passed in, so the detached work touches nothing main-isolated — the `TrendsData.loadAsync`
+    /// rule. Cancellation is cooperative: the caller checks `Task.isCancelled` before publishing, so
+    /// a superseded day's result is dropped rather than drawn over a newer one.
+    static func loadAsync(container: ModelContainer, day: Date,
+                          metrics: Set<Metric> = Set(Metric.allCases),
+                          calendar: Calendar = .current) async -> DayTimeline {
+        let log = await MainActor.run { LocalStore.ownershipLog() }
+        return await Task.detached {
+            fetch(container: container, day: day, metrics: metrics, calendar: calendar, log: log)
+        }.value
+    }
+
+    /// Every card a full day screen shows, off the main actor: `metricsToLoad(log:)` for this install.
+    static func loadAsync(container: ModelContainer, day: Date,
+                          calendar: Calendar = .current) async -> DayTimeline {
+        let log = await MainActor.run { LocalStore.ownershipLog() }
+        let metrics = metricsToLoad(log: log)
+        return await Task.detached {
+            fetch(container: container, day: day, metrics: metrics, calendar: calendar, log: log)
+        }.value
+    }
+
+    /// The off-main read itself: a fresh `ModelContext` over `container`, the rows for one day, and the
+    /// pure shaping in `IntradaySeries`. Every fetch goes through `LocalStore`'s own `nonisolated`
+    /// descriptors and ownership filters, never a hand-copied predicate, so this can't diverge from
+    /// what the main-actor store would return.
+    nonisolated static func fetch(container: ModelContainer, day: Date, metrics: Set<Metric>,
+                                  calendar: Calendar, log: DeviceOwnershipLog) -> DayTimeline {
+        let context = ModelContext(container)
         let interval = dayInterval(day, calendar: calendar)
-        let log = LocalStore.ownershipLog()
         var out = DayTimeline(day: interval, log: log)
         let from = interval.start, to = interval.end
 
         func owned(_ kind: MetricKind, minValue: Double = 0, scale: Double = 1) -> IntradaySeries.Day {
-            let samples = (try? store.ownedSamples(kind: kind, from: from, to: to)) ?? []
+            let samples = (try? LocalStore.ownedSamples(in: context, kind: kind, from: from, to: to, log: log)) ?? []
             let points = samples.filter { $0.value > minValue }
                 .map { IntradaySeries.Point(time: $0.start, value: $0.value * scale) }
             return IntradaySeries.day(points, day: interval, log: log)
@@ -99,19 +146,19 @@ struct DayTimeline {
                 // 0 is a real stress level (fully relaxed), not "no reading": keep it.
                 out.series[.stress] = owned(.stress, minValue: -1)
             case .skinTemp:
-                out.series[.skinTemp] = IntradaySeries.day(skinTemperatures(store: store, interval: interval, log: log),
-                                                           day: interval, log: log)
+                out.series[.skinTemp] = IntradaySeries.day(
+                    skinTemperatures(context: context, interval: interval, log: log), day: interval, log: log)
             case .steps:
-                let rows = (try? store.stepSamples(from: from, to: to)) ?? []
+                let rows = (try? context.fetch(LocalStore.stepSamplesDescriptor(from: from, to: to))) ?? []
                 out.stepBuckets = hourlySteps(rows.map { (start: $0.start, end: $0.end, delta: $0.delta) },
                                               log: log, calendar: calendar)
-                let dailies = (try? store.recentDailies(limit: 60)) ?? []
+                let dailies = (try? context.fetch(LocalStore.recentDailiesDescriptor(limit: 60))) ?? []
                 out.stepsTotal = dailies.first { calendar.isDate($0.day, inSameDayAs: from) }?.steps
             }
         }
 
         // Shade the night's in-bed window if this day is (or starts) a stored sleep night.
-        let summaries = (try? store.recentSleepSummaries(limit: 60)) ?? []
+        let summaries = (try? context.fetch(LocalStore.recentSleepSummariesDescriptor(limit: 60))) ?? []
         if let s = summaries.first(where: { calendar.isDate($0.night, inSameDayAs: from) }), s.inBedEnd > s.inBedStart {
             out.nightWindow = DateInterval(start: s.inBedStart, end: s.inBedEnd)
         }
@@ -123,14 +170,15 @@ struct DayTimeline {
     ///     the time the ring owned. With an empty log that is every row, exactly as before #239;
     ///   • the strap's stored (sleep-window, worn) readings for the time it owned. A ring-only install
     ///     never reads these: its nightly `.temperature` rows were never on this chart.
-    @MainActor
-    private static func skinTemperatures(store: LocalStore, interval: DateInterval,
-                                         log: DeviceOwnershipLog) -> [IntradaySeries.Point] {
-        let ring = ((try? store.daytimeTemperatures(from: interval.start, to: interval.end)) ?? [])
+    nonisolated private static func skinTemperatures(context: ModelContext, interval: DateInterval,
+                                                     log: DeviceOwnershipLog) -> [IntradaySeries.Point] {
+        let descriptor = LocalStore.daytimeTemperaturesDescriptor(from: interval.start, to: interval.end)
+        let ring = ((try? context.fetch(descriptor)) ?? [])
             .filter { log.owner(at: $0.time) == .ringConn && $0.celsius > 0 }
             .map { IntradaySeries.Point(time: $0.time, value: $0.celsius) }
         guard log.entries.contains(where: { $0.family == .zeppOS }) else { return ring }
-        let strap = ((try? store.ownSamples(kind: .temperature, from: interval.start, to: interval.end, of: .zeppOS)) ?? [])
+        let strap = ((try? LocalStore.ownSamples(in: context, kind: .temperature, from: interval.start,
+                                                 to: interval.end, of: .zeppOS, log: log)) ?? [])
             .filter { $0.value > 0 }
             .map { IntradaySeries.Point(time: $0.start, value: $0.value) }
         return ring + strap

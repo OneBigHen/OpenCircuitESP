@@ -40,7 +40,7 @@ struct MetricDayView: View {
                 ProgressView().frame(maxWidth: .infinity, minHeight: 160)
             }
         }
-        .task(id: LoadKey(day: day, revision: SyncRevision.shared.count)) { load() }
+        .task(id: LoadKey(day: day, revision: SyncRevision.shared.count)) { await load() }
     }
 
     private struct LoadKey: Equatable {
@@ -76,8 +76,15 @@ struct MetricDayView: View {
     }
 
     @MainActor
-    private func load() {
-        timeline = DayTimeline.load(store: LocalStore(modelContext), day: day, metrics: [metric])
+    private func load() async {
+        let requested = day
+        let loaded = await DayTimeline.loadAsync(container: modelContext.container, day: requested,
+                                                 metrics: [metric])
+        // Tapping through days fast starts a load per day. `.task(id:)` cancels the superseded one,
+        // and the day is compared as well, so an older day's result can never land on a newer one
+        // (review-242 SF-2).
+        guard !Task.isCancelled, requested == day, loaded.day == DayTimeline.dayInterval(requested) else { return }
+        timeline = loaded
     }
 }
 

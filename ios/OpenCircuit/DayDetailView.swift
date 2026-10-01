@@ -53,8 +53,9 @@ struct DayDetailView: View {
         .navigationTitle(Self.dayTitle.string(from: day))
         .navigationBarTitleDisplayMode(.inline)
         // Through the store, on appear and again after every finished sync (#239: today's chart must
-        // not freeze; #222 review S1: never seeded from a parent's snapshot).
-        .task(id: SyncRevision.shared.count) { loadData() }
+        // not freeze; #222 review S1: never seeded from a parent's snapshot). Off the main actor
+        // (review-242 SF-2): the read grows with history, and this one loads every card.
+        .task(id: SyncRevision.shared.count) { await loadData() }
     }
 
     private var emptyState: some View {
@@ -67,8 +68,13 @@ struct DayDetailView: View {
     }
 
     @MainActor
-    private func loadData() {
-        timeline = DayTimeline.load(store: LocalStore(modelContext), day: day)
+    private func loadData() async {
+        let loaded = await DayTimeline.loadAsync(container: modelContext.container, day: day)
+        // A superseded load must never be drawn over a newer one: `.task(id:)` cancels the previous
+        // task when the revision changes, and the day is checked too, so a result that arrives late
+        // for a day this view has moved off is dropped.
+        guard !Task.isCancelled, loaded.day == DayTimeline.dayInterval(day) else { return }
+        timeline = loaded
     }
 }
 

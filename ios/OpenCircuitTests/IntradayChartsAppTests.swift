@@ -87,12 +87,28 @@ private final class StressKeys: HelioKeyStoring {
     func markRejected() { isRejected = true }
 }
 
+private let storeTypes: [any PersistentModel.Type] = [
+    StoredSample.self, StoredCursor.self, StoredSleepSummary.self, StoredDaily.self, StoredNap.self,
+    StoredPeriodEntry.self, StoredDaytimeTemp.self, StoredStepSample.self,
+]
+
 @MainActor
 private func makeMemoryStore(_ containers: inout [ModelContainer]) throws -> LocalStore {
     let container = try ModelContainer(
-        for: StoredSample.self, StoredCursor.self, StoredSleepSummary.self, StoredDaily.self, StoredNap.self,
-        StoredPeriodEntry.self, StoredDaytimeTemp.self, StoredStepSample.self,
+        for: Schema(storeTypes),
         configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+    containers.append(container)
+    return LocalStore(container.mainContext)
+}
+
+/// A store backed by a real file, for the load check: an in-memory container never touches SQLite, so
+/// it cannot measure what a phone actually pays (review-242 SF-2).
+@MainActor
+private func makeOnDiskStore(_ containers: inout [ModelContainer], _ urls: inout [URL]) throws -> LocalStore {
+    let url = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("oc-intraday-\(UUID().uuidString).store")
+    urls.append(url)
+    let container = try ModelContainer(for: Schema(storeTypes), configurations: ModelConfiguration(url: url))
     containers.append(container)
     return LocalStore(container.mainContext)
 }
@@ -222,10 +238,79 @@ final class StrapStressHistoryTests: XCTestCase {
         let moved = store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock)
         XCTAssertEqual(moved, HelioFetchPlan.floorToMinute(clock.addingTimeInterval(-7 * 86_400)))
         XCTAssertEqual(Set(store.helioFetchCursors(device: timeline).keys), [.autoStress], "only the stress watermark")
-        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock.addingTimeInterval(3600)), "once")
+        // Nothing came back (no rows stored), so the same hole is never attempted again.
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock.addingTimeInterval(3600)))
         XCTAssertEqual(store.helioFetchCursors(device: timeline)[.autoStress], moved)
-        // The ring's timeline never gets a flag or a watermark from this.
+        // The ring's timeline never gets a record or a watermark from this.
         XCTAssertFalse(store.helioStressBackfillDone(device: .ringConn))
+    }
+
+    // MARK: A rollback to a build that drops stress (review-242 NIT 1)
+
+    /// 61 → 60 → 61 at the store level. Build 60 fetches `0x13`, drops it and still advances
+    /// `zepp.fetch.13`, so the days it ran leave a hole no one-shot flag would ever refill. The
+    /// backfill is a condition instead: it re-arms for the new hole exactly once.
+    func testARollbackToBuildSixtyReArmsTheBackfillExactlyOnce() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+
+        func storeStress(upTo end: Date, minutes: Int) throws {
+            for i in 0..<minutes {
+                let start = end.addingTimeInterval(Double(-i) * 60)
+                store.context.insert(StoredSample(QuantitySample(kind: .stress, start: start, value: 40),
+                                                  device: timeline))
+            }
+            try store.context.save()
+        }
+
+        // Build 61 at T0: the first backfill (the build-59 hole), then rows land up to T0.
+        let t0 = clock.addingTimeInterval(-10 * 86_400)
+        try store.setHelioFetchCursor(.autoStress, to: t0, device: timeline)
+        XCTAssertNotNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: t0))
+        try storeStress(upTo: t0, minutes: 60)
+        try store.setHelioFetchCursor(.autoStress, to: t0, device: timeline)
+        let firstAttempt = store.helioStressBackfillAttemptedThrough(device: timeline)
+        XCTAssertNotNil(firstAttempt)
+
+        // Build 61 keeps up: rows track the watermark, so nothing is due.
+        let t1 = clock.addingTimeInterval(-5 * 86_400)
+        try storeStress(upTo: t1, minutes: 60)
+        try store.setHelioFetchCursor(.autoStress, to: t1, device: timeline)
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: t1), "no hole, no backfill")
+        XCTAssertEqual(store.helioStressBackfillAttemptedThrough(device: timeline), firstAttempt, "and no new record")
+
+        // Build 60 for five days: the watermark advanced to now, nothing was stored. Back on 61, the
+        // new hole re-arms the backfill ONCE.
+        try store.setHelioFetchCursor(.autoStress, to: clock, device: timeline)
+        let refill = store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock)
+        XCTAssertEqual(refill, HelioFetchPlan.floorToMinute(clock.addingTimeInterval(-7 * 86_400)),
+                       "the rollback's days are refetched")
+        XCTAssertEqual(store.helioStressBackfillAttemptedThrough(device: timeline), clock,
+                       "the attempt records the watermark it covered")
+
+        // If the strap no longer holds those minutes, nothing is stored and it is never retried.
+        try store.setHelioFetchCursor(.autoStress, to: clock.addingTimeInterval(3600), device: timeline)
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock.addingTimeInterval(3600)),
+                     "at most one attempt per hole: no refetch loop")
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock.addingTimeInterval(7200)))
+
+        // Once real rows land past that ceiling, a LATER hole re-arms it again.
+        let t2 = clock.addingTimeInterval(2 * 3600)
+        try storeStress(upTo: t2, minutes: 10)
+        try store.setHelioFetchCursor(.autoStress, to: t2.addingTimeInterval(3 * 86_400), device: timeline)
+        XCTAssertNotNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: t2.addingTimeInterval(3 * 86_400)))
+    }
+
+    /// A strap that is simply keeping up never triggers a backfill, however long it has run.
+    func testAStrapKeepingUpNeverBackfills() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        store.context.insert(StoredSample(QuantitySample(kind: .stress, start: clock.addingTimeInterval(-300), value: 30),
+                                          device: timeline))
+        try store.context.save()
+        try store.setHelioFetchCursor(.autoStress, to: clock.addingTimeInterval(-240), device: timeline)
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock))
+        XCTAssertFalse(store.helioStressBackfillDone(device: timeline), "nothing was attempted, so nothing is recorded")
     }
 }
 
@@ -275,6 +360,7 @@ final class StressNeverReachesHealthTests: XCTestCase {
 @MainActor
 final class DayTimelineLoadTests: XCTestCase {
     private var containers: [ModelContainer] = []
+    private var storeURLs: [URL] = []
     private let ownership = OwnershipOverride()
     private let strap = SyncDeviceID.timeline(for: .zeppOS(model: ""), identityID: "5B1E4C2A-0000-4000-8000-00000000D239")
     /// A past local day, so every row passes `ingest`'s real-clock guard.
@@ -284,6 +370,12 @@ final class DayTimelineLoadTests: XCTestCase {
     override func tearDown() {
         ownership.restore()
         containers.removeAll()
+        for url in storeURLs {
+            for suffix in ["", "-shm", "-wal"] {
+                try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path + suffix))
+            }
+        }
+        storeURLs.removeAll()
         super.tearDown()
     }
 
@@ -295,21 +387,28 @@ final class DayTimelineLoadTests: XCTestCase {
         try store.context.save()
     }
 
-    /// The load check: a synthetic full strap day, 1440 per-minute heart rates and 288 stress values,
-    /// read from the store and bucketed. The measured time is printed for the report.
-    func testAFullStrapDayLoadsAndBucketsInTime() throws {
+    /// The load check, ON DISK (review-242 SF-2: an in-memory container never touches SQLite, so it
+    /// can't measure what a phone pays). One synthetic strap day of per-minute HR and stress, and then
+    /// the full 30-day retention window, both read through the off-main entry point. Times are printed
+    /// for the report.
+    func testAFullStrapDayAndAMonthOfHistoryLoadOffTheMainActorInTime() async throws {
         ownership.install(.strapOwnsAllTime)
-        let store = try makeMemoryStore(&containers)
+        let store = try makeOnDiskStore(&containers, &storeURLs)
+        // Day under test: 1440 per-minute HR + 288 stress (every 5 min).
         try insert(store, .heartRate, (0..<1440).map(Double.init), value: { 60 + $0.truncatingRemainder(dividingBy: 37) },
                    device: strap)
         try insert(store, .stress, (0..<288).map { Double($0) * 5 }, value: { $0.truncatingRemainder(dividingBy: 100) },
                    device: strap)
 
+        let container = store.context.container
         let clock = ContinuousClock()
         var timeline: DayTimeline?
-        let elapsed = clock.measure { timeline = DayTimeline.load(store: store, day: dayStart) }
-        let ms = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
-        print("DayTimeline load check: 1440 HR + 288 stress loaded and bucketed in \(String(format: "%.1f", ms)) ms")
+        var elapsed = await clock.measure {
+            timeline = await DayTimeline.loadAsync(container: container, day: dayStart)
+        }
+        let oneDayMs = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
+        print("DayTimeline load check (on disk, 1 day stored): 1440 HR + 288 stress in "
+              + "\(String(format: "%.1f", oneDayMs)) ms")
 
         let hr = try XCTUnwrap(timeline?.day(.heartRate))
         XCTAssertEqual(hr.points.count, 1440)
@@ -320,10 +419,95 @@ final class DayTimelineLoadTests: XCTestCase {
         XCTAssertEqual(stress.points.count, 288, "a stress of 0 is a reading, not a gap")
         XCTAssertEqual(stress.series.first?.buckets.count, 144)
         XCTAssertTrue(timeline?.showsStress == true)
-        XCTAssertLessThan(ms, 2000)
+
+        // Now 29 more days of the same density behind it: the retention window a strap user reaches
+        // after a month (`LocalStore.sampleRetentionDays`). The day under test is unchanged.
+        for day in 1..<30 {
+            let offset = Double(day) * -1440
+            try insert(store, .heartRate, (0..<1440).map { offset + Double($0) },
+                       value: { 60 + $0.truncatingRemainder(dividingBy: 37) }, device: strap)
+            try insert(store, .stress, (0..<1440).map { offset + Double($0) },
+                       value: { $0.truncatingRemainder(dividingBy: 100) }, device: strap)
+        }
+        var monthTimeline: DayTimeline?
+        elapsed = await clock.measure {
+            monthTimeline = await DayTimeline.loadAsync(container: container, day: dayStart)
+        }
+        let monthMs = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
+        print("DayTimeline load check (on disk, 30 days stored): one day's cards in "
+              + "\(String(format: "%.1f", monthMs)) ms")
+
+        // The same day, read identically with a month of history behind it.
+        XCTAssertEqual(monthTimeline?.day(.heartRate).points.count, 1440)
+        XCTAssertEqual(monthTimeline?.day(.stress).points.count, 288)
+        XCTAssertEqual(monthTimeline?.day(.heartRate).series.first?.buckets.count, 288)
+        XCTAssertLessThan(monthMs, 3000)
     }
 
-    func testASwitchMidDayGivesEachDeviceItsOwnTimeOnlyAndItsOwnAverage() throws {
+    /// The load really is off the main actor: it is `async` and its fetch is `nonisolated`, so a
+    /// main-actor caller can await it without blocking. Asserted by calling the nonisolated core from
+    /// a detached task (it would not compile if it required the main actor) and comparing the result.
+    func testTheLoadRunsOffTheMainActorAndAgreesWithTheMainActorStore() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        try insert(store, .heartRate, (0..<240).map(Double.init), value: { 60 + $0.truncatingRemainder(dividingBy: 11) },
+                   device: strap)
+        let container = store.context.container
+        let log = LocalStore.ownershipLog()
+        let day = dayStart
+        let detached = await Task.detached {
+            DayTimeline.fetch(container: container, day: day, metrics: Set(DayTimeline.Metric.allCases),
+                              calendar: .current, log: log)
+        }.value
+        let viaAsync = await DayTimeline.loadAsync(container: container, day: day)
+        XCTAssertEqual(detached.day(.heartRate).points.count, 240)
+        XCTAssertEqual(detached.day(.heartRate).points, viaAsync.day(.heartRate).points)
+        XCTAssertEqual(detached.day(.heartRate).averages, viaAsync.day(.heartRate).averages)
+    }
+
+    /// Stepping through days fast must publish only the newest day's series. The views guard on
+    /// `Task.isCancelled` AND on the day, so an older day's result can never land on a newer one; this
+    /// pins the day-tagging the guard relies on.
+    func testARapidDayChangePublishesOnlyTheNewestDay() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: dayStart)!
+        try insert(store, .heartRate, (0..<60).map(Double.init), value: { _ in 61 }, device: strap)
+        for minute in 0..<60 {
+            store.context.insert(StoredSample(
+                QuantitySample(kind: .heartRate, start: yesterday.addingTimeInterval(Double(minute) * 60), value: 77),
+                device: strap))
+        }
+        try store.context.save()
+
+        let container = store.context.container
+        // Both days in flight at once, finishing in an arbitrary order.
+        async let older = DayTimeline.loadAsync(container: container, day: yesterday, metrics: [.heartRate])
+        async let newer = DayTimeline.loadAsync(container: container, day: dayStart, metrics: [.heartRate])
+        let results = await [older, newer]
+
+        // Each result carries the day it was asked for, which is what the views compare before they
+        // publish; a late result for the day the view has left is dropped, never drawn over.
+        XCTAssertEqual(results[0].day, DayTimeline.dayInterval(yesterday))
+        XCTAssertEqual(results[1].day, DayTimeline.dayInterval(dayStart))
+        XCTAssertNotEqual(results[0].day, results[1].day)
+        XCTAssertEqual(results[0].day(.heartRate).points.map(\.value).first, 77)
+        XCTAssertEqual(results[1].day(.heartRate).points.map(\.value).first, 61)
+    }
+
+    /// A ring-only install never fetches stress at all (there can be no strap rows), and a strap
+    /// install does.
+    func testOnlyTheCardsTheScreenShowsAreLoaded() {
+        XCTAssertFalse(DayTimeline.metricsToLoad(log: DeviceOwnershipLog()).contains(.stress))
+        XCTAssertEqual(DayTimeline.metricsToLoad(log: DeviceOwnershipLog()).count, 6)
+        let strapLog = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: at(12 * 60))])
+        XCTAssertTrue(DayTimeline.metricsToLoad(log: strapLog).contains(.stress))
+        XCTAssertEqual(DayTimeline.metricsToLoad(log: strapLog).count, 7)
+        // A strap-only install too (the first entry owns all past time).
+        XCTAssertTrue(DayTimeline.metricsToLoad(log: .strapOwnsAllTime).contains(.stress))
+    }
+
+    func testASwitchMidDayGivesEachDeviceItsOwnTimeOnlyAndItsOwnAverage() async throws {
         let switchAt = at(12 * 60)
         ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: switchAt)]))
         let store = try makeMemoryStore(&containers)
@@ -332,7 +516,7 @@ final class DayTimelineLoadTests: XCTestCase {
         try insert(store, .heartRate, (0..<288).map { Double($0) * 5 }, value: { _ in 60 }, device: .ringConn)
         try insert(store, .heartRate, (0..<1440).map(Double.init), value: { _ in 70 }, device: strap)
 
-        let timeline = DayTimeline.load(store: store, day: dayStart)
+        let timeline = await DayTimeline.loadAsync(container: store.context.container, day: dayStart)
         let hr = timeline.day(.heartRate)
         XCTAssertEqual(hr.series.map(\.family), [.ringConn, .zeppOS])
         XCTAssertEqual(hr.series[0].points.count, 144)
@@ -344,7 +528,7 @@ final class DayTimelineLoadTests: XCTestCase {
         XCTAssertTrue(timeline.namesDevices)
     }
 
-    func testRingFingerAndStrapArmSkinTemperatureNeverShareALineOrAnAverage() throws {
+    func testRingFingerAndStrapArmSkinTemperatureNeverShareALineOrAnAverage() async throws {
         let switchAt = at(12 * 60)
         ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: switchAt)]))
         let store = try makeMemoryStore(&containers)
@@ -354,7 +538,7 @@ final class DayTimelineLoadTests: XCTestCase {
         try insert(store, .temperature, [13 * 60, 14 * 60, 15 * 60], value: { 32 + ($0 - 780) / 120 }, device: strap)
         try insert(store, .temperature, [3 * 60], value: { _ in 34.0 }, device: .ringConn)   // the ring's night rows: never on this chart
 
-        let temp = DayTimeline.load(store: store, day: dayStart).day(.skinTemp)
+        let temp = await DayTimeline.loadAsync(container: store.context.container, day: dayStart).day(.skinTemp)
         XCTAssertEqual(temp.series.map(\.family), [.ringConn, .zeppOS])
         XCTAssertEqual(temp.series[0].points.map(\.value), [35.0, 35.4])
         XCTAssertEqual(temp.series[1].points.map(\.value), [32.0, 32.5, 33.0])
@@ -362,7 +546,7 @@ final class DayTimelineLoadTests: XCTestCase {
         XCTAssertEqual(temp.averages[.zeppOS]!, 32.5, accuracy: 1e-9)
     }
 
-    func testARingOnlyInstallReadsExactlyTheRowsItReadBefore() throws {
+    func testARingOnlyInstallReadsExactlyTheRowsItReadBefore() async throws {
         ownership.install(DeviceOwnershipLog())
         let store = try makeMemoryStore(&containers)
         try insert(store, .heartRate, (0..<96).map { Double($0) * 15 }, value: { _ in 58 }, device: .ringConn)
@@ -370,7 +554,7 @@ final class DayTimelineLoadTests: XCTestCase {
         try store.recordDaytimeTemperature(35.1, at: at(600))
         try insert(store, .temperature, [180], value: { _ in 34.0 }, device: .ringConn)
 
-        let timeline = DayTimeline.load(store: store, day: dayStart)
+        let timeline = await DayTimeline.loadAsync(container: store.context.container, day: dayStart)
         XCTAssertEqual(timeline.day(.heartRate).series.count, 1)
         XCTAssertEqual(timeline.day(.heartRate).points.count, 96, "the same HR filter as before #239")
         XCTAssertEqual(timeline.day(.skinTemp).points.map(\.value), [35.1], "daytime readings only, as before")
