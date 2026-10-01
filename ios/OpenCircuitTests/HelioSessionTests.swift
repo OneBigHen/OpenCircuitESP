@@ -1380,6 +1380,30 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(writer.written.count, stored.count, "every mirrored row reached the writer once")
     }
 
+    /// Review-225c SF-2, from the reviewer's re-adopt probe: the Focus run hands its sync to the app,
+    /// the app goes back to the background, and the next app-refresh run adopts the still-running sync
+    /// and flushes it itself. That flush keeps the Focus run's finalization (it rides on the result).
+    func testAHandedOffFocusSyncThatTheNextRunAdoptsKeepsItsFinalization() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let focus = await service(link, store: store, flushes: { flushes.append($0) }, appIsActive: true,
+                                  pause: { link.transport?.drainSteps(1) })
+            .run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: true)
+        XCTAssertEqual(focus.ending, .handedToApp)
+        let session = try XCTUnwrap(link.session)
+        XCTAssertTrue(session.syncing, "handed over mid-sync")
+        let refresh = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(refresh.ending, .synced)
+        XCTAssertEqual(refresh.result?.nightsFinalized, true)
+        XCTAssertEqual(link.hookFlushes, 0, "the run adopted the sync, so the hook skipped it")
+        XCTAssertEqual(flushes.count, 1, "one flush")
+        XCTAssertEqual(flushes.first?.finalized, true, "the Focus run's finalization is kept")
+        XCTAssertEqual(flushes.first?.nights, 1)
+    }
+
     // MARK: review-225c SF-1: a waiting Focus run's request lives only as long as the run it was left for
 
     /// A run that only waits for its turn: its pause yields without moving the shared fake clock or the

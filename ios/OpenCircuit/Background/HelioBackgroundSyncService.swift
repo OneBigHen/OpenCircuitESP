@@ -317,8 +317,11 @@ struct HelioBackgroundSyncService {
         // The Health flush: never after an expiry (the task is over), never for a quiet ending.
         if run.ending != .expired, let timeline = link.strapTimeline {
             let flushStart = now()
+            // Review-225c SF-2: a sync a Focus run handed over, then adopted here, keeps that run's
+            // finalization (it rides on the result).
+            let finalized = takeNightsFinalized(nightsFinalized) || run.result?.nightsFinalized == true
             run.flush = await flush(timeline, run.result?.nights ?? [], run.result?.identity ?? watched?.identity,
-                                    takeNightsFinalized(nightsFinalized))
+                                    finalized)
             run.flushMS = Self.ms(from: flushStart, to: now())
             if run.flush?.wroteAnything == true { observability.recordHealthWrite() }
         }
