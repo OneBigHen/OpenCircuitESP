@@ -209,6 +209,15 @@ final class HelioBreadcrumbs {
         record("wake=\(wake.rawValue): \(text)", .sync)
     }
 
+    /// Review-224e S-2: a strap sleep more than 60 min from the rest of its night was kept out (the
+    /// night's longer part holds the key) and is stored nowhere until strap naps (#231). No time, no
+    /// length. At most one line per night per 12 h window: every sync re-delivers the sessions.
+    func strapSleepKeptOut(nightKey: Date) {
+        keyed("sleep-kept-out-\(Int(nightKey.timeIntervalSince1970))", .sync, perWindow: 1) {
+            "a strap sleep was kept out of its night (over 60 min from the night's longer part); not stored until strap naps (#231)"
+        }
+    }
+
     // MARK: Strap messages
 
     /// A message the strap sent on its own, outside a request this app started: the endpoint, the

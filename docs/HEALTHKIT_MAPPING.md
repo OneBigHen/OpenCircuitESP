@@ -75,15 +75,24 @@ stores and writes what it measured for time it owned:
   - a strap sleep is a night only if it could be that night: it passes the ring's own overnight
     gate (`SleepWindow.isOvernightBlock`, 28c) AND ends in its key's wake window
     (`SleepNightKey.endsInWakeWindow`, before noon, 28d), both judged in the time zone it was
-    recorded in, from the strap's own local-midnight reference (28e). Sessions 60 min or less apart
-    are stitched into one night first (`HelioSleepSelection.stitch`, 28f): segments exactly as
-    reported, the gap left a gap. Anything else gets a log line and no row, so it never takes a
-    night key (strap naps as `StoredNap` are a follow-up);
+    recorded in, from the strap's own local-midnight reference (28e). First, each session's sleep is
+    kept only when the strap owns its own window (28a); only those sleeps, 60 min or less apart, are
+    then stitched into one night (`HelioSleepSelection.stitch`, 28f): segments exactly as reported,
+    the gap left a gap. (Stitching before that check let a doze from before a ring → strap switch
+    drag the strap's night into ring time, so neither device kept it: review-224e S-1, fixed in
+    #225.) Anything else gets a log line and no row, so it never takes a night key (strap naps as
+    `StoredNap` are a follow-up);
+  - a sleep more than 60 min from the rest of its night is not stitched, and its night key already
+    holds the longer part, so until strap naps (#231) the smaller part is stored nowhere and doesn't
+    reach Health. A `helio-link` breadcrumb notes that it happened (no time, no length);
+  - a strap night already written to Health stands: a later sync can't grow it by stitching or
+    replace it with another sleep for its key (#225); a night not yet written still stitches;
   - the strap's gate is the ring's pass 1 only: the ring's second pass (a night whose onset was
     never recorded, `onsetIsUnobserved:`) needs its epoch archive's evidence of a hole, which the
     strap has no equivalent of, so a strap session recorded only from 06:00 is not a night;
   - the device you went to bed with keeps the night: the device chosen when its in-bed window began,
-    however late a switch lands inside it. A switch at exactly the in-bed start goes to the NEW
+    however late a switch lands inside it (for the strap, the window of its own stitched sleeps, so a
+    doze before the switch never moves the night's start into the other device's time). A switch at exactly the in-bed start goes to the NEW
     device (the switch counts as made before bed);
   - sleeps that overlap: a stored night is never replaced or merged by the other device's night;
     when a switch falls between the two devices' bedtimes, each window began under its own device,

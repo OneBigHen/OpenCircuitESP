@@ -180,8 +180,12 @@ final class HelioStoreSink: HelioHistorySink {
     private var latestStress: HelioReading?
     private var latestPAI: HelioReading?
 
-    init(store: LocalStore) {
+    /// The strap's link breadcrumbs (`HelioConnection` hands them over); nil in tests.
+    private let breadcrumbs: HelioBreadcrumbs?
+
+    init(store: LocalStore, breadcrumbs: HelioBreadcrumbs? = nil) {
         self.store = store
+        self.breadcrumbs = breadcrumbs
     }
 
     func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date] {
@@ -222,7 +226,7 @@ final class HelioStoreSink: HelioHistorySink {
                 sessions += records
                 try storeNights(timeline: timeline, now: now)
             case .temperature(let minutes):
-                let windows = HelioSleepSelection.nights(from: sessions, now: now).map(\.window)
+                let windows = ownedNights(timeline: timeline, now: now).map(\.window)
                 let gated = HelioSkinTemperatureGate.samples(temperatures: minutes, activity: activity, sleepWindows: windows)
                 _ = try store.ingest(owned(gated, timeline), device: timeline)
                 // Hold the watermark where a minute may still pass the gate later (no night yet, or
@@ -256,8 +260,21 @@ final class HelioStoreSink: HelioHistorySink {
     }
 
     /// Store every staged night seen so far this sync that the person hasn't edited.
+    /// The strap's own nights in this sync's sessions (review-224e S-1): each session's sleep, kept only
+    /// when the strap owns its OWN window (decision 28/28a), and only then 28f's stitch. Stitching first
+    /// let a doze from before a ring → strap switch drag the strap's own night into ring time, and then
+    /// neither device kept it. Used by `storeNights` and the temperature gate. With an empty log (a
+    /// ring-only install) nothing is the strap's, as before.
+    private func ownedNights(timeline: SyncDeviceID, now: Date) -> [HelioSleepSelection.Night] {
+        let log = LocalStore.ownershipLog()
+        let family = DeviceOwnershipLog.Family(timeline: timeline)
+        let own = sessions.compactMap { HelioSleepSelection.night(from: $0, now: now) }
+            .filter { log.owner(ofNightFrom: $0.window.start, to: $0.window.end) == family }
+        return HelioSleepSelection.stitch(own)
+    }
+
     private func storeNights(timeline: SyncDeviceID, now: Date) throws {
-        let nights = HelioSleepSelection.nights(from: sessions, now: now)
+        let nights = ownedNights(timeline: timeline, now: now)
         guard let first = nights.first?.window.start, let last = nights.last?.window.end else { return }
         let edited = store.manuallyEditedSleepWindows(from: first, to: last)
         // Decision 28a: a night belongs to the device chosen when it began (saveSleepSummary also refuses
@@ -288,6 +305,8 @@ final class HelioStoreSink: HelioHistorySink {
             }
             return false
         }
+        // The ownership check again, on the stitched window: a backstop (`ownedNights` already kept
+        // only the strap's own sleeps).
         for night in HelioSleepSelection.nightsToWrite(overnight, manuallyEdited: edited)
         where log.owner(ofNightFrom: night.window.start, to: night.window.end) == family
             && !storedNights.contains(where: { $0.window == night.window }) {
@@ -307,6 +326,13 @@ final class HelioStoreSink: HelioHistorySink {
             }
             let outcome = try store.saveHelioNight(night, device: timeline)
             if outcome == .inserted || outcome == .updated { storedNights.append(night) }
+            // Review-224e S-2: a sleep more than 60 min from the night's other part is not stitched
+            // (28f), and its key already holds the longer part, so it is stored nowhere until strap naps
+            // (#231). Say so in the breadcrumbs, without its time or length.
+            if outcome == .keptFullerStoredNight,
+               (try? store.sleepSummaryOverlapping(start: night.window.start, end: night.window.end)) == nil {
+                breadcrumbs?.strapSleepKeptOut(nightKey: SleepNightKey.night(inBedStart: night.window.start, inBedEnd: night.window.end))
+            }
         }
     }
 

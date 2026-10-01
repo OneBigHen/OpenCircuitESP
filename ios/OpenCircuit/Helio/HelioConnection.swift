@@ -309,7 +309,7 @@ final class HelioConnection: NSObject {
         let made = SessionReference()
         let session = HelioSession(
             transport: self, identityID: peripheral.identifier.uuidString, model: .helioStrap,
-            key: keyStore.load(), keyStore: keyStore, sink: store.map { HelioStoreSink(store: $0) },
+            key: keyStore.load(), keyStore: keyStore, sink: store.map { HelioStoreSink(store: $0, breadcrumbs: breadcrumbs) },
             findState: findState,
             onSyncFinished: { result, timeline in
                 let appIsActive = Self.appIsActive   // as the sync ends, before the flush's awaits

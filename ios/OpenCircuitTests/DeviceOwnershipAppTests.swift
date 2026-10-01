@@ -172,12 +172,13 @@ final class DeviceOwnershipAppTests: XCTestCase {
     }
 
     private func connect(_ device: FakeZeppDevice, store: LocalStore?, autoSync: Bool = true,
+                         breadcrumbs: HelioBreadcrumbs? = nil,
                          configure: (OwnershipTransport) -> Void = { _ in }) -> (HelioSession, OwnershipTransport) {
         let transport = OwnershipTransport(device: device)
         configure(transport)
         let keys = OwnershipKeys()
         let session = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys,
-                                   sink: store.map { HelioStoreSink(store: $0) }, findState: HelioFindState(),
+                                   sink: store.map { HelioStoreSink(store: $0, breadcrumbs: breadcrumbs) }, findState: HelioFindState(),
                                    clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: autoSync)
         transport.session = session
         session.start()
@@ -992,5 +993,68 @@ final class DeviceOwnershipAppTests: XCTestCase {
         let nights = try strapSync([(-4, -1.5), (-0.5, 7)], now: localHour(9), log: .strapOwnsAllTime, store: store)
         XCTAssertEqual(nights, [DateInterval(start: localHour(-4), end: localHour(7))])
         XCTAssertEqual(try nightRows(store), ["-4.0…7.0 asleep=600"])
+    }
+}
+
+// MARK: - Review-224e S-1: 28f stitches only the strap's own sleeps (fixed in #225)
+
+extension DeviceOwnershipAppTests {
+    /// One strap sync of whole-asleep sessions between local hours, through the production path; the
+    /// night segments handed to Health.
+    private func syncSessions(_ spans: [(Double, Double)], now: Date, log: DeviceOwnershipLog, store: LocalStore,
+                              breadcrumbs: HelioBreadcrumbs? = nil) -> [[SleepSegment]] {
+        ownership.install(log)
+        let device = makeStrap()
+        let reference = localHour(0)
+        device.fetchData[.sleepSession] = (stamp(reference.timeIntervalSince1970 - 86_400),
+                                           spans.flatMap { localSession($0.0, $0.1, stages: [($0.0, $0.1, 0x04)], midnight: reference) })
+        clock = now
+        let (session, _) = connect(device, store: store, breadcrumbs: breadcrumbs)
+        return session.lastSyncResult?.nights.map(\.segments) ?? []
+    }
+
+    /// Review-224e's probe (`testProbe224eStitchAcrossASwitchDropsTheStrapsNight`), as the regression
+    /// test. Ring → strap at 22:15; the strap delivers a 21:00–22:30 doze and its 23:30–07:00 night,
+    /// 60 min apart. Stitching first made one 21:00–07:00 night that began in ring time, so the strap
+    /// skipped it and the ring couldn't keep it either. Each sleep is now judged on its own window first:
+    /// the doze is the ring's, the night is the strap's, and the night is stored and handed to Health.
+    func testAStrapNightAfterASwitchIsNotStitchedToThePreSwitchDoze() throws {
+        let store = try makeStore()
+        let log = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: localHour(-1.75))])
+        let health = syncSessions([(-3, -1.5), (-0.5, 7)], now: localHour(9), log: log, store: store)
+        let rows = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
+        XCTAssertEqual(rows.map(\.asleepMin), [450], "the strap's own night (23:30–07:00) is stored")
+        XCTAssertEqual(rows.first?.inBedStart, localHour(-0.5))
+        XCTAssertEqual(rows.first?.inBedEnd, localHour(7))
+        XCTAssertEqual(health.count, 1, "and handed to Health")
+        XCTAssertEqual(health.first?.first?.start, localHour(-0.5))
+        XCTAssertEqual(health.first?.last?.end, localHour(7))
+    }
+
+    /// No switch: the strap owns both sleeps, 60 min apart, and they are still one night (28f).
+    func testWithoutASwitchTheStrapsOwnSleepsAnHourApartAreStillOneNight() throws {
+        let store = try makeStore()
+        let health = syncSessions([(-1, 3), (4, 7)], now: localHour(10), log: .strapOwnsAllTime, store: store)
+        let rows = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.asleepMin, 420)
+        XCTAssertEqual(rows.first?.inBedStart, localHour(-1))
+        XCTAssertEqual(rows.first?.inBedEnd, localHour(7))
+        XCTAssertEqual(health.count, 1)
+    }
+
+    /// Review-224e S-2 (the rule stands): a sleep 61 min from the rest of its night isn't stitched, its
+    /// key holds the longer part, and it is stored nowhere until strap naps (#231). A breadcrumb says it
+    /// happened, with no time or length.
+    func testASleepOverAnHourFromItsNightIsKeptOutWithABreadcrumb() throws {
+        let store = try makeStore()
+        let observability = ObservabilityStore(defaults)
+        let breadcrumbs = HelioBreadcrumbs(observability: observability, defaults: defaults, clock: { [unowned self] in self.clock })
+        _ = syncSessions([(-1, 3), (3 + 61.0 / 60, 7)], now: localHour(10), log: .strapOwnsAllTime, store: store,
+                         breadcrumbs: breadcrumbs)
+        let rows = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
+        XCTAssertEqual(rows.map(\.asleepMin), [240], "the longer half keeps the night (the rule as decided)")
+        let lines = observability.metricRecords().filter { $0.source == HelioBreadcrumbs.source }.map(\.detail)
+        XCTAssertEqual(lines, ["a strap sleep was kept out of its night (over 60 min from the night's longer part); not stored until strap naps (#231)"])
     }
 }
