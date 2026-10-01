@@ -454,6 +454,10 @@ struct UserProfileSettingsView: View {
                          + "Sharpens once activity detection lands.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Text("Heart rate and blood oxygen alerts are sent only for readings from the last "
+                     + "30 minutes. Older readings, such as ones that sync later, appear in your "
+                     + "charts without an alert.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("Skin-temp & fever alerts", isOn: $tempFeverEnabled)
                     .onChange(of: tempFeverEnabled) { _, on in escalateNotifAuth(enabled: on) }
                 Text(Self.medicalDisclaimer)
@@ -530,8 +534,9 @@ struct UserProfileSettingsView: View {
                     DatePicker("To", selection: timeBinding($quietEnd),
                                displayedComponents: .hourAndMinute)
                 }
-                Text("Health alerts are held during this window (delivered once it ends if still "
-                     + "relevant).")
+                Text("Alerts are muted during this window. Skin temperature and fever alerts arrive "
+                     + "once it ends; heart rate and blood oxygen alerts from inside it are not sent "
+                     + "later.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

@@ -19,18 +19,17 @@ final class HealthAlertCopyTests: XCTestCase {
                        "copy must NOT present the completing sample (143) as the threshold; got: \(body)")
     }
 
-    // MARK: A reading that arrived hours late must not read as a live event
+    // MARK: The time named must be on the right day
 
-    /// A tester received a high-HR alert at 07:00 for a reading taken at 18:06 the PREVIOUS evening
-    /// (the ring's link had been dropping, so it only reached the phone on the morning drain). The
-    /// 12 h `instantLookback` that made that possible is deliberate and stays; the copy is what has
-    /// to be honest about when.
+    /// Instant alerts only cite a reading from the last 30 minutes (decision 32, #234), so the one
+    /// live case that crosses a day is a reading just before midnight notified just after it. A bare
+    /// "11:50 PM" would read as tonight.
     func testCopyNamesTheDayForAReadingFromAPreviousDay() {
         let cal = Calendar(identifier: .gregorian)
-        let now = cal.date(from: DateComponents(year: 2026, month: 8, day: 12, hour: 7, minute: 0))!
-        let yesterdayEvening = cal.date(from: DateComponents(year: 2026, month: 8, day: 11,
-                                                            hour: 18, minute: 6))!
-        let hit = HealthAlertHit(notification: .highHR, value: 128, time: yesterdayEvening)
+        let now = cal.date(from: DateComponents(year: 2026, month: 8, day: 12, hour: 0, minute: 5))!
+        let beforeMidnight = cal.date(from: DateComponents(year: 2026, month: 8, day: 11,
+                                                          hour: 23, minute: 50))!
+        let hit = HealthAlertHit(notification: .highHR, value: 128, time: beforeMidnight)
         let (_, body) = HealthNotificationCenter.copy(for: .highHR, hit: hit, now: now)
         XCTAssertTrue(body.contains("yesterday at"),
                       "a previous-day reading must say so; got: \(body)")
