@@ -257,12 +257,16 @@ final class HelioStoreSink: HelioHistorySink {
         // Decision 28d (review-224d S-1): it must also END in its key's wake window, the store's own rule
         // for "this is the night its key names" (`SleepNightKey.endsInWakeWindow`), so an evening doze
         // the overnight gate accepts (20:00–22:30) never takes a night key either.
+        // Decision 28e (review-224d S-2): both judged in the zone the night was RECORDED in (the strap's
+        // own local-midnight reference), never the phone's zone at sync time, so a normal night first
+        // synced after a flight is still a night. Same functions, one explicit calendar.
         let overnight = nights.filter { night in
-            let isOvernight = SleepWindow.isOvernightBlock(start: night.window.start, end: night.window.end)
-            let endsInWakeWindow = SleepNightKey.endsInWakeWindow(night.window.end)
+            let calendar = night.recordedCalendar
+            let isOvernight = SleepWindow.isOvernightBlock(start: night.window.start, end: night.window.end, calendar: calendar)
+            let endsInWakeWindow = SleepNightKey.endsInWakeWindow(night.window.end, calendar: calendar)
             if isOvernight, endsInWakeWindow { return true }
             if notOvernightLogged.insert(night.window).inserted {
-                let span = Self.clockSpan(night.window)
+                let span = Self.clockSpan(night.window, in: night.recordedTimeZone)
                 if !isOvernight {
                     helioLog.notice("helio: sleep session \(span, privacy: .public) is not overnight; not stored as a night")
                 } else {
@@ -279,9 +283,10 @@ final class HelioStoreSink: HelioHistorySink {
         }
     }
 
-    /// `HH:mm–HH:mm` local, for the 28c log line: when a session ran, no health value.
-    private static func clockSpan(_ window: DateInterval) -> String {
+    /// `HH:mm–HH:mm` in the recorded zone, for the 28c log line: when a session ran, no health value.
+    private static func clockSpan(_ window: DateInterval, in zone: TimeZone?) -> String {
         let f = DateFormatter()
+        if let zone { f.timeZone = zone }
         f.dateFormat = "HH:mm"
         return "\(f.string(from: window.start))–\(f.string(from: window.end))"
     }
