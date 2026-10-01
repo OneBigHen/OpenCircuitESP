@@ -156,6 +156,139 @@ Reading it: submits ok + pending requests but no `handler INVOKED` line ⇒ iOS 
 with no matching sync outcome ⇒ the wake fired but the drain didn't finish. The Diagnostics screen
 also has a **"Reschedule & probe background tasks"** button to force a submit+probe on demand.
 
+### B.5 The Amazfit Helio Strap (#215 phase 4)
+
+With the strap chosen (`ActiveDeviceChoiceStore`), the same wakes drive the strap instead of the
+ring. **No new background modes and no new BGTask identifiers** (decision 26). #233 adds one
+entitlement, `com.apple.developer.healthkit.background-delivery` (an entitlement, not a background
+mode), and widens `NSHealthShareUsageDescription` for the iPhone's step count.
+`BackgroundDrain` picks the chosen device's drain from UserDefaults before either driver is
+touched, so a strap wake never constructs the ring's scanner or central, and a ring wake never
+touches the strap's connection.
+
+| Wake | Strap path | Where |
+|---|---|---|
+| BGAppRefreshTask / BGProcessingTask (the two existing ids) | `HelioBackgroundSyncService.run` (28 s / 150 s budgets, as the ring) | `AppDelegate.handleStrap`; `Background/HelioBackgroundSyncService.swift` |
+| Sleep Focus ending | the same run, short window, the strap's nights finalized (skip the 20-min margin, as the ring's `sleepFinalized`), but only by a Health flush that starts within 30 min of the Focus end (decision 31) | `SleepFocusSyncRunner.runStrap` |
+| CoreBluetooth state restoration | `HelioConnection`'s own central (restore id `com.standardsoftwaresolutions.opencircuit.helio`) re-adopts the strap. Since #233 a link that comes back in the background doesn't sync by itself: it's a `restoration` wake (below) | `Helio/HelioConnection.swift` |
+
+**Wake sources (#233, decision 33): the strap wakes the app; BGTasks are the backstop.** Build 59's
+first night synced only when the app was opened: iOS granted both BGTasks at once, right before it
+predicted the app would be opened, and they fought over the strap. Each wake below runs at most one
+bounded **catch-up**: the BGTask run above (28 s budget, `03 09` acks, teardown, Health flush) under
+a `beginBackgroundTask` assertion (`Background/HelioWakeSync.swift`, `HelioWakeCoordinator`).
+
+| Wake (`HelioWake`) | When it syncs (`HelioWakePolicy`) | Dependable? |
+|---|---|---|
+| `reconnect`: a pending connect completes in the background (out of range and back, Bluetooth back on) | last completed strap sync ≥ 4 h ago, and no background run started in the last 30 min | only when the link actually dropped |
+| `restoration`: CoreBluetooth relaunches the app and hands the link back | same as `reconnect` | as above; never after a force-quit or a Bluetooth toggle (below) |
+| `idleTraffic`: anything the strap sends on its own over the held, idle link (decision 35) | same as `reconnect`; looked at no more than every 5 min, never in front, during a sync or while a run holds the strap | **no**: an idle authenticated link carries no heart-rate stream (that needs `04 01` plus a `04 02` from the phone every second, `ZEPP_PROTOCOL.md` §7.1), so this fires only if the strap pings or sends a §16.2 message |
+| `strapEvent`: the woke-up event `06 00` on `0x001D` | always, except within 30 min of a background run's start (review-235 S3). Not a finalization: the night still waits for its margin, and nothing is written from the event (it carries no time) | **no**: an opportunistic hint. `ZEPP_PROTOCOL.md` §16.4 (PR #235): 🔴 whether the Helio sends it at all |
+| `healthDelivery`: HealthKit delivers new steps counted by the iPhone itself (device model `iPhone`, so the strap's own step writes never wake it; hourly at most), strap users who turned on "Sync in the background more reliably" on the strap's device screen (it runs the app's one Health request, which already reads step count; never a request of its own) | unless a strap sync completed in the last 10 min; HealthKit's completion handler is called on every path (`Background/HelioHealthWake.swift`) | the only wake that doesn't depend on the strap; needs the iPhone to count steps (not overnight on a nightstand) |
+
+N = 4 h for `reconnect`/`restoration`/`idleTraffic`: a strap that briefly leaves range reconnects
+many times a day; four hours is longer than those absences and shorter than any night. **Decision
+35:** B.5 holds the link up after every sync, so a strap worn in range all night never disconnects
+and the reconnect wake never fires; what is left overnight is the BGTasks, the woke-up hint and
+whatever the strap sends on its own. Nothing here makes the strap talk: no realtime stream, no
+strap setting (realtime steps, heart-rate push), no keep-alive traffic. An idle link has only
+`…0017` subscribed (`…0016` is turned off after auth, `0x2A37` only for the live-HR screen in front),
+and `ZEPP_PROTOCOL.md` §16.5's replies apply: the ping `03` on `0x0015` is answered `04`, unasked
+`0x2A37` frames get `04 00` and an unsubscribe, unasked realtime steps get `05 00` once, anything
+else gets no reply.
+
+**Apple's rules for these wakes** (review-235 S2; developer.apple.com: Core Bluetooth Programming
+Guide, "Core Bluetooth Background Processing for iOS Apps", and Technical Q&A QA1962):
+- A suspended app is woken for a connection established **or torn down** (a disconnect is a wake
+  too) and for a characteristic value it subscribed to.
+- Each wake gets **about 10 seconds**; the catch-up's `beginBackgroundTask` assertion is what lets a
+  sync run past that.
+- A terminated app comes back **only through state restoration** (iOS 11+: after the system ended
+  it, a crash, or a reboot after the first unlock), and only for an event it was pending on.
+- **For a terminated app, a force-quit or a Bluetooth power toggle ends every strap wake** until the
+  person opens the app: restoration doesn't relaunch it after either. An app that is still alive
+  (suspended) is a different case: when Bluetooth comes back on, `HelioConnection` reconnects
+  (`pendingAction = .reconnect`), and that connect is a wake (review-225e N-1).
+
+**Two tasks granted together coalesce** (#233 item 3): no run sits out its window. A later run whose
+deadline isn't more than 5 s later than the active run's completes at once, successfully ("helio
+strap: coalesced into the processing run"); a Sleep Focus run leaves its finalization for the active
+run (decision 31 bounds it). A later run with a later deadline takes the sync over: the active run
+hands it over at its next turn (nothing torn down or sent; its task completes successfully, "handed
+its sync to the processing run (larger budget)") and the later run finishes and flushes that one
+sync. A coalesced task runs no alert passes; the run holding the strap does. A coalesced or
+handed-over task reports success even if the run it deferred to then expires with nothing synced
+(review-225e N-2; harmless to data, left as is).
+
+**A night held by its margin** (#233 item 5): when a strap flush holds a night back (its last
+segment ended under 20 min before the flush, and no Sleep Focus finalization applied), the next
+app-refresh request is aimed at the margin's end (`BackgroundRefreshScheduler.scheduleRefresh`,
+strap only; at least a minute away); after a woke-up catch-up, at least 30 min later, as the night's
+record may be late (`ZEPP_PROTOCOL.md` §21.4). The pending date is persisted (strap only,
+`StrapNightRefresh`) and submitted again after the app's own `schedule()` (scene → background,
+`applicationDidEnterBackground`, the start of every BGTask), which would otherwise replace it within
+seconds (review-225e SF-3); it is cleared once it passes or a flush finds no night waiting. The
+ring's requests are unchanged.
+
+**Opening the app syncs an idle strap session** (review-225e SF-1): a link that came back in the
+background (a teardown's re-arm, a reconnect or restoration inside the wake gates, a connect that
+completed while the app was `.inactive`) makes a session that doesn't sync on connect. On
+`didBecomeActive` the connection syncs a ready, idle session (no sync, find or live heart rate) when
+the last completed strap sync is at least `ForegroundAutoSync.interval` (300 s, one constant with
+the ring's foreground auto-sync) old, with the ring's throttle, so a flapping `.inactive`/`.active`
+gives one sync. If the app leaves before that sync ends, the sync-end hook runs its alert pass
+(review-236 S1), once.
+
+One run: connect by identifier if the link isn't up (never a scan) → auth with the Keychain key
+(`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`) → clock → fetch, every round acked `03 09`
+and committed to `LocalStore` as it arrives → Health flush → one run-log line.
+
+Safety invariants specific to the strap:
+- **Budget.** The fetch gets the task's window minus an 8 s flush reserve. Out of time, or iOS
+  expires the task: the open round is acked `03 09`, committed rows stay, the link is dropped
+  (a running find gets its `06` first) and the rest stays on the strap. An expiry skips the Health
+  flush; the task is completed only after that teardown (or 2 s after the expiry at the latest).
+  A catch-up's expiry (its `beginBackgroundTask` assertion ending) tears down inside the expiry
+  handler, since iOS suspends the app when it returns (review-225e SF-2): the `03 09` is queued, the
+  fetch ends, the link cancel is issued in that call, and the standing connect is armed; its
+  `connect` goes out when the cancel lands (`didDisconnectPeripheral`, itself a wake). A `03 09`
+  still in the write queue may be lost with the cancel, which is safe: an unacked round stays on
+  the strap.
+- **Key states (decision 7).** No key, a rejected key (persisted), or a strap that ended "busy"
+  earlier in this app launch end the run before any radio work; a session that turns out keyless,
+  rejected, busy or unsupported ends it. No retry, no store or Health write, and the run log says
+  why. "Busy" is remembered only for the launch: a new launch, including a background relaunch,
+  tries the strap once more (so does opening the app), which is how it comes back once Zepp lets go.
+- **The link after a finished run** stays up (idle, authenticated, standing reconnect armed):
+  re-arming a fresh connect, as the ring does, would reconnect a strap in range at once and fetch
+  everything a second time. A strap out of range keeps its pending connect armed for restoration.
+  After a run's own teardown (out of time, or expired) a standing connect is armed again (decision
+  33), never after a quiet ending (decision 7); the reconnect's catch-up waits out the 30-min
+  cooldown. Bluetooth turning off keeps the wish to connect: power-on reconnects. Every reconnect
+  re-runs auth and setup with a fresh session (§4–§5, §9).
+- **Find stop across processes.** "A find may be running" is persisted (`helio.findStopOwed.v1`),
+  so a process the system ends mid-find still sends the `06` on its next connection.
+- **One container.** Every background site resolves its store through
+  `OpenCircuitApp.sharedOrFallbackContainer()` (#222 review Q2 + U2).
+
+Observability (B.4): each run records `recordSyncOutcome(kind:)` with a detail starting
+`helio strap:` (e.g. `helio strap: synced; 9 round(s) stored, 0 failed, 1 night(s); Health
+samples=…`, `helio strap: key rejected; not retrying`, `helio strap: out of time; open round kept
+on the strap (03 09), disconnected`, `helio strap: coalesced into the processing run`) and a
+`bgphase` breadcrumb starting `device=helio`. Catch-ups are logged as `cbWake` (strap event,
+reconnect, restoration, idle traffic) or `backgroundSync` (Health delivery). A sync handed to the app
+that ends in the background is logged as `backgroundSync` with a `helio:` detail.
+
+**Link and wake breadcrumbs** (#233 item 1): metric-log source `helio-link`
+(`Helio/HelioBreadcrumbs.swift`), printed by the Diagnostics export in their own section ("Strap link
+and wakes"). Link up and down (CoreBluetooth's error code, how long the link had been up, whether a
+standing connect is armed), Bluetooth off, restoration relaunches (states only, never identifiers),
+every message the strap sent on its own (endpoint, opcode bytes and length, never the payload; at
+most one line per endpoint per 10 min, with a count; a message's time is when it arrived), and each
+strap sync's wake reason (`sync start wake=…`). Bounded per 12-hour window: 20 link lines, 16 sync
+lines, 12 strap-message lines (4 per endpoint), so one night uses at most 48 of the metric log's 400
+entries; what's over budget is counted and reported on the next window's first line.
+
 ---
 
 ## Part C — On-device validation runbook
@@ -178,6 +311,26 @@ and watch the observability log (`ObservabilityStore.recordScheduled` / `recordS
 | `bgLastScheduled` present after a wake / `recordSyncOutcome(kind:)` entry | a BGTask actually ran (the exact #119 regression: this was *absent* for weeks) |
 | `willRestoreState` re-adopts the ring | CB state-restoration relaunch fired |
 | `captureForBackground` drain → `recordHealthWrite` | the wake drove a real reconnect + drain + HealthKit write with the app never foregrounded |
+| a `helio strap:` run-log line / `bgphase device=helio …` | the strap's run (B.5) fired; the line says how it ended |
+
+**Read last night's strap breadcrumbs (Helio Strap, no tooling):** Profile ▸ Helio Strap ▸
+Diagnostics ▸ **Export diagnostics**, and share the text file. In **"# Strap link and wakes"**
+(newest first), read up from the morning:
+1. **Did the link stay up?** A `link down (unexpected, CBError n, after XhYYm up)` line overnight
+   means the strap (or iOS) dropped a silent link after that long; `standing connect armed` means a
+   reconnect could wake the app. No `link down` line between the evening and the morning means the
+   link was held all night (decision 35: then no reconnect wake can happen).
+2. **Did anything wake the app?** `restoration relaunch: …` (with states), `link up (connected after a
+   restoration relaunch; app in background)`, and `sync start wake=…` lines with their wake:
+   `appRefresh`/`processing`/`sleepFocus` (iOS granted a task), `reconnect`/`restoration`/`idleTraffic`
+   (the strap side), `strapEvent` (the woke-up event), `healthDelivery` (iPhone steps).
+3. **Did the strap say anything on its own?** `strap sent 0x0015 03 (1 B) (n since …)` is the
+   connection ping; `strap sent 0x001d 06 00` the woke-up event; any other endpoint is new and worth
+   a note in `ZEPP_PROTOCOL.md` §10 (opcode and length only). No such line all night means the strap
+   was silent, so `idleTraffic` couldn't fire.
+4. **Why not?** `wake=strapEvent: no catch-up: …` names the gate that held a woke-up event back. Then
+   the "# Background scheduling" section shows what iOS granted (`bgtask … handler INVOKED`) and the
+   "# Sync activity log" how each run ended (`helio strap: …`).
 
 For the official RingConn app, use `log stream --predicate 'process == "Runner"'` and watch for
 `[BackgroundFetch] Event received`, `willRestoreState`, `BGProcessingTask submitted`,

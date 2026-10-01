@@ -639,6 +639,8 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
 
 // MARK: - Main
 
+// Before anything is printed: a dead stdout pipe must not kill the run before the find stop.
+StopSignals.ignoreBrokenPipe()
 let options = parseCommandLine()
 let key = options.keyFile.map(loadKey)
 if options.allowDelete {

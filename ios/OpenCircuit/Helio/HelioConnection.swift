@@ -12,7 +12,8 @@ import ZeppKit
 // Its OWN central with its own restore identifier, so the ring's central (`RingScanner`) and this one
 // never share state (decision 1: the inactive device is never scanned for or connected). Created
 // lazily, like the ring's (#142), so merely constructing this object never prompts for Bluetooth.
-// State restoration only re-adopts the strap's peripheral here; background syncing is Phase 4.
+// State restoration re-adopts the strap's peripheral; a session that connects then syncs on its own.
+// The BGTask and Sleep Focus wakes drive it through `HelioBackgroundLink` (#215 phase 4).
 
 @Observable
 @MainActor
@@ -53,17 +54,50 @@ final class HelioConnection: NSObject {
     @ObservationIgnored private var pendingServices = 0
     @ObservationIgnored private var writeQueue: [ZeppWrite] = []
     @ObservationIgnored private var localStore: LocalStore?
-    @ObservationIgnored private let findState = HelioFindState()
+    @ObservationIgnored private let findState = HelioFindState(defaults: .standard)
     @ObservationIgnored private var wantConnection = false
     @ObservationIgnored private var pendingAction: PendingAction?
     @ObservationIgnored private var scanTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var rssiTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundObserver: NSObjectProtocol?
+    @ObservationIgnored private var activeObserver: NSObjectProtocol?
+    /// When the current link came up, for the link-down breadcrumb (does the strap drop a silent link?).
+    @ObservationIgnored private var linkUpAt: Date?
+    /// Background runs in progress (`HelioBackgroundLink`, review-225 S2): only serialises runs.
+    @ObservationIgnored var activeBackgroundRuns = 0
+    /// True only while a background run's watch loop runs (review-225b S-A). `makeSession` reads it:
+    /// a session made then leaves its syncs to that run, which flushes and logs them. A session made
+    /// after the loop (including during the run's teardown or Health flush) flushes and logs its own;
+    /// one made before the loop is the run's only if the loop adopts it (`HelioBackgroundLink`).
+    @ObservationIgnored var backgroundRunAdoptsNewSessions = false
+    /// A Sleep Focus run's finalization, left when it gave up waiting for the run holding the link
+    /// (`HelioBackgroundLink`, review-225b N-a); cleared when that run returns (review-225c SF-1).
+    @ObservationIgnored var pendingNightsFinalization: Date?
+    /// The run holding the link and a sync handed between runs (`HelioBackgroundLink`, #233 item 3).
+    @ObservationIgnored var activeRun: HelioActiveRun?
+    @ObservationIgnored var handOver: HelioHandOver?
+    /// The link and wake breadcrumbs (#233).
+    @ObservationIgnored let breadcrumbs: HelioBreadcrumbs
+    /// This process was launched (or relaunched) by CoreBluetooth state restoration.
+    @ObservationIgnored private(set) var restoredThisLaunch = false
+    /// The first link after a restoration relaunch is the restoration's wake; later ones are reconnects.
+    @ObservationIgnored private var restorationWakePending = false
+    /// A background run tore the link down; arm a standing connect once the cancel has gone through
+    /// (decision 33).
+    @ObservationIgnored private var rearmOnDisconnect = false
+    /// Where decision 33's wakes go (the strap's woke-up event, a reconnect or restoration in the
+    /// background). Static, so setting it never constructs the connection for a ring user.
+    static var wakeHandler: @MainActor (HelioWake) -> Void = { HelioWakeCoordinator.shared.wake($0) }
+    /// Decision 35: the strap's own traffic over the idle link, checked at most every few minutes.
+    @ObservationIgnored private var idleTraffic = HelioIdleTrafficGate()
+    /// Review-225e SF-1: the activation sync's throttle (`HelioActivationSync`).
+    @ObservationIgnored private var activationSync = HelioActivationSync()
 
     private enum PendingAction { case scan, reconnect, resumeRestored }
 
-    init(keyStore: (any HelioKeyStoring)? = nil) {
+    init(keyStore: (any HelioKeyStoring)? = nil, breadcrumbs: HelioBreadcrumbs? = nil) {
         self.keyStore = keyStore ?? HelioKeyStore.shared
+        self.breadcrumbs = breadcrumbs ?? .shared
         super.init()
         // Decision 18: backgrounding sends the find stop. Observed here rather than in a view, so it
         // holds whichever screen is showing.
@@ -73,6 +107,15 @@ final class HelioConnection: NSObject {
             MainActor.assumeIsolated {
                 self?.session?.appDidEnterBackground()
                 self?.stopRSSIUpdates()
+            }
+        }
+        activeObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let session = self.session else { return }
+                Self.becameActive(session, gate: &self.activationSync, lastCompletedSync: HelioWakeState().lastCompletedSync,
+                                  now: Date())
             }
         }
     }
@@ -89,6 +132,10 @@ final class HelioConnection: NSObject {
     func setLocalStore(_ store: LocalStore) {
         localStore = store
     }
+
+    /// This connection has created its central (decision 1's tests: the strap's central exists only
+    /// while the strap is the chosen device).
+    var hasCentral: Bool { central != nil }
 
     // MARK: User actions
 
@@ -150,7 +197,11 @@ final class HelioConnection: NSObject {
     }
 
     /// Drop the link and stop reconnecting. The saved strap stays, for a later reconnect.
-    func disconnect() {
+    /// `cancelNow`: cancel the link in this call even when a find or a sync was running. Only an
+    /// expiry's teardown asks for it (`tearDownForExpiry`, review-225e SF-2): iOS suspends the app when
+    /// that returns, so a cancel deferred by 500 ms would never run. Everything else, a foreground
+    /// disconnect with a find running included, keeps the 500 ms (§15.4).
+    func disconnect(cancelNow: Bool = false) {
         wantConnection = false
         pendingAction = nil
         scanTimeoutTask?.cancel()
@@ -175,7 +226,7 @@ final class HelioConnection: NSObject {
             self?.characteristics = [:]
             self?.writeQueue = []
         }
-        if wasBusy {
+        if wasBusy && !cancelNow {
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(500))
                 cancel()
@@ -247,41 +298,103 @@ final class HelioConnection: NSObject {
 
     private func makeSession(for peripheral: CBPeripheral) {
         // The process-wide container when no view handed a store over yet (a switch made from a
-        // screen, or a restoration launch); never `makeContainer()`, whose recovery path can wipe.
-        let store = localStore ?? OpenCircuitApp.sharedContainer.map { LocalStore($0.mainContext) }
+        // screen, or a restoration launch), opened now if launch couldn't (before the first unlock);
+        // never `makeContainer()`, whose recovery path can wipe.
+        let store = localStore ?? (try? OpenCircuitApp.backgroundStore())
+        // Decision 33: a link that comes back in the background (a reconnect, a restoration relaunch)
+        // doesn't sync by itself; `HelioWakePolicy` decides whether it catches up, under a background
+        // assertion and with the BGTask run's budget and teardown. In front, and for a background run's
+        // own connect, a session syncs on connect as before.
+        let syncOnConnect = Self.appIsActive || backgroundRunAdoptsNewSessions
+        let made = SessionReference()
         let session = HelioSession(
             transport: self, identityID: peripheral.identifier.uuidString, model: .helioStrap,
-            key: keyStore.load(), keyStore: keyStore, sink: store.map { HelioStoreSink(store: $0) },
+            key: keyStore.load(), keyStore: keyStore, sink: store.map { HelioStoreSink(store: $0, breadcrumbs: breadcrumbs) },
             findState: findState,
             onSyncFinished: { result, timeline in
-                await HelioConnection.flushToHealth(result: result, timeline: timeline, store: store)
-            })
+                let appIsActive = Self.appIsActive   // as the sync ends, before the flush's awaits
+                if !result.interrupted { HelioWakeState().lastCompletedSync = Date() }
+                await HelioConnection.syncEnded(
+                    result, session: made.session, appIsActive: appIsActive,
+                    flush: { await HelioConnection.flushToHealth(result: result, timeline: timeline, store: store) },
+                    alertPass: { if let store { await HelioConnection.bodyAlertPass?(store) } })
+            },
+            onEvent: { [weak self] event in self?.handle(event) },
+            autoSyncOnConnect: syncOnConnect)
+        session.backgroundRunOwnsSyncs = backgroundRunAdoptsNewSessions
+        session.appInBackground = !Self.appIsActive
+        made.session = session
         self.session = session
         session.start()
     }
 
-    /// After every sync: the strap's timeline and nights through the ring's Health writer, carrying
-    /// the strap's `HKDevice` (decisions 10–17).
+    /// The end of every sync on a session this connection made.
+    /// - A background run that owns the sync flushes it and runs its own alert passes (#215 phase 4):
+    ///   nothing here.
+    /// - Otherwise the sync is flushed here. Review-236 S1: if it ended with the app not active (it
+    ///   started in front, the person left), ContentView's foreground hook may not run until the app is
+    ///   next opened, and since #236 a missed pass is a lost alert, not a late one. So the body-alert
+    ///   pass runs here too, once per sync (`StrapSyncAlertPass`, shared with that hook). Ending with the
+    ///   app active, the foreground hook runs it, and this path doesn't.
+    static func syncEnded(_ result: HelioSyncResult, session: HelioSession?, appIsActive: Bool,
+                          flush: @MainActor () async -> Void, alertPass: @MainActor () async -> Void) async {
+        guard !result.endedInBackgroundRun else { return }
+        await flush()
+        guard !appIsActive, let session, StrapSyncAlertPass.claim(session) else { return }
+        await alertPass()
+    }
+
+    /// The background runs' body-alert pass (`AppDelegate.evaluateBodyAlerts`), set at launch, so a
+    /// sync that ends in the background runs the same pass and no second implementation exists.
+    static var bodyAlertPass: (@MainActor (LocalStore) async -> Void)?
+
+    /// After every sync no background run owns: the strap's timeline and nights through the ring's
+    /// Health writer, carrying the strap's `HKDevice` (decisions 10–17). Logged as a foreground sync
+    /// only while the app is active; one that ends in the background (a restoration relaunch, a link
+    /// that came back while suspended) is logged as a background sync.
     static func flushToHealth(result: HelioSyncResult, timeline: SyncDeviceID, store: LocalStore?) async {
         let observability = ObservabilityStore()
-        observability.recordSyncOutcome(kind: .foreground, success: !result.interrupted && result.roundsFailed == 0,
+        let kind: TaskRecord.Kind = UIApplication.shared.applicationState == .active ? .foreground : .backgroundSync
+        observability.recordSyncOutcome(kind: kind, success: !result.interrupted && result.roundsFailed == 0,
                                         detail: "helio: \(result.roundsStored) round(s) stored, \(result.roundsFailed) failed, \(result.nights.count) night(s)")
-        guard let store, HealthKitWriter.isAvailable else { return }
+        guard let store else { return }
+        let flushStart = Date()
+        guard let flush = await healthFlush(timeline: timeline, store: store, nights: result.nights,
+                                            identity: result.identity,
+                                            nightsFinalized: result.nightsFinalized) else { return }
+        if flush.wroteAnything { observability.recordHealthWrite() }
+        // #233 item 5: a night this flush held back gets a refresh at its margin's end, kept so the
+        // app's own `schedule()` when it leaves the front doesn't replace it (review-225e SF-3).
+        StrapNightRefresh.record(StrapNightRefresh.aim(nights: result.nights, focusEndedAt: result.nightsFinalized,
+                                                       flushStartedAt: flushStart, afterWokeUp: false),
+                                 scheduler: BackgroundRefreshScheduler())
+    }
+
+    /// The strap's Apple Health pass, shared by the post-sync hook and the background run (#215
+    /// phase 4): its timeline's pending samples (HRV withheld, decision 14) and `nights`. nil when
+    /// Health isn't available on this device, or when `mayFlush` says no. `nightsFinalized` is the
+    /// time T Sleep Focus ended, if a Focus wake is behind this flush: the nights skip their 20-minute
+    /// quiet margin (as the ring's do on that wake) only if this flush starts within 30 minutes of T.
+    /// This is the one place that decides it (decision 31).
+    static func healthFlush(timeline: SyncDeviceID, store: LocalStore, nights: [HelioSleepSelection.Night],
+                            identity: WearableIdentity?, nightsFinalized: Date? = nil) async -> HealthKitWriter.FlushResult? {
+        guard HealthKitWriter.isAvailable else { return nil }
+        let finalized = SleepFocusFinalization.applies(focusEndedAt: nightsFinalized, flushStartsAt: Date())
         // Decision 28 (review-224 S3): record the identity the sync ended with, so this flush — and
         // any later one for these rows — names THIS strap even if the wearer has switched back to
         // the ring meanwhile. A strap that never passed the first-write guard writes nothing once
         // it's no longer chosen; its rows stay pending for its next sync.
-        if let identity = result.identity { ActiveWearable.shared.recordIdentity(identity) }
+        if let identity { ActiveWearable.shared.recordIdentity(identity) }
         guard mayFlush(timeline: timeline, strapChosen: ActiveDeviceChoiceStore.shared.isHelio,
                        wearable: ActiveWearable.shared) else {
             helioLog.notice("helio: Health flush skipped: switched away before the strap had an identity")
-            return
+            return nil
         }
         let flush = await HealthKitWriter().flushToHealth(
             store: store, device: timeline, mirroredKinds: HelioHealthPolicy.healthMirroredKinds(),
-            strapNights: result.nights.map(\.segments))
-        if flush.wroteAnything { observability.recordHealthWrite() }
+            strapNights: nights.map(\.segments), strapNightsFinalized: finalized)
         helioLog.notice("helio: Health flush samples=\(flush.samples, privacy: .public) sleep=\(flush.sleepSegments, privacy: .public) steps=\(flush.steps, privacy: .public) rhr=\(flush.restingDays, privacy: .public)")
+        return flush
     }
 
     /// Whether a strap sync's flush may write (decision 28, review-224 S3). Attribution follows the
@@ -312,6 +425,168 @@ final class HelioConnection: NSObject {
             writeQueue.removeFirst()
             flushWrites()
         }
+    }
+}
+
+/// Review-225e SF-1: opening the app syncs a strap session that is up and idle. A link that came back
+/// in the background (a run's teardown re-arm, a reconnect or restoration inside the wake gates, or a
+/// connect that completed while the app was `.inactive`) makes a session that doesn't sync on connect
+/// (decision 33), and `ContentView`'s activation reconnect returns early for a connected session; so
+/// without this, nothing synced the night until a pull-to-refresh. Mirrors the ring's
+/// `maybeAutoSyncOnReady` throttle, so Control Center or a banner flapping the app between `.inactive`
+/// and `.active` gives at most one sync.
+struct HelioActivationSync {
+    /// When this throttle last started a sync (in memory, as the ring's `lastForegroundSync`).
+    private(set) var lastStarted: Date?
+
+    /// Sync now: the session is `.ready` and idle (no sync, no find, no live heart rate), and neither
+    /// this throttle's last start nor the last completed strap sync (persisted, so a relaunch counts
+    /// it) is younger than `ForegroundAutoSync.interval`.
+    mutating func shouldSync(phase: HelioSession.Phase, syncing: Bool, finding: Bool, liveHeartRate: Bool,
+                             lastCompletedSync: Date?, now: Date) -> Bool {
+        guard phase == .ready, !syncing, !finding, !liveHeartRate else { return false }
+        if let last = [lastStarted, lastCompletedSync].compactMap({ $0 }).max(),
+           now >= last, now.timeIntervalSince(last) < ForegroundAutoSync.interval { return false }
+        lastStarted = now
+        return true
+    }
+}
+
+extension HelioConnection {
+    /// The app came to the front: the session's own reaction (Tier 0), then the activation sync. A sync
+    /// started here is a foreground sync: if the app leaves before it ends, `syncEnded` runs its alert
+    /// pass (review-236 S1).
+    static func becameActive(_ session: HelioSession, gate: inout HelioActivationSync, lastCompletedSync: Date?, now: Date) {
+        session.appDidBecomeActive()
+        if gate.shouldSync(phase: session.phase, syncing: session.syncing, finding: session.isFinding,
+                           liveHeartRate: session.liveHeartRateRunning, lastCompletedSync: lastCompletedSync, now: now) {
+            session.syncHistory(manual: false)
+        }
+    }
+}
+
+/// A session `makeSession` creates, for its own sync-end hook (the hook is built before the session).
+@MainActor
+private final class SessionReference {
+    weak var session: HelioSession?
+}
+
+/// Review-236 S1: one body-alert pass per strap sync, whichever path gets there first: the sync-end
+/// hook (`HelioConnection.syncEnded`, app not active) or ContentView's foreground hook.
+@MainActor
+enum StrapSyncAlertPass {
+    private static var claimed: (session: ObjectIdentifier, sync: Int)?
+
+    /// true the first time it's asked for the session's latest finished sync; false after that.
+    static func claim(_ session: HelioSession) -> Bool {
+        let key = (session: ObjectIdentifier(session), sync: session.syncsFinished)
+        if let claimed, claimed.session == key.session, claimed.sync == key.sync { return false }
+        claimed = key
+        return true
+    }
+
+    /// Tests only.
+    static func reset() { claimed = nil }
+}
+
+// MARK: - Session events (#233)
+
+extension HelioConnection {
+    /// What the session reports beyond a finished sync: breadcrumbs (and, for the woke-up event, a wake).
+    func handle(_ event: HelioSessionEvent) {
+        switch event {
+        case .syncStarted:
+            // A background run logs its own sync's wake; this is every other sync.
+            guard session?.backgroundRunOwnsSyncs != true else { return }
+            breadcrumbs.syncStarted(wake: Self.appIsActive ? .foreground : (restoredThisLaunch ? .restoration : .reconnect))
+        case .strapMessage(let endpoint, let opcode, let length):
+            breadcrumbs.strapMessage(endpoint: endpoint, opcode: opcode, length: length)
+            idleTrafficArrived()
+        case .strapNotification(let characteristic):
+            breadcrumbs.strapNotification(characteristic: characteristic.rawValue)
+            idleTrafficArrived()
+        case .wokeUp:
+            // Decision 33, §16.4: an opportunistic hint (🔴 whether the Helio sends it). It carries no
+            // time, so nothing is written from it: the catch-up fetches history and the night selection
+            // decides. Not a finalization either: the night still waits for its settle margin (decision
+            // 31 is about Sleep Focus only).
+            Self.wakeHandler(.strapEvent)
+        case .fellAsleep:
+            break   // a breadcrumb only (the strap-message line above)
+        }
+    }
+
+    /// Decision 35: something the strap sent on its own over the held link, with the app in the
+    /// background and no sync running, is a wake gated like a reconnect (`HelioWakePolicy`).
+    private func idleTrafficArrived() {
+        guard idleTraffic.shouldCheck(now: Date(), appIsActive: Self.appIsActive, syncing: session?.syncing == true,
+                                      runActive: activeBackgroundRuns > 0) else { return }
+        Self.wakeHandler(.idleTraffic)
+    }
+
+    /// The link came up while the app is in the background: the restoration's wake, or a reconnect.
+    private func linkCameBackInBackground() {
+        guard !Self.appIsActive else { return }
+        let wake: HelioWake = restorationWakePending ? .restoration : .reconnect
+        restorationWakePending = false
+        Self.wakeHandler(wake)
+    }
+
+    static var appIsActive: Bool { UIApplication.shared.applicationState == .active }
+
+    /// CoreBluetooth's error code for a drop, when there is one.
+    nonisolated static func errorCode(_ error: Error?) -> Int? {
+        guard let error else { return nil }
+        if let cb = error as? CBError { return cb.code.rawValue }
+        return (error as NSError).code
+    }
+
+    nonisolated static func describe(_ state: CBPeripheralState) -> String {
+        switch state {
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .disconnecting: return "disconnecting"
+        @unknown default: return "unknown"
+        }
+    }
+}
+
+// MARK: - HelioBackgroundLink
+
+extension HelioConnection: HelioBackgroundLink {
+    var strapTimeline: SyncDeviceID? {
+        if let session { return session.timeline }
+        return Self.savedPeripheralID.map {
+            SyncDeviceID.timeline(for: .zeppOS(model: HelioSession.displayName), identityID: $0)
+        }
+    }
+
+    func connectForBackground() -> Bool {
+        reconnectKnown()
+    }
+
+    func disconnectForBackground(cancelNow: Bool) {
+        // `disconnect()` drops the session before the link goes, so `didDisconnectPeripheral` can't see
+        // a busy strap any more: note it here, so nothing reconnects by itself (decision 7).
+        if session?.phase == .strapBusy { endedBusy = true }
+        disconnect(cancelNow: cancelNow)
+    }
+
+    /// Decision 33: after a run's teardown (out of time, or expired), arm a standing connect again, so
+    /// the strap coming back (or still in range) can wake the app later. Never after a quiet ending
+    /// (decision 7). The reconnect itself doesn't sync: `HelioWakePolicy`'s cooldown sees the run.
+    func rearmAfterTeardown() {
+        guard ActiveDeviceChoiceStore.persisted() == .helioStrap, !endedBusy, Self.hasSavedStrap else { return }
+        if peripheral == nil || peripheral?.state == .disconnected, state == .idle {
+            reconnectKnown()
+        } else {
+            rearmOnDisconnect = true   // the cancel is still on its way: re-arm when it lands
+        }
+    }
+
+    func noteBackgroundRunStarted(at date: Date) {
+        HelioWakeState().lastBackgroundRunStart = date
     }
 }
 
@@ -358,6 +633,18 @@ extension HelioConnection: CBCentralManagerDelegate {
                 case nil: break
                 }
             case .poweredOff:
+                // Decision 33: the link is gone (CoreBluetooth may not report the disconnect). Keep the
+                // wish to be connected: power-on reconnects (`pendingAction`), and that can wake the app.
+                if session != nil || wantConnection {
+                    session?.linkLost()
+                    session = nil
+                    characteristics = [:]
+                    writeQueue = []
+                    if wantConnection { pendingAction = .reconnect }
+                    breadcrumbs.bluetoothOff(standingConnectArmed: wantConnection,
+                                             upFor: linkUpAt.map { Date().timeIntervalSince($0) })
+                    linkUpAt = nil
+                }
                 state = .bluetoothOff
             case .unauthorized:
                 state = .bluetoothDenied
@@ -372,9 +659,14 @@ extension HelioConnection: CBCentralManagerDelegate {
             // Minimal restoration: re-adopt the saved strap's peripheral so its callbacks land here.
             // Nothing is sent to the radio yet (CoreBluetooth ignores calls before power-on); the
             // `.poweredOn` update resumes it (`resumeRestored`).
-            guard let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
-                  let saved = Self.savedPeripheralID,
-                  let restored = peripherals.first(where: { $0.identifier.uuidString == saved }) else { return }
+            restoredThisLaunch = true
+            let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
+            let saved = Self.savedPeripheralID
+            let match = peripherals.first(where: { $0.identifier.uuidString == saved })
+            breadcrumbs.restored(peripheralStates: peripherals.map { Self.describe($0.state) },
+                                 savedStrapState: match.map { Self.describe($0.state) })
+            guard let restored = match else { return }
+            restorationWakePending = true
             adopt(restored)
             wantConnection = true
             pendingAction = .resumeRestored
@@ -389,7 +681,10 @@ extension HelioConnection: CBCentralManagerDelegate {
         guard let peripheral, wantConnection, central?.state == .poweredOn else { return }
         if peripheral.state == .connected {
             state = .connected
+            linkUpAt = Date()
+            breadcrumbs.linkUp("restored, already connected", appActive: Self.appIsActive)
             if session == nil { characteristics = [:]; peripheral.discoverServices(nil) }
+            linkCameBackInBackground()
         } else {
             state = .connecting
             central?.connect(peripheral, options: nil)
@@ -416,9 +711,13 @@ extension HelioConnection: CBCentralManagerDelegate {
         MainActor.assumeIsolated {
             guard peripheral === self.peripheral else { return }
             state = .connected
+            linkUpAt = Date()
+            breadcrumbs.linkUp(restoredThisLaunch ? "connected after a restoration relaunch" : "connected",
+                               appActive: Self.appIsActive)
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
             characteristics = [:]
             peripheral.discoverServices(nil)
+            linkCameBackInBackground()
         }
     }
 
@@ -455,12 +754,21 @@ extension HelioConnection: CBCentralManagerDelegate {
             characteristics = [:]
             writeQueue = []
             stopRSSIUpdates()
+            let expected = !wantConnection
+            if rearmOnDisconnect {
+                rearmOnDisconnect = false
+                if ActiveDeviceChoiceStore.persisted() == .helioStrap, !endedBusy { wantConnection = true }
+            }
             if wantConnection, central.state == .poweredOn {
                 state = .connecting
                 central.connect(peripheral, options: nil)
             } else {
                 state = .idle
             }
+            breadcrumbs.linkDown(errorCode: Self.errorCode(error), expected: expected,
+                                 standingConnectArmed: state == .connecting,
+                                 upFor: linkUpAt.map { Date().timeIntervalSince($0) })
+            linkUpAt = nil
         }
     }
 }

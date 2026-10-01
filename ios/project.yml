@@ -93,7 +93,7 @@ targets:
         LSSupportsOpeningDocumentsInPlace: true
         # HealthKit auth strings (Phase 4) — required or the app crashes on request. Shown verbatim
         # in the iOS permission dialogs, so they use the user-facing name "OpenCircuit".
-        NSHealthShareUsageDescription: "OpenCircuit reads health metrics from your ring or strap to display them."
+        NSHealthShareUsageDescription: "OpenCircuit reads health metrics from your ring or strap to display them. If you turn on background syncing for the strap, it also reads your iPhone's step count, only to know when to sync."
         NSHealthUpdateUsageDescription: "OpenCircuit writes your ring's or strap's metrics into Apple Health."
         # Live Activities (workout modal): required for the app to start an ActivityKit Live Activity
         # showing live workout time / calories / heart rate on the Lock Screen + Dynamic Island.
@@ -136,7 +136,9 @@ targets:
     # capability in that account; automatic signing registers it on first build.
     entitlements:
       path: OpenCircuit/OpenCircuit.entitlements
-      properties: { com.apple.developer.healthkit: true }
+      # #233 (decision 33): HealthKit background delivery of the iPhone's step count, the strap's
+      # second wake. An entitlement, not a background mode (decision 26 holds).
+      properties: { com.apple.developer.healthkit: true, com.apple.developer.healthkit.background-delivery: true }
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.standardsoftwaresolutions.opencircuit

@@ -9,10 +9,18 @@ struct HelioDeviceInfoView: View {
     let connection: HelioConnection
     @State private var confirmDisconnect = false
     @State private var buzzError: String?
+    /// The ring's wake-up alarm. Its phone-side backup notification keeps going off while the strap
+    /// is chosen: it's the person's alarm, and nothing deletes it silently ("For Juan" item 7). Its
+    /// switch lives here too, so it stays visible and can be turned off without the ring's screens.
+    @State private var ringAlarm = RingAlarmController.shared.alarm
     /// Cached like `HelioSetupView`'s (review-224 N8): `hasKey` is a Keychain query, so it is read on
     /// appear and whenever the link or session phase moves, not on every render.
     @State private var hasKey = HelioKeyStore.shared.hasKey
     @State private var keyRejected = HelioKeyStore.shared.isRejected
+    @State private var diagnosticsURL: URL?
+    /// Decision 33's step-count wake (`HelioHealthWake`).
+    @State private var healthWake = HelioHealthWake.shared.isEnabled
+    @State private var diagnosticsError: String?
 
     private var session: HelioSession? { connection.session }
 
@@ -86,6 +94,45 @@ struct HelioDeviceInfoView: View {
                 Text(HelioSettingsCopy.savedOnStrap)
             }
 
+            if ringAlarm.isEnabled {
+                Section {
+                    Toggle("Your ring alarm's phone backup", isOn: Binding(
+                        get: { ringAlarm.backupNotification },
+                        set: { on in
+                            ringAlarm.backupNotification = on
+                            // The same setter the ring's alarm screen uses: it re-places or removes
+                            // the iOS notification. The alarm itself is left as it is.
+                            RingAlarmController.shared.alarm = ringAlarm
+                        }))
+                } header: {
+                    Text("Ring alarm")
+                } footer: {
+                    Text(ringAlarmFooter)
+                }
+            }
+
+            Section {
+                Toggle("Sync in the background more reliably", isOn: Binding(
+                    get: { healthWake },
+                    set: { on in
+                        healthWake = on
+                        Task { if on { await HelioHealthWake.shared.enable() } else { await HelioHealthWake.shared.disable() } }
+                    }))
+            } header: {
+                Text("Background sync")
+            } footer: {
+                Text("When your iPhone counts new steps, Apple Health can wake OpenCircuit about once an hour to sync the strap, so your data reaches Apple Health without opening the app. Turning this on asks to read your iPhone's step count.")
+            }
+
+            Section {
+                Button("Export diagnostics") { exportDiagnostics() }
+                if let diagnosticsError { Text(diagnosticsError).font(.caption).foregroundStyle(.secondary) }
+            } header: {
+                Text("Diagnostics")
+            } footer: {
+                Text("A text file of when OpenCircuit synced and connected to the strap, for troubleshooting. It holds no health values.")
+            }
+
             Section {
                 if connection.state == .connected || connection.state == .connecting {
                     Button("Disconnect", role: .destructive) { confirmDisconnect = true }
@@ -102,12 +149,38 @@ struct HelioDeviceInfoView: View {
         .onChange(of: connection.state) { _, _ in refreshKeyState() }
         .onChange(of: session?.phase) { _, _ in refreshKeyState() }
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { ringAlarm = RingAlarmController.shared.alarm }
         .confirmationDialog("Disconnect the strap?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
             Button("Disconnect", role: .destructive) { connection.disconnect() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("OpenCircuit stops syncing until you connect again.")
         }
+        .sheet(isPresented: Binding(get: { diagnosticsURL != nil }, set: { if !$0 { diagnosticsURL = nil } })) {
+            if let diagnosticsURL { ShareActivityView(url: diagnosticsURL) }
+        }
+    }
+
+    /// The strap's diagnostics bundle (#233): sync history and the link breadcrumbs, as a text file.
+    private func exportDiagnostics() {
+        diagnosticsError = nil
+        let report = DiagnosticsReport.buildForStrap(firmware: session?.firmwareVersion, hardware: session?.hardwareVersion)
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("opencircuit-strap-diagnostics-\(stamp).txt")
+        do {
+            try report.write(to: url, atomically: true, encoding: .utf8)
+            diagnosticsURL = url
+        } catch {
+            diagnosticsError = "Couldn't write diagnostics: \(error.localizedDescription)"
+        }
+    }
+
+    private var ringAlarmFooter: String {
+        let time = RingAlarmController.shared.nextFireDate()
+            .map { " at \($0.formatted(date: .omitted, time: .shortened))" } ?? ""
+        return ringAlarm.backupNotification
+            ? "Your ring's wake-up alarm still sends this iPhone a notification\(time) while the strap is chosen. The ring doesn't buzz."
+            : "Off: your ring's wake-up alarm won't send this iPhone a notification. The alarm itself is kept."
     }
 
     private var batteryText: String {
