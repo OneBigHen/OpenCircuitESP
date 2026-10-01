@@ -168,10 +168,19 @@ final class StrapWorkoutRecorder {
 
     static let staleAfter: TimeInterval = 5
 
-    /// A workout is running in THIS process: the strap's history syncs wait (`HelioSession.syncHistory`),
-    /// like the ring's drain waits for its workout (T6). In memory on purpose: a killed process leaves
-    /// nothing holding the link.
-    static var holdsStrapLink: Bool { running?.isRecording == true }
+    /// A workout owns the strap's link in THIS process: the strap's history syncs wait
+    /// (`HelioSession.syncHistory`), and no wake, background run or expiry may sync, tear down or
+    /// disconnect it (review-238 B1). In memory on purpose: a killed process leaves nothing holding it.
+    ///
+    /// It covers `.finishing` as well as `.active` (review-238b SF-1): writing the `HKWorkout` is a
+    /// whole `HKWorkoutBuilder` round trip, seconds for a long run with a route, and a background run
+    /// that started in that window used to tear the link down before `end()` could run the sync the
+    /// workout had held back. Every terminal state (`.finished`, `.idle`, `.error`) releases it, and
+    /// `end()` clears `running` on the way out whatever happens.
+    static var holdsStrapLink: Bool {
+        guard let running else { return false }
+        return running.state == .active || running.state == .finishing
+    }
     private static weak var running: StrapWorkoutRecorder?
 
     // MARK: Collaborators
@@ -402,12 +411,14 @@ final class StrapWorkoutRecorder {
     func end() async {
         guard state == .active, let ledger, let timeline else { return }
         state = .finishing
+        // The hold lasts until this returns, through the Health write (SF-1); released here whatever
+        // path leaves the function, so nothing can hold the strap for good.
+        defer { if Self.running === self { Self.running = nil } }
         let now = clock()
         // Ended while paused: the workout ends where it stopped running.
         let end = ledger.openPauseStart ?? now
         tickTask?.cancel()
         tickTask = nil
-        if Self.running === self { Self.running = nil }
         attached?.stopWorkoutHeartRate()
         attached?.heartRateObserver = nil
         attached = nil
@@ -438,9 +449,11 @@ final class StrapWorkoutRecorder {
                                                          route: hasRoute ? location.route : [], timeline: timeline))
         helioLog.notice("helio: workout ended, \(counted.count, privacy: .public) reading(s), saved to Health \(saved, privacy: .public)")
         landPendingHeartRate()
+        // `.finished` BEFORE the sync, so the hold is already released when `syncHistory` asks:
+        // otherwise the workout's own hold would defer the very sync it held back.
+        state = .finished(summary, savedToHealth: saved)
         // The sync the workout held back (T6's re-arm, for the strap).
         if let session = source(), session.ready, !session.syncing { session.syncHistory(manual: false) }
-        state = .finished(summary, savedToHealth: saved)
     }
 
     /// Discard the workout: nothing is written anywhere.

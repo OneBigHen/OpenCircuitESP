@@ -129,6 +129,11 @@ final class HelioConnection: NSObject {
     /// A strap was connected before. Reads UserDefaults only: it never creates the central.
     nonisolated static var hasSavedStrap: Bool { savedPeripheralID != nil }
 
+    /// The saved strap's timeline (`zeppos:<id>`), or nil when none was ever connected.
+    nonisolated static var savedTimeline: SyncDeviceID? {
+        savedPeripheralID.map { SyncDeviceID.timeline(for: .zeppOS(model: HelioSession.displayName), identityID: $0) }
+    }
+
     func setLocalStore(_ store: LocalStore) {
         localStore = store
     }
@@ -240,6 +245,9 @@ final class HelioConnection: NSObject {
     func forgetStrap() {
         disconnect()
         peripheral = nil
+        // Its timeline is retired: nothing will flush it again, so its workout exclusions go too
+        // (review-238b N-1). Its stored rows stay, as every other forget leaves them.
+        if let timeline = Self.savedTimeline { StrapWorkoutHealthExclusions.retire(timeline: timeline) }
         UserDefaults.standard.removeObject(forKey: Self.savedPeripheralKey)
     }
 
@@ -735,6 +743,11 @@ extension HelioConnection: CBCentralManagerDelegate {
             linkUpAt = Date()
             breadcrumbs.linkUp(restoredThisLaunch ? "connected after a restoration relaunch" : "connected",
                                appActive: Self.appIsActive)
+            // A different strap (or the same one re-added, which gets a new identity): the old
+            // timeline is retired, so its workout exclusions go (review-238b N-1).
+            if let previous = Self.savedTimeline, previous != peripheral.strapTimeline {
+                StrapWorkoutHealthExclusions.retire(timeline: previous)
+            }
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
             characteristics = [:]
             peripheral.discoverServices(nil)
@@ -853,5 +866,12 @@ extension HelioConnection: CBPeripheralDelegate {
             guard error == nil, rssiTask != nil else { return }
             rssi = RSSI.intValue
         }
+    }
+}
+
+extension CBPeripheral {
+    /// This peripheral's strap timeline (`zeppos:<identifier>`), the id every strap row is stored under.
+    var strapTimeline: SyncDeviceID {
+        SyncDeviceID.timeline(for: .zeppOS(model: HelioSession.displayName), identityID: identifier.uuidString)
     }
 }

@@ -79,6 +79,13 @@ struct StrapWorkoutHealthExclusions {
 
     func clear(device: SyncDeviceID) { defaults.removeObject(forKey: key(device)) }
 
+    /// A timeline that will never be flushed again: the strap was forgotten, or a new identity (a new
+    /// `zeppos:<id>`) replaced it. Its spans can no longer be pruned by a flush, so they go now
+    /// (review-238b N-1). Nothing else is removed: the rows themselves stay in the store.
+    static func retire(timeline: SyncDeviceID, _ defaults: UserDefaults = .standard) {
+        StrapWorkoutHealthExclusions(defaults).clear(device: timeline)
+    }
+
     private func save(_ intervals: [DateInterval], device: SyncDeviceID) {
         if intervals.isEmpty { return clear(device: device) }
         defaults.set(intervals.map { [$0.start.timeIntervalSince1970, $0.end.timeIntervalSince1970] }, forKey: key(device))
