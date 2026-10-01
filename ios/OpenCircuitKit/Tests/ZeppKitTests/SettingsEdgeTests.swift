@@ -38,6 +38,45 @@ final class SettingsEdgeTests: XCTestCase {
         XCTAssertEqual(writes(e.receive(hex("04 01 08 03 01 01 13 0b 01"), now: t)), [hex("05 08 03 00 01 13 0b 00")])
     }
 
+    /// review-240b S-1: a re-read that never answers after `06 01` keeps the setting's last READ
+    /// value, so its row stays visible; the group's read is recorded as timed out, and it is not
+    /// hidden for the connection. The written value is never shown as if it had been read.
+    func testAReReadTimeoutKeepsTheLastReadValue() throws {
+        var e = try readEditor()
+        let change = ZeppSettingsEditor.Change(setting: .stressMonitoring, from: .bool(true), to: .bool(false))
+        _ = try e.change(change, now: t)
+        _ = e.receive(hex("04 01 08 03 01 01 13 0b 01"), now: t)
+        _ = e.receive(hex("06 01"), now: t)
+        let out = e.tick(now: t.addingTimeInterval(5))
+        XCTAssertEqual(out.events, [.writeUnverified(change, failure: nil, .timedOut)])
+        XCTAssertEqual(out.messages, [], "no retry, no further read")
+        XCTAssertEqual(e.snapshot.value(.stressMonitoring), .bool(true), "the last read value, not the written one")
+        XCTAssertEqual(e.snapshot.availability(.stressMonitoring), .available)
+        XCTAssertFalse(e.snapshot.hidden.contains(.stressMonitoring))
+        XCTAssertEqual(e.readFailures[0x08], .timedOut)
+        XCTAssertFalse(e.isBusy)
+        // A later read of the group still reports it normally.
+        _ = try e.read(groups: [0x08], now: t)
+        _ = e.receive(healthFull, now: t)
+        XCTAssertEqual(e.snapshot.value(.stressMonitoring), .bool(true))
+        XCTAssertNil(e.readFailures[0x08])
+    }
+
+    /// The §17.5 half that still hides: a re-read that ANSWERS without the entry, or with it retyped.
+    func testAnAnsweredReReadWithoutTheEntryStillHidesIt() throws {
+        var e = try readEditor()
+        let change = ZeppSettingsEditor.Change(setting: .stressMonitoring, from: .bool(true), to: .bool(false))
+        _ = try e.change(change, now: t)
+        _ = e.receive(hex("04 01 08 03 01 01 13 0b 01"), now: t)
+        _ = e.receive(hex("06 01"), now: t)
+        let out = e.receive(hex("04 01 08 03 01 00"), now: t)
+        guard case .writeChecked(let check)? = out.events.first else { return XCTFail("\(out.events)") }
+        XCTAssertNil(check.readBack)
+        XCTAssertFalse(check.tookChange)
+        XCTAssertEqual(e.snapshot.availability(.stressMonitoring), .notReported)
+        XCTAssertTrue(e.snapshot.hidden.contains(.stressMonitoring))
+    }
+
     /// `mayWrite` only gates the write: plain reads and re-reads after a write already sent still run.
     func testMayWriteFalseNeverBlocksReadsOrTheReRead() throws {
         var e = try readEditor()

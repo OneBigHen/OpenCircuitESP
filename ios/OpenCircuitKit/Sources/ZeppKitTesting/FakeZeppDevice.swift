@@ -61,7 +61,8 @@ public final class FakeZeppDevice {
     public var deviceInfoReply: [UInt8]?
     /// Config read replies by exact request payload; any other read gets `configReply`.
     public var configReplies: [[UInt8]: [UInt8]] = [:]
-    /// Answers a config read before `configReplies` / `configReply` are consulted; nil = not handled.
+    /// Answers a config read before `configReplies` / `configReply` are consulted. nil = not handled
+    /// (fall back to those); an EMPTY array = the strap stays silent, so the phone's read times out.
     public var configReadHandler: (([UInt8]) -> [UInt8]?)?
     /// Status byte of the config write ack (`06 <status>`); nil = the strap never acks a write.
     public var configWriteAckStatus: UInt8? = 0x01
@@ -175,7 +176,10 @@ public final class FakeZeppDevice {
         case 0x0029 where p == [0x03]:
             return send(endpoint: 0x0029, batteryReply)
         case 0x000A where p.first == 0x03:
-            return send(endpoint: 0x000A, configReadHandler?(p) ?? configReplies[p] ?? configReply)
+            if let handled = configReadHandler?(p) {
+                return handled.isEmpty ? [] : send(endpoint: 0x000A, handled)
+            }
+            return send(endpoint: 0x000A, configReplies[p] ?? configReply)
         case 0x000A where p == [0x01]:
             return send(endpoint: 0x000A, configCapabilitiesReply)
         case 0x000A where p.first == 0x05:

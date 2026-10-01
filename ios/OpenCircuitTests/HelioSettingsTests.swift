@@ -380,12 +380,12 @@ final class HelioSettingsTests: XCTestCase {
         let (session, transport) = connect(device)
         session.readStrapSettings(groups: [0x08])
         transport.drain()
-        XCTAssertNil(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
         var reads = 0
         device.configReadHandler = { [strap = self.strap] request in
             reads += 1
-            return reads == 1 ? strap.answer(request) : [0x04, 0x02]
+            return reads == 1 ? strap.answer(request) : []   // the strap never answers the re-read
         }
+        XCTAssertNil(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
         transport.drain()
         XCTAssertEqual(device.configWrites.count, 1)
         now = now.addingTimeInterval(6)
@@ -411,6 +411,91 @@ final class HelioSettingsTests: XCTestCase {
         XCTAssertEqual(notice?.belongs(to: ZeppSetting.alerts), false)
         session.readStrapSettings(groups: [0x08])
         XCTAssertNil(session.settingsNotice, "a fresh read clears the last outcome")
+    }
+
+    /// N-a: with a switch that reads off and an allowed list that can't turn it on (empty, or off
+    /// only), the card must not point at Measurement: the row there is a disabled control.
+    func testTheTodayCardNeverPointsAtARowThatCannotTurnTheSwitchOn() {
+        for allowed in [[UInt8](), [0x00]] {
+            let device = makeStrap()
+            // All-day HR reads off with `allowed`; every other recording switch on, so it is the only
+            // warning. No arg 04, so the §17.7 HR requirement doesn't apply to anything here.
+            device.configReadHandler = { request in
+                guard request.count >= 4, request[0] == 0x03, request[1] == 0x01, request[2] == 0x08 else { return nil }
+                let hr: [UInt8] = [0x01, 0x10, 0x00, UInt8(allowed.count)] + allowed
+                return [0x04, 0x01, 0x08, 0x03, 0x01, 0x05] + hr
+                    + [0x11, 0x0b, 0x01, 0x12, 0x0b, 0x01, 0x13, 0x0b, 0x01, 0x31, 0x0b, 0x01]
+            }
+            let (session, transport) = connect(device)
+            session.readStrapSettings(groups: [0x08])
+            transport.drain()
+            let snapshot = try! XCTUnwrap(session.settingsEditor?.snapshot)
+            XCTAssertEqual(snapshot.value(.heartRateMonitoring), .byte(0), "allowed \(allowed)")
+            XCTAssertEqual(session.recordingWarnings.count, 1, "allowed \(allowed): the all-day HR warning shows")
+            // The same condition the row uses to enable its control.
+            let rowCanTurnItOn = snapshot.availability(.heartRateMonitoring) == .available
+                && snapshot.options(.heartRateMonitoring).contains { $0 != .byte(0) }
+            XCTAssertFalse(rowCanTurnItOn, "allowed \(allowed)")
+            XCTAssertFalse(session.canFixRecordingWarningsHere,
+                           "allowed \(allowed): the card must not send the user to a row that can't turn it on")
+        }
+    }
+
+    /// S-1: a re-read that never answers after `06 01` leaves the row visible, with the last READ
+    /// value (never the written one) and the "couldn't be read back" notice. It must not say "Saved".
+    func testAReReadThatNeverAnswersKeepsTheRowWithItsLastReadValue() {
+        let device = makeStrap()
+        device.onConfigWrite = { [strap = self.strap] in strap.apply($0) }
+        let (session, transport) = connect(device)
+        session.readStrapSettings(groups: [0x08])
+        transport.drain()
+        XCTAssertEqual(session.settingsEditor?.snapshot.value(.stressMonitoring), .bool(true))
+        // Set BEFORE the change: the fake answers a read synchronously inside the write, so the
+        // pre-read is call 1 and the re-read is call 2, which the strap leaves unanswered ([]).
+        var reads = 0
+        device.configReadHandler = { [strap = self.strap] request in
+            reads += 1
+            return reads == 1 ? strap.answer(request) : []
+        }
+        XCTAssertNil(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
+        transport.drain()
+        XCTAssertEqual(reads, 2, "the pre-read was answered and the re-read was not")
+        XCTAssertEqual(device.configWrites.count, 1)
+        now = now.addingTimeInterval(6)
+        session.tick(now: now)
+        transport.drain()
+
+        let snapshot = try! XCTUnwrap(session.settingsEditor?.snapshot)
+        XCTAssertEqual(snapshot.value(.stressMonitoring), .bool(true),
+                       "the row stays, with the last READ value, never the written one")
+        XCTAssertEqual(snapshot.availability(.stressMonitoring), .available)
+        XCTAssertFalse(snapshot.hidden.contains(.stressMonitoring))
+        XCTAssertEqual(session.settingsEditor?.readFailures[0x08], .timedOut)
+        XCTAssertEqual(session.settingsNotice?.text,
+                       "The strap confirmed the change, but the setting couldn't be read back. Reopen this screen to check.")
+        XCTAssertNotEqual(session.settingsNotice?.text, "Saved on the strap.")
+        XCTAssertEqual(session.settingsEditor?.isBusy, false)
+    }
+
+    /// The other half of §17.5: a re-read that ANSWERS without the entry still hides it.
+    func testAReReadThatAnswersWithoutTheSettingStillHidesIt() {
+        let device = makeStrap()
+        let (session, transport) = connect(device)
+        session.readStrapSettings(groups: [0x08])
+        transport.drain()
+        var reads = 0
+        device.configReadHandler = { [strap = self.strap] request in
+            reads += 1
+            // The re-read answers, well-formed and with constraints, but with no entries at all.
+            return reads == 1 ? strap.answer(request) : [0x04, 0x01, 0x08, 0x03, 0x01, 0x00]
+        }
+        XCTAssertNil(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
+        transport.drain()
+        let snapshot = try! XCTUnwrap(session.settingsEditor?.snapshot)
+        XCTAssertNil(snapshot.value(.stressMonitoring), "§17.5: missing on an answered re-read → hidden")
+        XCTAssertEqual(snapshot.availability(.stressMonitoring), .notReported)
+        XCTAssertTrue(snapshot.hidden.contains(.stressMonitoring))
+        XCTAssertNotEqual(session.settingsNotice?.text, "Saved on the strap.")
     }
 
     /// N3: the Today card points at Measurement only when that screen can change the switches now.

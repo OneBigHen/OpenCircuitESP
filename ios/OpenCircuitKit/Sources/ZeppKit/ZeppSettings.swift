@@ -217,7 +217,10 @@ public struct ZeppSettingsSnapshot: Equatable {
         }
     }
 
-    /// The setting's value is unknown now (a re-read timed out): show nothing stale for it.
+    /// The strap answered the re-read with something unparseable, so what it holds is unknown: show
+    /// nothing stale for this setting until the next read of its group re-merges it. NOT used for a
+    /// re-read that never answered (review-240b S-1), and not for one that answered without the entry
+    /// (that is `merge`'s §17.5 path, which also hides it for the connection).
     public mutating func forget(_ setting: ZeppSetting) {
         entries[setting] = nil
     }
@@ -520,8 +523,11 @@ public struct ZeppSettingsEditor {
             // §17.4 (b): no `06`. Re-read so the screen shows what the strap actually holds.
             return reRead(change, version: version, failure: .noAck, now: now)
         case .verifying(let change, _, let failure, _):
+            // A re-read that never ANSWERED says nothing about the setting: keep the last READ value
+            // (never the written one) and record the group's read as timed out, so the row stays
+            // visible with "couldn't be read back" (review-240b S-1). §17.5's "missing or retyped →
+            // hide" is for a re-read that answered, and only `merge` applies it.
             pending = .none
-            snapshot.forget(change.setting)
             readFailures[change.setting.group] = .timedOut
             return Output(events: [.writeUnverified(change, failure: failure, .timedOut)])
         }

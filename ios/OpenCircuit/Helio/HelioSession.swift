@@ -1309,8 +1309,12 @@ final class HelioSession: WearableSession {
         }
     }
 
-    /// Whether the Measurement screen can change every recording switch that reads off right now
-    /// (review-240 N3): the Today card only points there when it can.
+    /// Whether the Measurement screen can turn ON every recording switch that reads off right now
+    /// (review-240 N3, review-240b N-a): the Today card only points there when it can. That means the
+    /// HEALTH group was read on this connection, a change may be written now (`canChangeStrapSettings`),
+    /// and for each switch that reads off the strap both allows a change (`availability == .available`)
+    /// and offers a value other than off, which is the same condition the row uses to enable its
+    /// control. An empty or off-only allowed list can't turn anything on (§17.6).
     var canFixRecordingWarningsHere: Bool {
         guard canChangeStrapSettings, let editor = settingsEditor, editor.hasRead(group: ZeppConfig.healthGroup) else { return false }
         let snapshot = editor.snapshot
@@ -1318,7 +1322,10 @@ final class HelioSession: WearableSession {
             guard let value = snapshot.value(setting) else { return false }
             return value == .bool(false) || value == .byte(0)
         }
-        return off.allSatisfy { snapshot.availability($0) == .available }
+        return off.allSatisfy { setting in
+            snapshot.availability(setting) == .available
+                && snapshot.options(setting).contains { $0 != .bool(false) && $0 != .byte(0) }
+        }
     }
 
     private func cacheSettingsForDisplay() {

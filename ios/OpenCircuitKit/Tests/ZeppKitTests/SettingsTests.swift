@@ -443,7 +443,9 @@ final class SettingsTests: XCTestCase {
         out = e.tick(now: t0.addingTimeInterval(10))
         XCTAssertEqual(out.events, [.writeUnverified(change, failure: .noAck, .timedOut)])
         XCTAssertEqual(out.messages, [])
-        XCTAssertNil(e.snapshot.value(.highAccuracySleep), "unknown now: nothing stale is shown")
+        // review-240b S-1: a re-read that never answered keeps the last READ value, so the row stays.
+        XCTAssertEqual(e.snapshot.value(.highAccuracySleep), .bool(true), "the last read value, not the written one")
+        XCTAssertEqual(e.readFailures[0x08], .timedOut)
 
         var f = try readEditor()
         _ = try f.change(change, now: t0)
