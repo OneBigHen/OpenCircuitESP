@@ -197,7 +197,7 @@ public struct ZeppHealthConfigEditor {
                                arguments: ZeppHealthSetting.allCases.map(\.argument), includeConstraints: true)
     }
 
-    public enum ReadFailure: Equatable {
+    public enum ReadFailure: Swift.Error, Equatable {
         case timedOut
         /// Not a well-formed `04 01` HEALTH reply with constraints included.
         case malformed
