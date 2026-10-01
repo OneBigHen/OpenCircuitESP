@@ -985,6 +985,14 @@ to connect (phone Bluetooth off) so that every message seen is the strap's.
     one more than the version read. Record exactly what came back (an ack status, nothing, or a
     value silently kept). Also record whether HEALTH arg `01` is present and its allowed values.
     Promotes §17.1, §17.3, §17.4, §17.7 and §17.9.
+26. **Workouts** (§18). No capture can reveal the phone's start/pause/resume/end commands:
+    `0x0019` is encrypted with a session key that only the two ends can derive (§18.1). What can
+    be observed: (a) with an idle link held as in item 22 and workout detection on, walk briskly
+    until the strap auto-detects a workout: does anything arrive on `0x0019` (`11 01`, `11 04`,
+    something else) when it starts and ends? (b) Start a workout in the Zepp app, then turn the
+    phone's Bluetooth off and connect HelioVerify: does the strap send anything on `0x0019`?
+    Later, reconnect Zepp and record how long the workout kept running and whether Zepp could
+    still end it. Promotes §16.2 rows 8–9, §18.3 and §18.4.
 
 ### 10.1 Results from a real strap (2026-09-30)
 
@@ -1987,6 +1995,174 @@ a display, first check that HEALTH arg `01` reads `01` or `ff`.
 
 ---
 
+## 18. Workouts (#227)
+
+Scope: **controlling a workout from the phone** and what flows over the link while one runs. The
+strap's own workout records (fetch types `0x05` summary and `0x06` detail, §6.5) exist but are
+**out of scope** (#226 closed: OpenCircuit doesn't import the strap's workout data). This section
+doesn't specify them.
+
+### 18.1 How a Helio workout is controlled, and what is unknown
+
+| Fact | Tag / source |
+|---|---|
+| The Helio has no screen or button, so **every workout is started from the Zepp app**: Workout › Start Workout › pick the sport › "Start". The app's sports page then pauses, resumes and (with a long press) ends it. | 🟡 `AMZ-M p.3-4`, `AMZ-S` |
+| Amazfit says the strap supports "more than 27 sports modes", including running, walking, cycling, indoor sports and HYROX. | 🟡 `AMZ-M p.3` |
+| A workout can also start **without** the phone, by automatic workout detection (§19). | 🟡 `AMZ-M p.5` |
+| **Neither reference can start, pause, resume or end a workout from the phone.** Gadgetbridge's workout service only *reacts* to workouts the device starts on its own screen (`20`, `11 01`, `11 04`, §16.2 rows 8–9). It has no command in the other direction except phone GPS (§18.5). Its predecessor for pre-Zepp OS bands is the same. HelioCore has no workout code at all. | 🟡 `SVC/Workout:44-49,86-123`, `GB/service/devices/huami/HuamiSupport.java:1925-1945`; `HC` (no match for workout or sport) |
+| Gadgetbridge's maintainer confirms this for the Helio: it reads VO₂ max only from workouts, and a Helio user can't start one without the Zepp app. | 🟡 `GB#5986` (comments of 2026-04-17) |
+| So **the start, pause, resume and end commands are unknown** 🔴. The workout endpoint `0x0019` is encrypted on the Helio (§3.5), with a session key that needs one side's ECDH private key (§4.4). A passive capture of the Zepp app's traffic (a BLE sniffer or an Android HCI snoop log) therefore shows only ciphertext and **cannot reveal them**. | 🟢 encryption `HW:2026-09-30 (hw 0.132.27.2)`; 🔴 the commands |
+| Gadgetbridge can upload **workout templates** (structured intervals with pace, cadence, HR, speed or stroke-rate alerts) as a file to a watch's sport app, through the file-transfer endpoint `0x000D`. The user then starts them on the watch's screen. The Helio lists `0x000D`. 🔴 whether it accepts templates at all; a template doesn't start a workout either way. | 🟡 `GB/service/devices/huami/zeppos/workouts/ZeppOsWorkoutTemplateUploader.kt`, `ZeppOsWorkoutCodes.kt:62-68`; 🟢 `0x000D` listed `HW:2026-09-30 (hw 0.132.27.2)` |
+
+**Consequence for #227 (decision for Juan).** Starting the strap's own workout mode from
+OpenCircuit can't be built from this spec, because the commands aren't in any source we may
+read. Two routes exist:
+1. **A phone-side workout** (buildable now, 🔴 recommendation): OpenCircuit runs the workout
+   itself. Live HR comes from §7.1 at 1 Hz (🟢 on the Helio), with the phone's own location for
+   outdoor sports, and the result is written to HealthKit as a workout. The strap stays in normal
+   all-day mode. It records its usual per-minute activity, but makes no workout record, no
+   strap-side training effect or VO₂ max, and no per-workout buzz alerts.
+2. **The strap's workout mode**: needs a new source for the commands (§10 item 26 lists what can
+   and can't be observed). Until then, §18.2–§18.6 give what is known around it.
+
+### 18.2 Sport type codes
+
+One byte, the same code space in the `20` message (§16.2 row 8), in the workout-detection
+categories (§19) and in the strap's workout records. 🟡 `GB/service/devices/huami/zeppos/ZeppOsActivityType.java:24-150`
+(125 codes; the names here are plain-English descriptions):
+
+`01` outdoor running · `02` treadmill · `03` walking · `04` outdoor cycling · `05` free training ·
+`06` pool swimming · `07` open-water swimming · `08` indoor cycling · `09` elliptical ·
+`0a` outdoor cycling (a second code) · `0f` hiking · `11` tennis · `15` jump rope ·
+`17` rowing machine · `18` indoor fitness · `28` indoor walking · `29` curling · `2c` ice skating ·
+`2d` indoor ice skating · `30` BMX · `31` HIIT · `32` core training · `33` aerobic combo ·
+`34` strength training · `35` stretching · `36` stair climber · `37` flexibility · `39` stepper ·
+`3b` gymnastics · `3c` yoga · `3d` pilates · `40` fishing · `41` sailing · `42` rowing (on water) ·
+`43` skateboarding · `45` roller skating · `46` rock climbing · `47` ballet · `48` belly dance ·
+`49` square dance · `4a` street dance · `4b` ballroom dance · `4c` dance · `4d` zumba ·
+`4e` cricket · `4f` baseball · `50` bowling · `51` squash · `55` basketball · `56` softball ·
+`57` gateball · `58` volleyball · `59` table tennis · `5b` handball · `5c` badminton ·
+`5d` archery · `5e` horse riding · `5f` kendo · `60` karate · `61` boxing · `62` judo ·
+`63` wrestling · `64` tai chi · `65` muay thai · `66` taekwondo · `67` martial arts ·
+`68` kickboxing · `6d` aerobics · `6f` mass gymnastics · `70` latin dance · `71` jazz dance ·
+`72` cardio combat · `73` hula hoop · `74` frisbee · `75` darts · `76` kite flying ·
+`77` tug of war · `7a` beach volleyball · `81` parkour · `82` cross training · `83` race walking ·
+`84` driving · `8a` dragon boat · `8c` kayaking · `8f` spinning · `90` air walker · `91` wall ball ·
+`92` folk dance · `93` jujitsu · `94` fencing · `95` horizontal bar · `96` parallel bars ·
+`97` billiards · `98` sepak takraw · `99` dodgeball · `9a` water polo · `9b` finswimming ·
+`9c` artistic swimming · `9d` snorkeling · `9e` ice hockey · `9f` swing · `a0` shuffleboard ·
+`a1` table football · `a2` shuttlecock · `a3` motion-sensing game · `a4` futsal · `a5` hip hop ·
+`a6` pole dance · `a7` battle rope · `a8` breaking · `a9` hacky sack · `aa` bocce · `ab` jai alai ·
+`ac` flowriding · `ad` chess · `ae` checkers · `af` weiqi (go) · `b0` bridge · `b1` board game ·
+`b8` bouldering · `b9` modern dance · `bc` floorball · `bd` esports · `bf` soccer · `ce` e-bike.
+
+| Fact | Tag / source |
+|---|---|
+| **Which of these the Helio supports is not listed anywhere.** A Helio user's Zepp-started workouts included outdoor running, a "floor climbing machine" and yoga, and Gadgetbridge met an **unmapped code `0xdf`** in that sync: so the list above is incomplete for the Helio (HYROX and the climbing machine are plausible candidates for codes missing from it, 🔴). | 🟡 `GB#6218` (2026-05-31) |
+| Treat an unknown code as "other workout"; never drop it. | 🔴 recommendation |
+| **Pitfall:** pre-Zepp OS bands used a different status numbering on their workout characteristic (start `02`, pause `03`, resume `04`, end `05`, `GB/service/devices/huami/HuamiWorkoutStatus.java:20-23`). On Zepp OS `11 04` means **end**. Don't mix the two. | 🟡 |
+
+### 18.3 What the link carries during a workout
+
+| Flow | What is known | Tag / source |
+|---|---|---|
+| strap → phone, workout status | `11 01` started, `11 04` ended on `0x0019`, when the device runs the workout itself (§16.2 row 9). 🔴 whether the Helio sends them for a phone-started or auto-detected workout; no pause/resume status is known | 🟡 `SVC/Workout:45-49,104-118` |
+| strap → phone, live values | The Zepp app shows and speaks live metrics (it announces "whole kilometers, pace, and heart rate") and switches itself to paused when "auto pause" detects a stop. So the strap streams *something* during a workout. **Its format is unknown.** | 🟡 `AMZ-M p.4`; 🔴 the format |
+| live HR, independent of workouts | the §7.1 stream (`04 01`, then `04 02` every second) works whether or not a workout runs. That is all route 1 of §18.1 needs | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` |
+| strap's own record | the strap records the workout at about 1 Hz (an exported Zepp file shows one HR value per second) and keeps it for a later fetch (`0x05`/`0x06`, out of scope) | 🟡 `GB#5617` (comment of 2025-12-14) |
+
+### 18.4 When the link drops mid-workout
+
+| Fact | Tag / source |
+|---|---|
+| Amazfit tells the user to keep the device connected during the workout. It adds that the workout's detailed metrics are computed in real time **on the device**, so the link must be up **when the workout is ended**: "Otherwise, the device cannot be notified to end the workout." | 🟡 `AMZ-M p.4` |
+| So a dropped link does **not** end the workout: the strap keeps recording until it is told to end. 🔴 whether it ends on its own after some time, or when its battery runs low. | 🟡 (inference from the above); 🔴 the timeout |
+| Gadgetbridge has no handling: it reacts to `11 04` when (if) it arrives. | 🟡 `SVC/Workout:178-187` |
+
+**OpenCircuit rule** (🔴 recommendation, for route 2): persist "a strap workout may be running"
+across process deaths, like the find-stop flag of the background branch. On every reconnect while
+it is set, ask the user whether to end the workout or keep it running. Never assume it ended.
+Route 1 has no such state: the strap isn't in workout mode.
+
+### 18.5 Must the phone send GPS or anything else?
+
+| Fact | Tag / source |
+|---|---|
+| The Helio has no GPS of its own (no GPS feature or setting in Amazfit's documents). It does compute VO₂ max, which needs an **outdoor** run or cross-country run of at least 10 minutes and uses "heart rate and speed". So for outdoor sports the strap must get speed or position from the phone during the workout. | 🟡 `AMZ-M p.3-8`; 🔴 the inference about speed from the phone |
+| The only phone → strap workout message in any reference is **phone GPS** on `0x0019`. Gadgetbridge sends it after a device-started workout announced that it needs GPS (`20` with byte `[2]` = `01`), and only if the user allowed it. | 🟡 `SVC/Workout:44,125-166` |
+| Layout: `04`, `00` (unexplained), then a u32 LE **flags** word, then the optional parts in this order: bit `0x00000001` → a 1-byte **GPS status**: `01` acquired, `02` searching, `04` disabled; bit `0x00040000` → a 31-byte **position**. | 🟡 `SVC/Workout:140-150`, `GB/service/devices/huami/HuamiUtils.java:103-150`, `GB/service/devices/huami/HuamiPhoneGpsStatus.java:23-25` |
+| Position (31 bytes, LE): i32 longitude × 3 000 000; i32 latitude × 3 000 000; i32 speed (Gadgetbridge writes whole m/s × 10, i.e. it truncates to whole m/s first; 🔴 the unit is probably 0.1 m/s); i32 altitude in cm; i64 fix time in Unix **milliseconds**; i32 `ff ff ff ff` (always); i16 `00 00` (🔴 perhaps bearing); u8 `00`. | 🟡 `HuamiUtils.java:130-147` |
+| Gadgetbridge's sequence: on "needs GPS" it sends status **searching** (no position) and starts phone location at 1 s. It then sends each fix; the first fix after a gap of more than 5 s also carries status **acquired**. If phone GPS is disabled, it sends status **disabled** once. It stops location when the workout ends. | 🟡 `SVC/Workout:125-138,152-166,178-187` |
+| 🔴 whether the Helio uses this message at all, and whether the Zepp app sends it (or speed only) for a Helio outdoor run. | 🔴 |
+
+Nothing else is known to be required: the profile (§5.4, user info) feeds the strap's maths
+(TE and VO₂ max use "personal information", `AMZ-M p.6-7`) and is already sent at setup.
+
+### 18.6 Who computes the final metrics
+
+The strap does. Amazfit says the detailed workout metrics, training effect, training load, recovery
+time and VO₂ max are calculated by the device (`AMZ-M p.4-8`). The strap keeps its own record, and
+the Zepp app syncs it. OpenCircuit doesn't fetch it (#226). With route 1 of §18.1, OpenCircuit
+computes its own workout totals from the live HR and phone location, and must label them as its
+own.
+
+### 18.7 Per-workout alerts
+
+| Alert | Who acts | Configured | Tag / source |
+|---|---|---|---|
+| **High heart rate**: the strap vibrates when HR exceeds the maximum set for this workout | strap | per workout, on the Zepp app's exercise preparation page; the settings vary by sport | 🟡 `AMZ-M p.4-5` |
+| **Pace alert** and **speed reminder**: the strap vibrates when the speed is below the set minimum | strap | same | 🟡 `AMZ-M p.4-5` |
+| voice announcements, metronome, auto-pause | **the app**, not the strap | same | 🟡 `AMZ-M p.4` |
+
+🔴 **How these settings reach the strap is unknown**: probably inside the unknown start command, or
+as a workout-group setting. The WORKOUT config group (`09`) args Gadgetbridge knows are GPS,
+workout detection (§19), pool length and HR zones; none is a per-workout alert (`SVC/Config:541-552`).
+For route 1, OpenCircuit can still buzz on its own HR limit with the find-device pulse (§13.2).
+That fires only while the link is up and the app is running, and needs no persistent setting.
+
+### 18.8 Worked example L: an outdoor run, as far as it can be constructed
+
+What can be built today is route 1 (§18.1) plus, for reference, the phone-GPS message that a
+strap-mode outdoor run would use. **No start command appears below, because none is known; no
+bytes have been invented for it.** `OC-vec` for the GPS framing.
+
+```
+(route 1: phone-side outdoor run)
+→ [0x001D] 04 01                     start live HR (§7.1); enable notify on 0x2A37 first
+→ [0x001D] 04 02                     every second while the run lasts
+← [0x2A37] 00 8f                     HRS frame, u8 HR = 143 bpm (made-up)
+   … phone location from the phone's own GPS …
+→ [0x001D] 04 00                     run ended: stop live HR, unsubscribe 0x2A37
+   → write an HKWorkout (running, outdoor) with OpenCircuit's own totals
+
+(route 2, for reference only: phone GPS to a strap that asked for it)
+   START COMMAND: UNKNOWN (§10 item 26)
+→ [0x0019] 04 00 01 00 00 00 02      flags 0x00000001 (status only), status 02 = searching
+→ [0x0019] 04 00 01 00 04 00 01  18 74 56 ff  60 22 3a 07  1e 00 00 00  e8 fd 00 00
+           c0 c0 5e f6 a0 01 00 00  ff ff ff ff  00 00  00
+                                     flags 0x00040001 (status + position), status 01 = acquired;
+                                     lon −3.703800° (−11 111 400), lat 40.416800° (121 250 400),
+                                     speed 30 (3 m/s), altitude 65 000 cm,
+                                     fix time 1 790 839 800 000 ms = 2026-10-01T07:30:00Z
+← [0x0019] 11 01                     workout started (only if the Helio sends it, §18.3)
+   END COMMAND: UNKNOWN
+← [0x0019] 11 04                     workout ended
+```
+
+The 38-byte position message, encrypted on `0x0019` with the session of worked example C, as the
+connection's 8th message (handle `0x08`), sequence number `0x2933d236`: `OC-vec`
+
+| Step | Bytes |
+|---|---|
+| message key = session key XOR `0x08` | `84 4d 66 0e 2b 9a 27 a3 7b c6 09 a8 c5 d5 e6 f7` |
+| CRC-32 over `P ‖ S` (`P` = the 38 bytes above, `S` = `36 d2 33 29`) | `0x3370b66e` → `6e b6 70 33` |
+| padded plaintext (38 + 4 + 4 = 46 → 48) | `P`, `36 d2 33 29`, `6e b6 70 33`, `00 00` |
+| AES-128-ECB(message key) | `88 54 5c 90 c5 6b 79 b8 aa bc 1a 6a 8b 74 d9 5c dd cd 04 84 ce c7 15 fe 8a 67 69 60 69 1d 29 89 5f 3d 07 75 38 ba bf 17 e5 01 a5 f5 c2 c4 39 30` |
+| one chunk at MTU 247 (59 B) | `03 0f 00 08 00 26 00 00 00 19 00` + the 48 ciphertext bytes |
+| next sequence number | `0x2933d237` |
+
+---
+
 ## Changelog
 
 - 2026-09-30: first version (zepp-spec agent, #215 Phase 0). All claims 🟡/🔴.
@@ -2010,3 +2186,8 @@ a display, first check that HEALTH arg `01` reads `01` or `ff`.
 - 2026-10-01: parity addendum, part 2 (zepp-parity-spec agent, #228 #229 #230): §17, config
   writes: message, version echo, ack, rejected writes, re-read, constraint validation, setting
   dependencies; worked examples I–K; capture item 25.
+- 2026-10-01: parity addendum, part 3 (zepp-parity-spec agent, #227): §18, workout control:
+  how Helio workouts are started (the phone-side commands are in no source we may read, so they
+  stay unknown), sport type codes, the link during a workout and when it drops, phone GPS,
+  per-workout alerts; worked example L; capture item 26. The workout record fetch types
+  `0x05`/`0x06` stay out of scope (#226).
