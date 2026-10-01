@@ -215,7 +215,12 @@ struct ContentView: View {
                 syncEnd: HelioSyncEndActions(
                     reloadTrends: { Task { await loadTrends(.syncFinished) } },
                     refreshObservability: { refreshObservability() },
-                    evaluateHealthAlerts: { evaluateHealthAlerts() },
+                    // Review-236 S1: a sync that ended in the background already had its pass from
+                    // the connection's sync-end hook; one pass per sync (`StrapSyncAlertPass`).
+                    evaluateHealthAlerts: {
+                        if let strap = helioSession, !StrapSyncAlertPass.claim(strap) { return }
+                        evaluateHealthAlerts()
+                    },
                     // With the strap chosen only the bedtime reminder can fire (`ringReminders`).
                     evaluateReminders: { evaluateReminders(includeSedentary: false) }),
                 // A switch made from Profile ▸ Device: hand the store to the newly chosen driver.

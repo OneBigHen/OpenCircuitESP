@@ -807,6 +807,66 @@ final class HelioSessionTests: XCTestCase {
         session.appDidEnterBackground()
         XCTAssertEqual(transport.notifyChanges.last?.1, false)
     }
+
+    // MARK: review-236 S1: a strap sync that ends in the background gets its alert pass
+
+    /// The sync ends with the app not active (it started in front, the person left): the connection's
+    /// sync-end hook flushes and runs the body-alert pass, once. ContentView's foreground hook, if it
+    /// fires for the same sync, finds the pass taken.
+    func testASyncThatEndsWithTheAppInactiveGetsExactlyOneAlertPass() async throws {
+        StrapSyncAlertPass.reset()
+        let rig = connect(makeStrap(), store: try makeStore())
+        let result = try XCTUnwrap(rig.session.lastSyncResult)
+        XCTAssertEqual(rig.session.syncsFinished, 1)
+        var flushes = 0, passes = 0
+        await HelioConnection.syncEnded(result, session: rig.session, appIsActive: false,
+                                        flush: { flushes += 1 }, alertPass: { passes += 1 })
+        XCTAssertEqual(flushes, 1)
+        XCTAssertEqual(passes, 1)
+        XCTAssertFalse(StrapSyncAlertPass.claim(rig.session), "the foreground hook skips this sync's pass")
+        await HelioConnection.syncEnded(result, session: rig.session, appIsActive: false, flush: {}, alertPass: { passes += 1 })
+        XCTAssertEqual(passes, 1, "never two for one sync")
+
+        // The next sync on the same session gets its own pass.
+        clock = clock.addingTimeInterval(600)
+        rig.session.syncHistory(manual: true)
+        rig.transport.drain()
+        XCTAssertEqual(rig.session.syncsFinished, 2)
+        await HelioConnection.syncEnded(try XCTUnwrap(rig.session.lastSyncResult), session: rig.session, appIsActive: false,
+                                        flush: {}, alertPass: { passes += 1 })
+        XCTAssertEqual(passes, 2)
+    }
+
+    /// Ending with the app active: the flush, and no pass from this path (ContentView's hook runs it).
+    /// And when the foreground hook got there first, this path adds none.
+    func testASyncThatEndsWithTheAppActiveGetsNoPassFromThisPath() async throws {
+        StrapSyncAlertPass.reset()
+        let rig = connect(makeStrap(), store: try makeStore())
+        let result = try XCTUnwrap(rig.session.lastSyncResult)
+        var flushes = 0, passes = 0
+        await HelioConnection.syncEnded(result, session: rig.session, appIsActive: true,
+                                        flush: { flushes += 1 }, alertPass: { passes += 1 })
+        XCTAssertEqual(flushes, 1)
+        XCTAssertEqual(passes, 0)
+        XCTAssertTrue(StrapSyncAlertPass.claim(rig.session), "the foreground hook runs this sync's pass")
+        await HelioConnection.syncEnded(result, session: rig.session, appIsActive: false, flush: {}, alertPass: { passes += 1 })
+        XCTAssertEqual(passes, 0, "the foreground hook already ran it")
+    }
+
+    /// A sync a background run owns: nothing from this path; the run flushes and runs its own passes.
+    func testASyncABackgroundRunOwnsGetsNothingFromThisPath() async throws {
+        StrapSyncAlertPass.reset()
+        let rig = connect(makeStrap(), store: try makeStore())
+        var result = try XCTUnwrap(rig.session.lastSyncResult)
+        result.endedInBackgroundRun = true
+        var flushes = 0, passes = 0
+        for active in [false, true] {
+            await HelioConnection.syncEnded(result, session: rig.session, appIsActive: active,
+                                            flush: { flushes += 1 }, alertPass: { passes += 1 })
+        }
+        XCTAssertEqual(flushes, 0)
+        XCTAssertEqual(passes, 0)
+    }
 }
 
 // MARK: - Key store, device choice

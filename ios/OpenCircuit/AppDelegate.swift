@@ -62,6 +62,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // runs the same alert passes as the strap's BGTask run. A static hook: setting it constructs
         // nothing, so a ring user's launch is unchanged.
         MainActor.assumeIsolated {
+            // Review-236 S1: a strap sync that ends in the background (it started in front) runs the
+            // same body-alert pass as these runs.
+            HelioConnection.bodyAlertPass = { store in await Self.evaluateBodyAlerts(store: store) }
             HelioWakeCoordinator.afterRun = { run in
                 if let at = run.refreshAt { BackgroundRefreshScheduler().scheduleRefresh(notBefore: at) }
                 // A coalesced run's alert passes are the other run's (#233 item 3).

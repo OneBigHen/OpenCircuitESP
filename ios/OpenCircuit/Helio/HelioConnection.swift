@@ -296,23 +296,47 @@ final class HelioConnection: NSObject {
         // assertion and with the BGTask run's budget and teardown. In front, and for a background run's
         // own connect, a session syncs on connect as before.
         let syncOnConnect = Self.appIsActive || backgroundRunAdoptsNewSessions
+        let made = SessionReference()
         let session = HelioSession(
             transport: self, identityID: peripheral.identifier.uuidString, model: .helioStrap,
             key: keyStore.load(), keyStore: keyStore, sink: store.map { HelioStoreSink(store: $0) },
             findState: findState,
             onSyncFinished: { result, timeline in
+                let appIsActive = Self.appIsActive   // as the sync ends, before the flush's awaits
                 if !result.interrupted { HelioWakeState().lastCompletedSync = Date() }
-                // A background run flushes and logs the syncs it owns itself (#215 phase 4).
-                guard !result.endedInBackgroundRun else { return }
-                await HelioConnection.flushToHealth(result: result, timeline: timeline, store: store)
+                await HelioConnection.syncEnded(
+                    result, session: made.session, appIsActive: appIsActive,
+                    flush: { await HelioConnection.flushToHealth(result: result, timeline: timeline, store: store) },
+                    alertPass: { if let store { await HelioConnection.bodyAlertPass?(store) } })
             },
             onEvent: { [weak self] event in self?.handle(event) },
             autoSyncOnConnect: syncOnConnect)
         session.backgroundRunOwnsSyncs = backgroundRunAdoptsNewSessions
         session.appInBackground = !Self.appIsActive
+        made.session = session
         self.session = session
         session.start()
     }
+
+    /// The end of every sync on a session this connection made.
+    /// - A background run that owns the sync flushes it and runs its own alert passes (#215 phase 4):
+    ///   nothing here.
+    /// - Otherwise the sync is flushed here. Review-236 S1: if it ended with the app not active (it
+    ///   started in front, the person left), ContentView's foreground hook may not run until the app is
+    ///   next opened, and since #236 a missed pass is a lost alert, not a late one. So the body-alert
+    ///   pass runs here too, once per sync (`StrapSyncAlertPass`, shared with that hook). Ending with the
+    ///   app active, the foreground hook runs it, and this path doesn't.
+    static func syncEnded(_ result: HelioSyncResult, session: HelioSession?, appIsActive: Bool,
+                          flush: @MainActor () async -> Void, alertPass: @MainActor () async -> Void) async {
+        guard !result.endedInBackgroundRun else { return }
+        await flush()
+        guard !appIsActive, let session, StrapSyncAlertPass.claim(session) else { return }
+        await alertPass()
+    }
+
+    /// The background runs' body-alert pass (`AppDelegate.evaluateBodyAlerts`), set at launch, so a
+    /// sync that ends in the background runs the same pass and no second implementation exists.
+    static var bodyAlertPass: (@MainActor (LocalStore) async -> Void)?
 
     /// After every sync no background run owns: the strap's timeline and nights through the ring's
     /// Health writer, carrying the strap's `HKDevice` (decisions 10–17). Logged as a foreground sync
@@ -392,6 +416,30 @@ final class HelioConnection: NSObject {
             flushWrites()
         }
     }
+}
+
+/// A session `makeSession` creates, for its own sync-end hook (the hook is built before the session).
+@MainActor
+private final class SessionReference {
+    weak var session: HelioSession?
+}
+
+/// Review-236 S1: one body-alert pass per strap sync, whichever path gets there first: the sync-end
+/// hook (`HelioConnection.syncEnded`, app not active) or ContentView's foreground hook.
+@MainActor
+enum StrapSyncAlertPass {
+    private static var claimed: (session: ObjectIdentifier, sync: Int)?
+
+    /// true the first time it's asked for the session's latest finished sync; false after that.
+    static func claim(_ session: HelioSession) -> Bool {
+        let key = (session: ObjectIdentifier(session), sync: session.syncsFinished)
+        if let claimed, claimed.session == key.session, claimed.sync == key.sync { return false }
+        claimed = key
+        return true
+    }
+
+    /// Tests only.
+    static func reset() { claimed = nil }
 }
 
 // MARK: - Session events (#233)
