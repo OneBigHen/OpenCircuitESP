@@ -124,10 +124,15 @@ public enum IntradaySeries {
     /// The bucket widths a series may use, narrowest first.
     public static let widths: [TimeInterval] = [5, 10, 15, 20, 30, 60].map { $0 * 60 }
 
-    /// The narrowest of `widths` at least twice the series' own median spacing, so a device reading
+    /// The narrowest of `widths` at least twice the series' own typical spacing, so a device reading
     /// at its usual cadence (with jitter under half a step) leaves no bucket empty, and an empty
     /// bucket really is a gap. A per-minute strap gets 5 minutes; a 5-minute cadence gets 10.
     /// Sparser than every 30 minutes: an hour. Fewer than two readings: the narrowest.
+    ///
+    /// "Typical" is the 90th percentile of the spacings, not the median: one device can read at two
+    /// cadences in a day (the ring every 5 minutes asleep and every 15 awake), and a median set by the
+    /// denser one would leave the sparser one's hours as scattered dots. A real outage (a strap off
+    /// charging for an hour) is one spacing among hundreds, so it never sets the width.
     public static func bucketWidth(for times: [Date]) -> TimeInterval {
         let sorted = times.sorted()
         var gaps: [TimeInterval] = []
@@ -137,8 +142,8 @@ public enum IntradaySeries {
         }
         guard !gaps.isEmpty else { return widths[0] }
         gaps.sort()
-        let median = gaps[gaps.count / 2]
-        return widths.first { $0 >= 2 * median } ?? widths[widths.count - 1]
+        let typical = gaps[Int((Double(gaps.count - 1) * 0.9).rounded(.down))]
+        return widths.first { $0 >= 2 * typical } ?? widths[widths.count - 1]
     }
 
     /// `points` in buckets of `width` on a grid aligned to `origin` (the day's start), each bucket

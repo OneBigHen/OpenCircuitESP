@@ -24,11 +24,29 @@ enum DemoData {
     /// screenshot run can capture below the fold without UI automation.
     static let scrollKey = "OCDemoScrollY"
 
+    /// `-OCDemoStrapSwitch YES` (#239): on top of the ring demo, a SYNTHETIC Helio Strap chosen at
+    /// 10:30 today, so the per-device day charts and the strap's stress can be reviewed by screenshot.
+    /// The switch is an in-memory override of `LocalStore.ownershipLog` for this launch only: nothing
+    /// is persisted, and the app's real device choice is untouched.
+    static let strapSwitchKey = "OCDemoStrapSwitch"
+    static var isStrapSwitchRequested: Bool { isRequested && UserDefaults.standard.bool(forKey: strapSwitchKey) }
+    static let demoStrapTimeline = SyncDeviceID.timeline(for: .zeppOS(model: "Helio Strap"),
+                                                         identityID: "00000000-0000-4000-8000-00000000DE70")
+
+    static func demoStrapSwitch(now: Date, calendar: Calendar = .current) -> Date {
+        calendar.startOfDay(for: now).addingTimeInterval(10.5 * 3600)
+    }
+
     @MainActor
     static func seedIfRequested(_ context: ModelContext, now: Date = Date()) {
         guard isRequested else { return }
         scheduleScrollIfRequested()
+        if isStrapSwitchRequested {
+            let log = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: demoStrapSwitch(now: now))])
+            LocalStore.ownershipLog = { log }
+        }
         guard holdsNoSeedableRows(context) else { return }
+        if isStrapSwitchRequested { seedDemoStrap(context, now: now) }
 
         let cal = Calendar.current
         let today = cal.startOfDay(for: now)
@@ -108,6 +126,29 @@ enum DemoData {
         try? context.save()
     }
 
+    /// The synthetic strap's afternoon: per-minute heart rate and all-day stress from the switch to
+    /// now, with the strap off charging for 50 minutes (a hole in the charts, never a line across it),
+    /// and every seventh stress minute without a reading. Smooth formulas only, like the ring's.
+    @MainActor
+    private static func seedDemoStrap(_ context: ModelContext, now: Date) {
+        let device = demoStrapTimeline.rawValue
+        let start = demoStrapSwitch(now: now)
+        let charging = DateInterval(start: start.addingTimeInterval(90 * 60), duration: 50 * 60)
+        var t = start, k = 0
+        while t < now {
+            defer { t = t.addingTimeInterval(60); k += 1 }
+            if charging.contains(t) { continue }
+            let x = Double(k)
+            let hr = 71 + 9 * sin(x / 23) + 4 * sin(x / 5.3)
+            context.insert(StoredSample(kindRaw: MetricKind.heartRate.rawValue, start: t, end: t, value: hr.rounded(),
+                                        deviceID: device))
+            guard k % 7 != 6 else { continue }
+            let stress = 38 + 22 * sin(x / 41) + 8 * sin(x / 7.7)
+            context.insert(StoredSample(kindRaw: MetricKind.stress.rawValue, start: t, end: t,
+                                        value: max(0, min(100, stress.rounded())), deviceID: device))
+        }
+    }
+
     /// True only when the store holds no row of ANY type this seeder writes. A single real sample,
     /// step delta, temperature, daily total or night is enough to refuse: seeded `StoredSample`s are
     /// what `LocalStore.pendingHealthSamples()` hands to the Health flush, so mixing them into real
@@ -175,9 +216,10 @@ enum DemoData {
 #if DEBUG && targetEnvironment(simulator)
 import SwiftUI
 
-/// DEBUG-only: `-OCDemoScreen metric-hrv | pastNights | liveHR` presents that screen full-screen on
-/// launch, so a screenshot run can reach it without UI automation. `liveHR` renders the live-measure
-/// card's composition over a SYNTHETIC buffer — a simulator has no ring to measure.
+/// DEBUG-only: `-OCDemoScreen metric-hrv | trend-hrv | timeline | day-stress | pastNights | liveHR`
+/// presents that screen full-screen on launch, so a screenshot run can reach it without UI
+/// automation. `liveHR` renders the live-measure card's composition over a SYNTHETIC buffer — a
+/// simulator has no ring to measure.
 struct DemoScreenModifier: ViewModifier {
     @State private var screen: String?
     @AppStorage("units.temperature") private var tempUnitRaw = TemperatureUnit.localeDefault.rawValue
@@ -198,7 +240,14 @@ struct DemoScreenModifier: ViewModifier {
     @ViewBuilder
     private func destination(_ id: String) -> some View {
         if id.hasPrefix("metric-"), let m = TodayTile.Metric(rawValue: String(id.dropFirst(7))) {
+            // As from a Today tile: on today's Day chart (#239).
+            MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw, startsOnDay: true)
+        } else if id.hasPrefix("trend-"), let m = TodayTile.Metric(rawValue: String(id.dropFirst(6))) {
             MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw)
+        } else if id == "timeline" {
+            DayDetailView(day: Date())
+        } else if id == "day-stress" {
+            MetricDayView(metric: .stress, tempUnitRaw: tempUnitRaw)
         } else if id == "pastNights" {
             SleepNightsBrowserView()
         } else {

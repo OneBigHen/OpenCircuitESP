@@ -122,9 +122,11 @@ struct DayMetricCard: View {
     private func card(_ title: String, unit: String, color: Color, convert: @escaping (Double) -> Double = { $0 },
                       fixedYDomain: ClosedRange<Double>? = nil, decimals: Int = 1,
                       footnote: String? = nil) -> IntradaySeriesCard {
-        IntradaySeriesCard(title: title, unit: unit, color: color, day: timeline.day(metric), domain: domain,
-                           nightWindow: timeline.nightWindow, owners: timeline.owners,
-                           namesDevices: timeline.namesDevices, convert: convert, fixedYDomain: fixedYDomain,
-                           decimals: decimals, footnote: footnote)
+        // Stress is only ever the strap's, and its title names it: no device legend, no ring line.
+        let strapOnly = metric == .stress
+        return IntradaySeriesCard(title: title, unit: unit, color: color, day: timeline.day(metric), domain: domain,
+                                  nightWindow: timeline.nightWindow, owners: strapOnly ? [.zeppOS] : timeline.owners,
+                                  namesDevices: strapOnly ? false : timeline.namesDevices, convert: convert,
+                                  fixedYDomain: fixedYDomain, decimals: decimals, footnote: footnote)
     }
 }

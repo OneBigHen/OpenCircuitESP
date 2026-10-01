@@ -7,6 +7,7 @@ final class IntradaySeriesTests: XCTestCase {
     /// A fixed UTC "day" so the grid is independent of the machine's zone.
     private let dayStart = Date(timeIntervalSince1970: 1_790_553_600)   // 2026-09-28 00:00 UTC
     private var day: DateInterval { DateInterval(start: dayStart, duration: 86_400) }
+    private var day0: DateInterval { day }
     private func at(_ minutes: Double) -> Date { dayStart.addingTimeInterval(minutes * 60) }
     private func p(_ minutes: Double, _ value: Double) -> IntradaySeries.Point {
         IntradaySeries.Point(time: at(minutes), value: value)
@@ -74,8 +75,26 @@ final class IntradaySeriesTests: XCTestCase {
         let points = (0..<96).map { i in p(Double(i) * 5 + 2 + jitter[i % jitter.count], 60) }
         let series = IntradaySeries.day(points, day: day, log: DeviceOwnershipLog()).series[0]
         XCTAssertGreaterThanOrEqual(series.bucketWidth, 600)
-        XCTAssertLessThanOrEqual(series.bucketWidth, 900)
+        XCTAssertLessThanOrEqual(series.bucketWidth, 1200)
         XCTAssertEqual(series.runs.count, 1, "jitter alone never breaks the line")
+    }
+
+    func testTwoCadencesInOneDayKeepTheSparserOneALine() {
+        // The ring asleep every 5 minutes 00:00–06:50, awake every 15 minutes 07:30–22:30.
+        let night = stride(from: 0.0, to: 410, by: 5).map { p($0, 55) }
+        let day = stride(from: 450.0, through: 1350, by: 15).map { p($0, 75) }
+        let series = IntradaySeries.day(night + day, day: day0, log: DeviceOwnershipLog()).series[0]
+        XCTAssertEqual(series.bucketWidth, 1800)
+        XCTAssertEqual(series.runs.count, 2, "one line asleep, one awake, broken only at the real 40-minute hole")
+        XCTAssertEqual(series.runs[1].count, 31)
+    }
+
+    func testAnOutageNeverSetsTheWidth() {
+        // Per-minute all day except a 3-hour hole.
+        let points = (0..<1440).filter { !(600..<780).contains($0) }.map { p(Double($0), 60) }
+        let series = IntradaySeries.day(points, day: day0, log: DeviceOwnershipLog()).series[0]
+        XCTAssertEqual(series.bucketWidth, 300)
+        XCTAssertEqual(series.runs.count, 2)
     }
 
     // MARK: Ownership (decision 28)

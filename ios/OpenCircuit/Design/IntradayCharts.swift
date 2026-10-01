@@ -39,9 +39,10 @@ struct IntradaySeriesCard: View {
     private func text(_ v: Double) -> String { String(format: "%.\(decimals)f", v) }
     private func withUnit(_ v: Double) -> String { unit.isEmpty ? text(v) : "\(text(v)) \(unit)" }
 
-    /// Devices whose line is drawn dashed: every one after the first that owned part of the day.
+    /// Devices whose line is drawn dashed: only when two devices have readings on this card, the one
+    /// whose readings come second. A single device is always a solid line.
     private func isSecondary(_ family: DeviceOwnershipLog.Family) -> Bool {
-        (owners.firstIndex(of: family) ?? 0) > 0
+        day.families.count > 1 && day.families.first != family
     }
 
     private var showsLegend: Bool { namesDevices }
@@ -103,10 +104,12 @@ struct IntradaySeriesCard: View {
 
     private var averageLines: [AverageLine] {
         guard drawsAverageLines else { return [] }
+        // Drawn across the stretch's own readings only, never over hours the device has none.
         return day.series.enumerated().compactMap { si, s in
-            guard !s.points.isEmpty, let avg = day.averages[s.family] else { return nil }
-            return AverageLine(id: "\(si)", family: s.family, start: max(s.span.start, domain.lowerBound),
-                               end: min(s.span.end, domain.upperBound), value: convert(avg))
+            guard let first = s.buckets.first?.start, let last = s.buckets.last?.end,
+                  let avg = day.averages[s.family] else { return nil }
+            return AverageLine(id: "\(si)", family: s.family, start: max(first, domain.lowerBound),
+                               end: min(last, domain.upperBound), value: convert(avg))
         }
     }
 
