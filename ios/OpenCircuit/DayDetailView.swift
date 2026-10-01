@@ -70,10 +70,11 @@ struct DayDetailView: View {
     @MainActor
     private func loadData() async {
         let loaded = await DayTimeline.loadAsync(container: modelContext.container, day: day)
-        // A superseded load must never be drawn over a newer one: `.task(id:)` cancels the previous
-        // task when the revision changes, and the day is checked too, so a result that arrives late
-        // for a day this view has moved off is dropped.
-        guard !Task.isCancelled, loaded.day == DayTimeline.dayInterval(day) else { return }
+        // `Task.isCancelled` is the whole guard here: `day` is a `let`, so every load on this view is
+        // for the same day and only a sync bump can supersede one — `.task(id:)` cancels the previous
+        // task before starting the new one. `MetricDayView` needs the day comparison as well, because
+        // its `day` is `@State` and changes under the load (review-242b NIT 3).
+        guard !Task.isCancelled else { return }
         timeline = loaded
     }
 }

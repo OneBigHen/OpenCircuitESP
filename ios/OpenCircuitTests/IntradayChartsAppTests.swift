@@ -6,7 +6,7 @@ import ZeppKit
 @testable import OpenCircuit
 
 // #239: each metric through the day, for the ring and the strap. The strap's all-day stress through a
-// real `HelioSession` against the simulated strap, the one-time backfill, stress never reaching Apple
+// real `HelioSession` against the simulated strap, the backfill's ledger rule, stress never reaching Apple
 // Health, and the day charts' store reads (ownership, per-device series, the load check). Every
 // key, reading and time is synthetic.
 
@@ -134,7 +134,6 @@ final class StrapStressHistoryTests: XCTestCase {
         let transport = StressTransport(device: device)
         let keys = StressKeys()
         let sink = HelioStoreSink(store: store)
-        sink.clock = { [unowned self] in self.clock }
         let session = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys,
                                    sink: sink, findState: HelioFindState(),
                                    clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: true)
@@ -159,16 +158,22 @@ final class StrapStressHistoryTests: XCTestCase {
     func testABuild59StrapBackfillsAWeekOfStressOnceStoresEveryMinuteAndAcksKeep() throws {
         ownership.install(.strapOwnsAllTime)
         let store = try makeMemoryStore(&containers)
-        // Build 59: the stress watermark advanced on every sync while nothing was stored.
-        try store.setHelioFetchCursor(.autoStress, to: clock.addingTimeInterval(-600), device: timeline)
+        // Build 59: the stress watermark advanced on every sync while nothing was stored, and it left
+        // no ledger — which is exactly how this code recognises the hole.
+        let staleWatermark = clock.addingTimeInterval(-600)
+        store.stageHelioCursor(HelioFetchPlan.cursorName(for: .autoStress), to: staleWatermark, device: timeline)
+        try store.context.save()
         let start = clock.timeIntervalSince1970 - 3 * 86_400
         let device = makeStressStrap(start: start, count: 180)
         let session = sync(device, store: store)
 
-        // The first stress round starts a week back, once.
-        let weekBack = HelioFetchPlan.floorToMinute(clock.addingTimeInterval(-7 * 86_400))
+        // The first stress round starts a week back from that watermark, once.
+        let weekBack = HelioFetchPlan.floorToMinute(staleWatermark.addingTimeInterval(-7 * 86_400))
         XCTAssertEqual(stressSinces(device).first, weekBack)
-        XCTAssertTrue(store.helioStressBackfillDone(device: timeline))
+        // The ledger now records where this code left the watermark, so the next sync is not due.
+        XCTAssertNotNil(store.helioStressLedger(device: timeline))
+        XCTAssertEqual(store.helioStressLedger(device: timeline),
+                       store.helioFetchCursors(device: timeline)[.autoStress])
         // Decision 8: every round acked keep, the backfill changes nothing about that.
         XCTAssertFalse(device.fetchAcks.isEmpty)
         XCTAssertEqual(Set(device.fetchAcks), [0x09])
@@ -199,7 +204,10 @@ final class StrapStressHistoryTests: XCTestCase {
         let switchAt = clock.addingTimeInterval(-2 * 86_400 + 17)
         ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: switchAt)]))
         let store = try makeMemoryStore(&containers)
-        try store.setHelioFetchCursor(.autoStress, to: clock.addingTimeInterval(-600), device: timeline)
+        // An older build's watermark: advanced, with no ledger behind it.
+        store.stageHelioCursor(HelioFetchPlan.cursorName(for: .autoStress), to: clock.addingTimeInterval(-600),
+                               device: timeline)
+        try store.context.save()
         // The strap still holds stress from an hour before the switch to two hours after it.
         let start = switchAt.timeIntervalSince1970 - 17 - 3600
         let device = makeStressStrap(start: start, count: 180)
@@ -220,97 +228,184 @@ final class StrapStressHistoryTests: XCTestCase {
         XCTAssertEqual(Set(device.fetchAcks), [0x09])
     }
 
-    func testNoBackfillAndNoFlagWhileTheStrapDoesNotOwnThePresent() throws {
+    /// A strap switched away from: nothing is rewound and no ledger is written, so when it is chosen
+    /// again the hole is still judged from scratch, bounded by its new ownership start.
+    func testNoBackfillAndNoLedgerWhileTheStrapDoesNotOwnThePresent() throws {
         ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: clock.addingTimeInterval(-86_400)),
                                                        .init(family: .ringConn, since: clock.addingTimeInterval(-3600))]))
         let store = try makeMemoryStore(&containers)
         let watermark = clock.addingTimeInterval(-600)
-        try store.setHelioFetchCursor(.autoStress, to: watermark, device: timeline)
-        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock))
-        XCTAssertFalse(store.helioStressBackfillDone(device: timeline), "it waits for a sync the strap owns")
+        // Staged directly: `setHelioFetchCursor` would write the ledger, which is the point under test.
+        store.stageHelioCursor(HelioFetchPlan.cursorName(for: .autoStress), to: watermark, device: timeline)
+        try store.context.save()
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline))
+        XCTAssertNil(store.helioStressLedger(device: timeline), "it waits for a sync the strap owns")
         XCTAssertEqual(store.helioFetchCursors(device: timeline)[.autoStress], watermark)
     }
 
-    func testTheBackfillFlagIsNotAFetchWatermark() throws {
+    func testTheLedgerIsNotAFetchWatermark() throws {
         ownership.install(.strapOwnsAllTime)
         let store = try makeMemoryStore(&containers)
-        try store.setHelioFetchCursor(.autoStress, to: clock.addingTimeInterval(-600), device: timeline)
-        let moved = store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock)
-        XCTAssertEqual(moved, HelioFetchPlan.floorToMinute(clock.addingTimeInterval(-7 * 86_400)))
-        XCTAssertEqual(Set(store.helioFetchCursors(device: timeline).keys), [.autoStress], "only the stress watermark")
-        // Nothing came back (no rows stored), so the same hole is never attempted again.
-        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock.addingTimeInterval(3600)))
-        XCTAssertEqual(store.helioFetchCursors(device: timeline)[.autoStress], moved)
-        // The ring's timeline never gets a record or a watermark from this.
-        XCTAssertFalse(store.helioStressBackfillDone(device: .ringConn))
-    }
-
-    // MARK: A rollback to a build that drops stress (review-242 NIT 1)
-
-    /// 61 → 60 → 61 at the store level. Build 60 fetches `0x13`, drops it and still advances
-    /// `zepp.fetch.13`, so the days it ran leave a hole no one-shot flag would ever refill. The
-    /// backfill is a condition instead: it re-arms for the new hole exactly once.
-    func testARollbackToBuildSixtyReArmsTheBackfillExactlyOnce() throws {
-        ownership.install(.strapOwnsAllTime)
-        let store = try makeMemoryStore(&containers)
-
-        func storeStress(upTo end: Date, minutes: Int) throws {
-            for i in 0..<minutes {
-                let start = end.addingTimeInterval(Double(-i) * 60)
-                store.context.insert(StoredSample(QuantitySample(kind: .stress, start: start, value: 40),
-                                                  device: timeline))
-            }
-            try store.context.save()
-        }
-
-        // Build 61 at T0: the first backfill (the build-59 hole), then rows land up to T0.
-        let t0 = clock.addingTimeInterval(-10 * 86_400)
-        try store.setHelioFetchCursor(.autoStress, to: t0, device: timeline)
-        XCTAssertNotNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: t0))
-        try storeStress(upTo: t0, minutes: 60)
-        try store.setHelioFetchCursor(.autoStress, to: t0, device: timeline)
-        let firstAttempt = store.helioStressBackfillAttemptedThrough(device: timeline)
-        XCTAssertNotNil(firstAttempt)
-
-        // Build 61 keeps up: rows track the watermark, so nothing is due.
-        let t1 = clock.addingTimeInterval(-5 * 86_400)
-        try storeStress(upTo: t1, minutes: 60)
-        try store.setHelioFetchCursor(.autoStress, to: t1, device: timeline)
-        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: t1), "no hole, no backfill")
-        XCTAssertEqual(store.helioStressBackfillAttemptedThrough(device: timeline), firstAttempt, "and no new record")
-
-        // Build 60 for five days: the watermark advanced to now, nothing was stored. Back on 61, the
-        // new hole re-arms the backfill ONCE.
-        try store.setHelioFetchCursor(.autoStress, to: clock, device: timeline)
-        let refill = store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock)
-        XCTAssertEqual(refill, HelioFetchPlan.floorToMinute(clock.addingTimeInterval(-7 * 86_400)),
-                       "the rollback's days are refetched")
-        XCTAssertEqual(store.helioStressBackfillAttemptedThrough(device: timeline), clock,
-                       "the attempt records the watermark it covered")
-
-        // If the strap no longer holds those minutes, nothing is stored and it is never retried.
-        try store.setHelioFetchCursor(.autoStress, to: clock.addingTimeInterval(3600), device: timeline)
-        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock.addingTimeInterval(3600)),
-                     "at most one attempt per hole: no refetch loop")
-        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock.addingTimeInterval(7200)))
-
-        // Once real rows land past that ceiling, a LATER hole re-arms it again.
-        let t2 = clock.addingTimeInterval(2 * 3600)
-        try storeStress(upTo: t2, minutes: 10)
-        try store.setHelioFetchCursor(.autoStress, to: t2.addingTimeInterval(3 * 86_400), device: timeline)
-        XCTAssertNotNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: t2.addingTimeInterval(3 * 86_400)))
-    }
-
-    /// A strap that is simply keeping up never triggers a backfill, however long it has run.
-    func testAStrapKeepingUpNeverBackfills() throws {
-        ownership.install(.strapOwnsAllTime)
-        let store = try makeMemoryStore(&containers)
-        store.context.insert(StoredSample(QuantitySample(kind: .stress, start: clock.addingTimeInterval(-300), value: 30),
-                                          device: timeline))
+        // An older build's watermark: no ledger, so the first run backfills a week.
+        store.stageHelioCursor(HelioFetchPlan.cursorName(for: .autoStress), to: clock.addingTimeInterval(-600),
+                               device: timeline)
         try store.context.save()
-        try store.setHelioFetchCursor(.autoStress, to: clock.addingTimeInterval(-240), device: timeline)
-        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock))
-        XCTAssertFalse(store.helioStressBackfillDone(device: timeline), "nothing was attempted, so nothing is recorded")
+        let moved = store.applyHelioStressBackfillIfNeeded(device: timeline)
+        XCTAssertEqual(moved, HelioFetchPlan.floorToMinute(clock.addingTimeInterval(-600 - 7 * 86_400)),
+                       "a week back from the watermark the older build left")
+        XCTAssertEqual(Set(store.helioFetchCursors(device: timeline).keys), [.autoStress],
+                       "the ledger row is never read back as a fetch watermark")
+        // The rewind carried the ledger, so nothing is due again.
+        XCTAssertEqual(store.helioStressLedger(device: timeline), moved)
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline))
+        XCTAssertEqual(store.helioFetchCursors(device: timeline)[.autoStress], moved)
+        // The ring's timeline never gets a ledger or a watermark from this.
+        XCTAssertNil(store.helioStressLedger(device: .ringConn))
+    }
+
+    // MARK: Is a backfill due? (review-242b SF-1)
+
+    /// A sync by THIS code advancing the stress watermark, ledger and all.
+    private func advanceStressWatermark(_ store: LocalStore, to date: Date) throws {
+        try store.setHelioFetchCursor(.autoStress, to: date, device: timeline)
+    }
+
+    /// A sync by an OLDER build (59/60): it advances the watermark and stores nothing, leaving the
+    /// ledger where this code last wrote it.
+    private func olderBuildAdvancesStressWatermark(_ store: LocalStore, to date: Date) throws {
+        store.stageHelioCursor(HelioFetchPlan.cursorName(for: .autoStress), to: date, device: timeline)
+        try store.context.save()
+    }
+
+    /// 61 → 60 → 61. Build 60 advances `zepp.fetch.13` and drops the bytes, so its days are a hole.
+    /// The ledger makes that hole exactly identifiable: one rewind, to the ledger, then none.
+    func testARollbackToBuildSixtyRewindsOnceToTheLedger() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+
+        // Build 61 running normally for a few days: watermark and ledger move together.
+        let t0 = clock.addingTimeInterval(-10 * 86_400)
+        try advanceStressWatermark(store, to: t0)
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline), "this code's own advance is no hole")
+        let t1 = clock.addingTimeInterval(-5 * 86_400)
+        try advanceStressWatermark(store, to: t1)
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline))
+
+        // Five days on build 60: the watermark reaches now, the ledger stays at t1.
+        try olderBuildAdvancesStressWatermark(store, to: clock)
+        XCTAssertEqual(store.helioStressLedger(device: timeline), t1)
+        let refill = store.applyHelioStressBackfillIfNeeded(device: timeline)
+        XCTAssertEqual(refill, t1, "the hole is exactly [ledger, watermark]")
+        XCTAssertEqual(store.helioStressLedger(device: timeline), t1, "the rewind carries the ledger with it")
+
+        // …and never again, whatever the strap did or didn't return.
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline))
+        try advanceStressWatermark(store, to: clock)
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline))
+    }
+
+    /// The SF-1 case: ordinary wear gaps must never cost a refetch. `ff` minutes advance the watermark
+    /// through this code, so the ledger follows them and nothing is ever due.
+    func testAnOrdinaryWearGapNeverRewinds() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        try advanceStressWatermark(store, to: clock.addingTimeInterval(-3 * 86_400))
+        // 90 minutes with no reading: the watermark walked on, no row was stored.
+        try advanceStressWatermark(store, to: clock.addingTimeInterval(-3 * 86_400 + 5400))
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline), "a 90-minute gap is not a hole")
+    }
+
+    /// An hour off the wrist every day for three days: zero rewinds (it used to be one per day).
+    func testAnHourOffTheWristEachDayCostsNoRewinds() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        var rewinds = 0
+        var at = clock.addingTimeInterval(-3 * 86_400)
+        for _ in 0..<3 {
+            at = at.addingTimeInterval(23 * 3600)          // worn
+            try advanceStressWatermark(store, to: at)
+            if store.applyHelioStressBackfillIfNeeded(device: timeline) != nil { rewinds += 1 }
+            at = at.addingTimeInterval(3600)               // on the charger: `ff` minutes
+            try advanceStressWatermark(store, to: at)
+            if store.applyHelioStressBackfillIfNeeded(device: timeline) != nil { rewinds += 1 }
+        }
+        XCTAssertEqual(rewinds, 0)
+    }
+
+    /// Stress monitoring switched off on the strap (#240): the watermark walks through days of `ff`
+    /// and no row is ever stored. Zero attempts — the old rule spent one per sync-with-a-new-row.
+    func testStressMonitoringTurnedOffCostsNoAttempts() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        var attempts = 0
+        for day in 0..<5 {
+            try advanceStressWatermark(store, to: clock.addingTimeInterval(Double(day - 5) * 86_400))
+            if store.applyHelioStressBackfillIfNeeded(device: timeline) != nil { attempts += 1 }
+        }
+        XCTAssertEqual(attempts, 0)
+        XCTAssertNil(try stressRows(store).first, "nothing was stored, and nothing was refetched for it")
+    }
+
+    /// A backfill interrupted before its rounds land keeps its rewind: the ledger moved with the
+    /// watermark, so the next sync is not due and simply fetches from the rewound point.
+    func testAnInterruptedBackfillKeepsItsRewindAndIsNotRewoundAgain() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        try advanceStressWatermark(store, to: clock.addingTimeInterval(-6 * 86_400))
+        try olderBuildAdvancesStressWatermark(store, to: clock)
+        let target = try XCTUnwrap(store.applyHelioStressBackfillIfNeeded(device: timeline))
+
+        // The process dies here: no rounds stored. The watermark is still the rewound one.
+        XCTAssertEqual(store.helioFetchCursors(device: timeline)[.autoStress], target)
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: timeline), "not rewound a second time")
+        // And the plan still starts the fetch there, so the hole is filled on this next sync.
+        let plan = HelioFetchPlan.plan(cursors: store.helioFetchCursors(device: timeline), now: clock,
+                                       notBefore: .distantPast)
+        XCTAssertEqual(plan.first { $0.type == .autoStress }?.since, HelioFetchPlan.floorToMinute(target))
+    }
+
+    /// Per timeline: one strap's ledger says nothing about another's, and each rewind is bounded by
+    /// its own ownership start.
+    func testTheLedgerIsPerTimelineAndBoundedByOwnership() throws {
+        let switchAt = clock.addingTimeInterval(-2 * 86_400 + 17)
+        ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: switchAt)]))
+        let store = try makeMemoryStore(&containers)
+        let other = SyncDeviceID.timeline(for: .zeppOS(model: ""), identityID: "5B1E4C2A-0000-4000-8000-00000000C240")
+
+        try olderBuildAdvancesStressWatermark(store, to: clock)
+        let target = try XCTUnwrap(store.applyHelioStressBackfillIfNeeded(device: timeline))
+        XCTAssertGreaterThanOrEqual(target, switchAt, "never into the ring's time")
+        XCTAssertLessThan(target.timeIntervalSince(switchAt), 60, "the switch's minute, rounded up")
+        // The other strap has no ledger and no watermark of its own: nothing to do, nothing written.
+        XCTAssertNil(store.helioStressLedger(device: other))
+        XCTAssertNil(store.applyHelioStressBackfillIfNeeded(device: other))
+        XCTAssertNil(store.helioStressLedger(device: other))
+    }
+
+    /// A failed save moves neither the watermark nor the ledger.
+    ///
+    /// Driven through `context.rollback()` — the exact call the backfill's `catch` makes — rather than
+    /// by contriving a SwiftData write error, so the test says something definite instead of depending
+    /// on whether a given bad row happens to be rejected.
+    func testAFailedSaveMovesNeitherTheWatermarkNorTheLedger() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        let watermark = clock.addingTimeInterval(-600)
+        try olderBuildAdvancesStressWatermark(store, to: watermark)
+        XCTAssertNil(store.helioStressLedger(device: timeline))
+
+        // Stage the rewind exactly as the backfill does, then fail the save.
+        let target = clock.addingTimeInterval(-7 * 86_400)
+        store.stageHelioStressCursor(to: target, device: timeline)
+        store.context.rollback()
+
+        XCTAssertEqual(store.helioFetchCursors(device: timeline)[.autoStress], watermark,
+                       "the watermark stays where the older build left it")
+        XCTAssertNil(store.helioStressLedger(device: timeline), "and no ledger is written")
+        // The backfill is therefore still due, and succeeds on the next attempt — the two move together.
+        let moved = try XCTUnwrap(store.applyHelioStressBackfillIfNeeded(device: timeline))
+        XCTAssertEqual(store.helioFetchCursors(device: timeline)[.autoStress], moved)
+        XCTAssertEqual(store.helioStressLedger(device: timeline), moved)
     }
 }
 
@@ -402,13 +497,27 @@ final class DayTimelineLoadTests: XCTestCase {
 
         let container = store.context.container
         let clock = ContinuousClock()
-        var timeline: DayTimeline?
-        var elapsed = await clock.measure {
-            timeline = await DayTimeline.loadAsync(container: container, day: dayStart)
+        /// Three runs, so the report can quote WARM numbers: the first load of a fresh store pays
+        /// SQLite's cold cost and is several times the steady-state figure (review-242b FC-1).
+        func measure(_ label: String, metrics: Set<DayTimeline.Metric>? = nil) async -> DayTimeline {
+            var last: DayTimeline?
+            var times: [String] = []
+            for _ in 0..<3 {
+                let elapsed = await clock.measure {
+                    if let metrics {
+                        last = await DayTimeline.loadAsync(container: container, day: dayStart, metrics: metrics)
+                    } else {
+                        last = await DayTimeline.loadAsync(container: container, day: dayStart)
+                    }
+                }
+                times.append(String(format: "%.1f",
+                                    Double(elapsed.components.seconds) * 1000
+                                        + Double(elapsed.components.attoseconds) / 1e15))
+            }
+            print("DayTimeline load check (\(label)) ms, cold first then warm: \(times.joined(separator: " / "))")
+            return last!
         }
-        let oneDayMs = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
-        print("DayTimeline load check (on disk, 1 day stored): 1440 HR + 288 stress in "
-              + "\(String(format: "%.1f", oneDayMs)) ms")
+        let timeline: DayTimeline? = await measure("on disk, 1 day stored, all cards")
 
         let hr = try XCTUnwrap(timeline?.day(.heartRate))
         XCTAssertEqual(hr.points.count, 1440)
@@ -429,19 +538,13 @@ final class DayTimelineLoadTests: XCTestCase {
             try insert(store, .stress, (0..<1440).map { offset + Double($0) },
                        value: { $0.truncatingRemainder(dividingBy: 100) }, device: strap)
         }
-        var monthTimeline: DayTimeline?
-        elapsed = await clock.measure {
-            monthTimeline = await DayTimeline.loadAsync(container: container, day: dayStart)
-        }
-        let monthMs = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
-        print("DayTimeline load check (on disk, 30 days stored): one day's cards in "
-              + "\(String(format: "%.1f", monthMs)) ms")
+        let monthTimeline: DayTimeline? = await measure("on disk, 30 days stored, all cards")
+        _ = await measure("on disk, 30 days stored, one metric", metrics: [.heartRate])
 
         // The same day, read identically with a month of history behind it.
         XCTAssertEqual(monthTimeline?.day(.heartRate).points.count, 1440)
         XCTAssertEqual(monthTimeline?.day(.stress).points.count, 288)
         XCTAssertEqual(monthTimeline?.day(.heartRate).series.first?.buckets.count, 288)
-        XCTAssertLessThan(monthMs, 3000)
     }
 
     /// The load really is off the main actor: it is `async` and its fetch is `nonisolated`, so a

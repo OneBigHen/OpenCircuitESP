@@ -49,8 +49,16 @@ extension LocalStore {
     }
 
     /// Persist one fetch watermark.
+    ///
+    /// The stress watermark carries its ledger (`stageHelioStressCursor`): this is the ONLY place any
+    /// watermark is written, so routing `.autoStress` through here is what makes "the ledger moves in
+    /// the same save as the watermark" impossible to forget at a future call site (review-242b SF-1).
     func setHelioFetchCursor(_ type: ZeppFetchType, to date: Date, device: SyncDeviceID) throws {
-        stageHelioCursor(HelioFetchPlan.cursorName(for: type), to: date, device: device)
+        if type == .autoStress {
+            stageHelioStressCursor(to: date, device: device)
+        } else {
+            stageHelioCursor(HelioFetchPlan.cursorName(for: type), to: date, device: device)
+        }
         do { try context.save() } catch { context.rollback(); throw error }
     }
 
@@ -188,11 +196,8 @@ final class HelioStoreSink: HelioHistorySink {
         self.breadcrumbs = breadcrumbs
     }
 
-    /// The clock the one-time stress backfill measures its week from (#239). Tests set the session's.
-    var clock: () -> Date = { Date() }
-
     func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date] {
-        store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock())   // #239: once per strap, before the plan
+        store.applyHelioStressBackfillIfNeeded(device: timeline)   // #239: before the plan is built
         return store.helioFetchCursors(device: timeline)
     }
 

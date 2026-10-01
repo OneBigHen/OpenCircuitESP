@@ -14,11 +14,14 @@
 //
 // The load runs OFF the main actor (`loadAsync`), the way `TrendsData.loadAsync` does: a fresh
 // `ModelContext` over the same container inside a detached task, handing this value type back. It is
-// a day-bounded read, but it grows with history — review-242 (SF-2) measured ~110 ms for all metrics
-// against 30 days of per-minute strap rows on disk — and it re-runs after every finished sync while a
-// day chart is open, so it must never be a main-thread hitch. Like the trends load, the second context
-// sees only SAVED rows, which is what every caller here wants: ingest and the sync hooks commit before
-// the `.syncFinished` bump that triggers the reload.
+// a day-bounded read (~2 900 rows), but its SQLite cost grows with the history behind it, and it
+// re-runs after every finished sync while a day chart is open, so it must never be a main-thread
+// hitch. Measured on disk against the full 30-day retention window (86 k rows), iPhone 17 simulator,
+// three loads per run: WARM 74–177 ms for every card and 36–47 ms for a single metric (review-242b
+// measured 105–150 ms and ~38 ms on its own fixture; these runs share the machine, so the spread is
+// contention). A COLD first load is several times that — 284/538/732 ms here, up to ~1 s in
+// review-242b. Like the trends load, the second context sees only SAVED rows, which is what every caller
+// here wants: ingest and the sync hooks commit before the `.syncFinished` bump that triggers the reload.
 
 import Foundation
 import OpenCircuitKit

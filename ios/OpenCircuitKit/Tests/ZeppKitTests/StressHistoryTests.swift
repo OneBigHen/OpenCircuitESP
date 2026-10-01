@@ -1,5 +1,5 @@
-// The strap's all-day stress as history (#239): the mapping onto `.stress` and the one-time
-// watermark backfill. Every fixture is synthetic: made-up levels, times chosen by hand.
+// The strap's all-day stress as history (#239): the mapping onto `.stress` and the watermark
+// backfill's ledger rule. Every fixture is synthetic: made-up levels, times chosen by hand.
 
 import XCTest
 import OpenCircuitKit
@@ -43,98 +43,68 @@ final class StressHistoryTests: XCTestCase {
         XCTAssertEqual(ZeppMetricMapping.storedSamples(from: parsed), [])
     }
 
-    // MARK: One-time backfill
+    // MARK: Backfill window
 
     /// 2026-09-30T12:34:56Z.
     private let now = date(1_790_772_896)
     private var weekBack: Date { HelioFetchPlan.floorToMinute(now.addingTimeInterval(-7 * 86_400)) }
 
-    func testTheBackfillMovesTheStressWatermarkBackAWeek() {
-        let current = now.addingTimeInterval(-600)
-        XCTAssertEqual(HelioFetchPlan.stressBackfillCursor(current: current, now: now, notBefore: .distantPast),
+    // MARK: When a backfill is due — "did another build advance the watermark?" (review-242b SF-1)
+
+    func testABacklogLeftByAnOlderBuildIsRefetchedFromTheLedger() {
+        // Build 60 ran for five days: it advanced the watermark and stored nothing. The ledger is
+        // where this code left off, so the hole is exactly [ledger, watermark].
+        let ledger = now.addingTimeInterval(-5 * 86_400)
+        XCTAssertEqual(HelioFetchPlan.stressBackfillCursor(watermark: now, ledger: ledger, notBefore: .distantPast),
+                       ledger, "rewind to the ledger, not a blanket week")
+    }
+
+    func testAHoleOlderThanAWeekIsCappedAtTheLookback() {
+        let ledger = now.addingTimeInterval(-30 * 86_400)
+        XCTAssertEqual(HelioFetchPlan.stressBackfillCursor(watermark: now, ledger: ledger, notBefore: .distantPast),
                        weekBack)
     }
 
-    // MARK: When a backfill is due (review-242 NIT 1)
-
-    func testAWatermarkWellAheadOfTheNewestStoredRowIsAHoleWorthFilling() {
-        // The build-59 case: a watermark, no stress rows at all, no attempt yet.
-        XCTAssertTrue(HelioFetchPlan.stressBackfillIsDue(watermark: now, newestStoredStress: nil,
-                                                          lastAttemptThrough: nil))
-        // Keeping up: the newest row is within the tolerance of the watermark.
-        XCTAssertFalse(HelioFetchPlan.stressBackfillIsDue(watermark: now,
-                                                           newestStoredStress: now.addingTimeInterval(-600),
-                                                           lastAttemptThrough: nil))
-        // Exactly at the tolerance is not a hole; a second past it is.
-        XCTAssertFalse(HelioFetchPlan.stressBackfillIsDue(watermark: now,
-                                                           newestStoredStress: now.addingTimeInterval(-3600),
-                                                           lastAttemptThrough: nil))
-        XCTAssertTrue(HelioFetchPlan.stressBackfillIsDue(watermark: now,
-                                                          newestStoredStress: now.addingTimeInterval(-3601),
-                                                          lastAttemptThrough: nil))
-        // No watermark at all: the first fetch already reaches a week back.
-        XCTAssertFalse(HelioFetchPlan.stressBackfillIsDue(watermark: nil, newestStoredStress: nil,
-                                                           lastAttemptThrough: nil))
+    func testTheFirstRunOnATimelineAnOlderBuildAdvancedGetsTheWeekBackfill() {
+        // No ledger: build 59/60 moved this watermark before this code ever ran.
+        XCTAssertEqual(HelioFetchPlan.stressBackfillCursor(watermark: now, ledger: nil, notBefore: .distantPast),
+                       weekBack)
+        // …and with no watermark either there is nothing to rewind: the first fetch already reaches back.
+        XCTAssertNil(HelioFetchPlan.stressBackfillCursor(watermark: nil, ledger: nil, notBefore: .distantPast))
     }
 
-    func testARollbackToABuildThatDropsStressReArmsTheBackfillExactlyOnce() {
-        // Build 61 backfills at T0 and rows land up to T0.
-        let t0 = now.addingTimeInterval(-10 * 86_400)
-        XCTAssertTrue(HelioFetchPlan.stressBackfillIsDue(watermark: t0, newestStoredStress: nil,
-                                                          lastAttemptThrough: nil))
-        // …then keeps up: no hole, nothing due.
-        let t1 = now.addingTimeInterval(-5 * 86_400)
-        XCTAssertFalse(HelioFetchPlan.stressBackfillIsDue(watermark: t1, newestStoredStress: t1,
-                                                           lastAttemptThrough: t0))
-        // Build 60 for five days: the watermark advanced to now, nothing was stored past t1. A NEW
-        // hole, because rows exist past the last attempt's ceiling.
-        XCTAssertTrue(HelioFetchPlan.stressBackfillIsDue(watermark: now, newestStoredStress: t1,
-                                                          lastAttemptThrough: t0))
-        // That attempt records `now`. If the strap no longer holds those minutes, nothing is stored and
-        // the same hole is never attempted again.
-        XCTAssertFalse(HelioFetchPlan.stressBackfillIsDue(watermark: now, newestStoredStress: t1,
-                                                           lastAttemptThrough: now),
-                       "a hole the strap can't serve is attempted once, not on every sync")
-        XCTAssertFalse(HelioFetchPlan.stressBackfillIsDue(watermark: now.addingTimeInterval(86_400),
-                                                           newestStoredStress: t1, lastAttemptThrough: now),
-                       "…and still not on the next day's sync")
-        // Once real rows land past that ceiling, a later hole re-arms it again.
-        let t2 = now.addingTimeInterval(86_400)
-        XCTAssertTrue(HelioFetchPlan.stressBackfillIsDue(watermark: now.addingTimeInterval(5 * 86_400),
-                                                          newestStoredStress: t2, lastAttemptThrough: now))
+    /// The whole point of the ledger: every ordinary reason the strap reports no stress leaves the
+    /// watermark exactly where this code put it, so none of them is ever a backfill.
+    func testEveryOrdinaryGapLeavesTheBackfillNotDue() {
+        for (name, watermark) in [("an ordinary 90-minute wear gap", now.addingTimeInterval(-5400)),
+                                  ("an hour on the charger", now.addingTimeInterval(-3600)),
+                                  ("stress monitoring off for days (#240)", now.addingTimeInterval(-3 * 86_400)),
+                                  ("minutes the strap rotated out", now.addingTimeInterval(-30 * 86_400))] {
+            XCTAssertNil(HelioFetchPlan.stressBackfillCursor(watermark: watermark, ledger: watermark,
+                                                              notBefore: .distantPast), name)
+        }
+        // A ledger AHEAD of the watermark (an interrupted backfill's rewind) is not due either.
+        XCTAssertNil(HelioFetchPlan.stressBackfillCursor(watermark: now.addingTimeInterval(-86_400),
+                                                          ledger: now, notBefore: .distantPast))
     }
 
-    func testTheBackfillNeverReachesBeforeTheStrapsOwnershipStart() {
-        let current = now.addingTimeInterval(-600)
-        // The strap became the owner two days ago, at a second that isn't on a minute.
+    func testTheRewindNeverReachesBeforeTheStrapsOwnershipStart() {
+        // The ledger predates the switch: the ownership start wins, rounded UP to its minute.
         let owned = now.addingTimeInterval(-2 * 86_400 + 17)
-        let target = HelioFetchPlan.stressBackfillCursor(current: current, now: now, notBefore: owned)
+        let target = HelioFetchPlan.stressBackfillCursor(watermark: now, ledger: now.addingTimeInterval(-9 * 86_400),
+                                                         notBefore: owned)
         XCTAssertNotNil(target)
         XCTAssertGreaterThanOrEqual(target!, owned, "not even the seconds before the switch")
         XCTAssertLessThan(target!.timeIntervalSince(owned), 60)
-        // And the fetch plan built from that watermark starts there, inside the strap's time.
+        // The plan built from it starts there, inside the strap's own time.
         let plan = HelioFetchPlan.plan(cursors: [.autoStress: target!], now: now, notBefore: owned)
-        let stressSince = plan.first { $0.type == .autoStress }!.since
-        XCTAssertEqual(stressSince, target)
-        XCTAssertGreaterThanOrEqual(stressSince, owned)
-        // Every other type keeps its own start: only the stress watermark moved.
-        let unchanged = HelioFetchPlan.plan(cursors: [.autoStress: current], now: now, notBefore: owned)
-        for (a, b) in zip(plan, unchanged) where a.type != .autoStress { XCTAssertEqual(a.since, b.since, "\(a.type)") }
+        XCTAssertEqual(plan.first { $0.type == .autoStress }?.since, target)
     }
 
-    func testTheBackfillDoesNothingWhenTheStrapDoesNotOwnThePresent() {
-        // `HelioStoreSink.notBefore` is `now` when the strap isn't the current owner.
-        XCTAssertNil(HelioFetchPlan.stressBackfillCursor(current: now.addingTimeInterval(-600), now: now,
-                                                         notBefore: now))
-    }
-
-    func testTheBackfillOnlyEverMovesTheWatermarkBack() {
-        // Already a fortnight back (a strap that hasn't synced): leave it.
-        XCTAssertNil(HelioFetchPlan.stressBackfillCursor(current: now.addingTimeInterval(-14 * 86_400),
-                                                         now: now, notBefore: .distantPast))
-        // No watermark at all: the first fetch already reaches a week back.
-        XCTAssertNil(HelioFetchPlan.stressBackfillCursor(current: nil, now: now, notBefore: .distantPast))
-        // Exactly at the target: nothing to move.
-        XCTAssertNil(HelioFetchPlan.stressBackfillCursor(current: weekBack, now: now, notBefore: .distantPast))
+    func testNothingToMoveReturnsNil() {
+        // The ownership start is at or after the watermark: no window left to refetch.
+        XCTAssertNil(HelioFetchPlan.stressBackfillCursor(watermark: now, ledger: nil, notBefore: now))
+        XCTAssertNil(HelioFetchPlan.stressBackfillCursor(watermark: now, ledger: nil,
+                                                          notBefore: now.addingTimeInterval(3600)))
     }
 }
