@@ -99,6 +99,29 @@ public struct DeviceOwnershipLog: Codable, Equatable, Sendable {
         return entries.last?.since ?? .distantPast
     }
 
+    // MARK: Decision 29: baselines are per device
+
+    /// `items` measured by `family`: those whose time (`time`) it owned. With an empty log every item
+    /// is the ring's, so this returns `items` unchanged.
+    public func only<T>(_ family: Family, _ items: [T], time: (T) -> Date) -> [T] {
+        guard !isEmpty else { return items }
+        return items.filter { owner(at: time($0)) == family }
+    }
+
+    /// `items` from the same device as the NEWEST one (by `time`): the history a "your usual" for that
+    /// item may use (decision 29). With an empty log, `items` unchanged.
+    public func sameDeviceAsNewest<T>(_ items: [T], time: (T) -> Date) -> [T] {
+        guard !isEmpty, let newest = items.max(by: { time($0) < time($1) }) else { return items }
+        return only(owner(at: time(newest)), items, time: time)
+    }
+
+    /// Whether a sample `recordedBy` the device on `timeline` at `start` was measured by `family`
+    /// during `family`'s own time (a device's catch-up of the other's time is neither's baseline).
+    /// Always true for the ring on an empty log.
+    public func isOwn(recordedBy timeline: SyncDeviceID, at start: Date, by family: Family) -> Bool {
+        Family(timeline: timeline) == family && owner(at: start) == family
+    }
+
     /// Every half-open `[start, end)` interval `family` owns, oldest first. The last is open-ended
     /// (`.distantFuture`) when `family` owns the present.
     public func intervals(of family: Family) -> [(start: Date, end: Date)] {
