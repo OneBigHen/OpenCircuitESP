@@ -22,6 +22,11 @@ import UIKit
 //     reconnected session (HelioConnection's standing connect builds a new one) is adopted and its
 //     stream started again.
 //
+// This is the spec's "route 1" (ZEPP_PROTOCOL.md §18.1): the strap stays in its normal all-day mode.
+// Nothing is ever sent on the workout endpoint `0x0019` (no start/pause/end, which no permitted source
+// gives, and never the phone-GPS message of §18.5); the route is the phone's own location only. The
+// totals are OpenCircuit's own (§18.6): no training effect, VO₂ max or recovery time is claimed.
+//
 // Ring-only users never reach any of this: the recorder is built idle, touches no CoreBluetooth and
 // no CoreLocation until a strap workout starts, and its launch checks find no journal.
 
@@ -36,6 +41,8 @@ protocol StrapWorkoutHeartRateSource: AnyObject {
     var heartRateObserver: (@MainActor (Int, Date) -> Void)? { get set }
     func startWorkoutHeartRate()
     func stopWorkoutHeartRate()
+    /// Close a stream a killed process left running (`04 00`), unless this connection streams itself.
+    func stopOrphanedHeartRate()
     func syncHistory(manual: Bool)
 }
 
@@ -478,6 +485,7 @@ final class StrapWorkoutRecorder {
         let counted = StrapWorkoutSummaryBuilder.activeSamples(recovered.samples, ledger: recovered.ledger, end: recovered.end)
         enqueueLanding(counted, timeline: timeline)
         journal.clearRunning()   // before the write: a second offer can never write it twice
+        source()?.stopOrphanedHeartRate()
         let saved = await health.save(StrapWorkoutWrite(summary: summary, samples: counted, route: [], timeline: timeline))
         helioLog.notice("helio: interrupted workout saved to Health \(saved, privacy: .public)")
         landPendingHeartRate()
@@ -487,6 +495,7 @@ final class StrapWorkoutRecorder {
     func discardRecovered() {
         recoverable = nil
         journal.clearRunning()
+        source()?.stopOrphanedHeartRate()
     }
 
     /// "Not now": asked again at the next launch.

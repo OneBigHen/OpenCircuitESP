@@ -233,6 +233,9 @@ struct ContentView: View {
                 },
                 // A switch made from Profile ▸ Device: hand the store to the newly chosen driver.
                 onChoiceChanged: { choice in
+                    // Switched to the ring mid-workout: the strap's link is already closed (its stream
+                    // stopped with `04 00`), so the strap workout ends here and keeps what it recorded.
+                    if choice != .helioStrap, strapWorkouts.isRecording { Task { await strapWorkouts.end() } }
                     if choice == .helioStrap { helio.setLocalStore(LocalStore(modelContext)) }
                     else { scanner.setLocalStore(LocalStore(modelContext)) }
                     Task { await loadTrends(.syncFinished) }

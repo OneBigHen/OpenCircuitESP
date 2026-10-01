@@ -894,6 +894,15 @@ final class HelioSession: WearableSession {
         stopLiveHeartRate()
     }
 
+    /// The previous process died mid-workout and its interrupted workout is being closed: send `04 00`
+    /// (§7.1) once, unless this connection runs a stream of its own. Transient and harmless (§15.1).
+    // SPEC-GAP: whether the strap keeps streaming once the 1 s keep-alive stops is not specified, so
+    // the stop is sent rather than assumed.
+    func stopOrphanedHeartRate() {
+        guard canStreamHeartRate, !liveHeartRateRunning else { return }
+        send(ZeppEndpoint.heartRate, ZeppHeartRateControl.stop)
+    }
+
     func stopLiveHeartRate() {
         guard liveHeartRateRunning else { return }
         liveHeartRateRunning = false

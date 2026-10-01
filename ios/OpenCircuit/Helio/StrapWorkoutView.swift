@@ -68,7 +68,7 @@ struct StrapWorkoutView: View {
                 }
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "info.circle").foregroundStyle(.secondary)
-                    Text("Heart rate comes from the strap once a second for the whole workout. If the strap disconnects, the workout keeps running and the gap is shown; nothing is filled in.")
+                    Text("OpenCircuit records this workout on your phone: heart rate from the strap once a second, and your phone's location outdoors. The strap keeps no workout record of its own. If the strap disconnects, the workout keeps running and the gap is shown; nothing is filled in.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(10)
@@ -264,6 +264,8 @@ struct StrapWorkoutView: View {
                 .padding(.horizontal)
 
                 VStack(alignment: .leading, spacing: 6) {
+                    noteRow("iphone", .secondary,
+                            "Duration, calories and zones are OpenCircuit's own, worked out on your phone from the strap's live heart rate\(summary.hasRoute ? " and your phone's location" : ""). The strap made no record of this workout.")
                     if !result.pauses.isEmpty {
                         noteRow("pause.circle", .secondary,
                                 "Paused \(result.pauses.count) time\(result.pauses.count == 1 ? "" : "s") for \(Self.duration(result.pauses.reduce(0) { $0 + $1.duration })) in total; that time isn't counted.")

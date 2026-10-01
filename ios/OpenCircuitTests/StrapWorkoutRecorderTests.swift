@@ -25,6 +25,7 @@ private final class FakeHRSource: StrapWorkoutHeartRateSource {
     private(set) var starts = 0
     private(set) var stops = 0
     private(set) var syncRequests = 0
+    private(set) var orphanStops = 0
 
     init(timeline: SyncDeviceID = .timeline(for: .zeppOS(model: "Helio Strap"), identityID: "STRAP-A")) {
         self.timeline = timeline
@@ -32,6 +33,7 @@ private final class FakeHRSource: StrapWorkoutHeartRateSource {
 
     func startWorkoutHeartRate() { starts += 1 }
     func stopWorkoutHeartRate() { stops += 1 }
+    func stopOrphanedHeartRate() { orphanStops += 1 }
     func syncHistory(manual: Bool) { syncRequests += 1 }
 
     /// The strap sends one reading.
@@ -100,7 +102,9 @@ final class StrapWorkoutRecorderTests: XCTestCase {
     }
 
     private func makeRig(source: @escaping @MainActor () -> (any StrapWorkoutHeartRateSource)?,
-                         journal: MemoryJournal = MemoryJournal(), store: FakeHRStore = FakeHRStore()) -> Rig {
+                         journal: MemoryJournal? = nil, store: FakeHRStore? = nil) -> Rig {
+        let journal = journal ?? MemoryJournal()
+        let store = store ?? FakeHRStore()
         let health = FakeHealthWriter()
         let location = FakeLocation()
         let profile = self.profile
@@ -272,6 +276,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         XCTAssertEqual(write.samples.count, 905)
         XCTAssertEqual(write.summary.summary.zoneBreakdown.totalZoneSeconds, 905, accuracy: 0.001)
         XCTAssertNil(journal.journal, "a second launch can't offer (and write) it twice")
+        XCTAssertEqual(source.orphanStops, 1, "the dead process's stream is closed with 04 00")
         XCTAssertNil(second.recorder.recoverable)
 
         let third = makeRig(source: { source }, journal: journal)
@@ -295,6 +300,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         second.recorder.resolveOrphan()
         second.recorder.discardRecovered()
         XCTAssertNil(journal.journal)
+        XCTAssertEqual(source.orphanStops, 1)
         XCTAssertEqual(second.health.writes.count, 0)
     }
 
@@ -442,6 +448,8 @@ final class StrapWorkoutSessionTests: XCTestCase {
                                     random: Array(UInt8(0xf0)...UInt8(0xff)), writeLength: 244)
         device.services = [(0x0000, 0), (0x000A, 1), (0x000F, 0), (0x001A, 1), (0x001D, 0), (0x0029, 0),
                            (0x0043, 0), (0x0047, 0), (0x004B, 0), (0x0082, 0)]
+        // Made-up versions (§5.3), so setup doesn't wait out the device-info step.
+        device.deviceInfoReply = [0x02, 0x01, 0x0c, 0, 0, 0, 0, 0, 0, 0] + Array("9.9.9.9".utf8) + [0] + Array("1.2.3.4".utf8) + [0]
         let transport = WorkoutStrapTransport(device: device)
         let keys = WorkoutKeys()
         let session = HelioSession(transport: transport, identityID: "5B1E4C2A-0000-4000-8000-0000000000A2",
@@ -485,6 +493,35 @@ final class StrapWorkoutSessionTests: XCTestCase {
         session.stopWorkoutHeartRate()
         XCTAssertFalse(session.liveHeartRateRunning)
         XCTAssertEqual(transport.heartRateCommands.last, ZeppHeartRateControl.stop)
+    }
+
+    /// §18.1 route 1, §18.8: `04 01` (after enabling 0x2A37), `04 02` each second, `04 00` and unsubscribe
+    /// at the end, and NOTHING on the workout endpoint `0x0019` (no start/end, never phone GPS, §18.5).
+    func testRouteOneNeverTouchesTheWorkoutEndpoint() {
+        let (session, transport) = connect()
+        session.startWorkoutHeartRate()
+        XCTAssertEqual(transport.notifyChanges.last.map { [$0.0 == .heartRateMeasurement, $0.1] }, [true, true])
+        for s in 1...5 {
+            clock = at(TimeInterval(s))
+            session.received(.heartRateMeasurement, [0x00, 0x8f])
+            session.tick(now: clock)
+        }
+        session.stopWorkoutHeartRate()
+        XCTAssertEqual(transport.heartRateCommands,
+                       [ZeppHeartRateControl.start] + Array(repeating: ZeppHeartRateControl.keepRunning, count: 5)
+                       + [ZeppHeartRateControl.stop])
+        XCTAssertEqual(transport.notifyChanges.last.map { [$0.0 == .heartRateMeasurement, $0.1] }, [true, false])
+        XCTAssertFalse(transport.device.receivedEndpoints.contains(0x0019), "route 1 sends nothing on 0x0019")
+    }
+
+    func testClosingAnInterruptedWorkoutSendsOneStopUnlessAStreamRuns() {
+        let (session, transport) = connect()
+        session.stopOrphanedHeartRate()
+        XCTAssertEqual(transport.heartRateCommands, [ZeppHeartRateControl.stop])
+        session.startLiveHeartRate(duration: StrapLiveHeartRate.duration)
+        session.stopOrphanedHeartRate()
+        XCTAssertTrue(session.liveHeartRateRunning, "a Measure running on this connection is left alone")
+        XCTAssertEqual(transport.heartRateCommands, [ZeppHeartRateControl.stop, ZeppHeartRateControl.start])
     }
 
     func testAStalledWorkoutStreamIsStartedAgain() {
