@@ -1414,6 +1414,168 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(flushes.first?.nights, 1)
     }
 
+    // MARK: decision 31: "the night is over" expires 30 minutes after Sleep Focus ended
+
+    /// The finalization a run receives for a Sleep Focus that ended at `t`: decision 31's T. (These tests
+    /// were first run at `dced60f`, where this returned `true`, to show the stale paths finalized there.)
+    private func focusEnded(at t: Date) -> Date? { t }
+
+    /// Review-225d SF-A, the reviewer's probe: the watched sync ends in the run's last pause and iOS
+    /// expires the task before the loop looks again, with the app in front. The hand-off must not
+    /// leave a finalization on the now idle session for a plain app-refresh run hours later.
+    func testAnExpiryHandOffAfterTheSyncEndedLeavesNoFinalizationForALaterRun() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let focusService = service(link, store: store, flushes: { flushes.append($0) }, appIsActive: true, pause: {
+            link.transport?.drain()
+            // The sync ended in this pause; iOS expires the task before the loop looks again.
+            if link.session?.syncsFinished == 1 { withUnsafeCurrentTask { $0?.cancel() } }
+        })
+        let focusEnd = clock
+        let focus = await Task { @MainActor in
+            await focusService.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout,
+                                   nightsFinalized: self.focusEnded(at: focusEnd))
+        }.value
+        XCTAssertEqual(focus.ending, .handedToApp)
+        let session = try XCTUnwrap(link.session)
+        XCTAssertFalse(session.syncing, "the handed-over sync had already ended")
+        XCTAssertNil(session.finalizeNightsOnHandOff, "SF-A: nothing is left on the idle session")
+        clock = clock.addingTimeInterval(6 * 3600)   // hours later, an ordinary refresh on the kept link
+        let later = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(later.ending, .synced)
+        XCTAssertEqual(flushes.map(\.finalized), [false], "an app-refresh run 6 h later keeps the quiet margin")
+    }
+
+    /// A waiting Focus run's request, taken by a non-Focus run's hand-off to the app; the app's sync
+    /// ends 31 minutes after Focus ended. Decision 31: that flush is not finalized.
+    func testAWaitersRequestTakenByANonFocusHandOffIsStaleThirtyOneMinutesLater() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        // The processing run holds the link with the app in front; one radio event a second, so it
+        // runs out of its 52 s window mid-sync and hands off, taking the waiter's request.
+        let processing = service(link, store: store, flushes: { flushes.append($0) }, appIsActive: true,
+                                 pause: { link.transport?.drainSteps(1) })
+        let focus = waitingService(link, store: store, flushes: { flushes.append($0) })
+        let a = Task { @MainActor in await processing.run(kind: .processing, timeout: 60) }
+        for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
+        let focusEnd = clock
+        let focusRun = await Task { @MainActor in
+            await focus.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout,
+                            nightsFinalized: self.focusEnded(at: focusEnd))
+        }.value
+        let first = await a.value
+        XCTAssertEqual(focusRun.ending, .anotherRunActive)
+        XCTAssertEqual(first.ending, .handedToApp)
+        let session = try XCTUnwrap(link.session)
+        XCTAssertTrue(session.syncing)
+        // The app finishes that sync 31 minutes after Focus ended.
+        clock = focusEnd.addingTimeInterval(31 * 60)
+        link.transport?.drain()
+        for _ in 0..<200 where link.hookFlushes == 0 { await Task.yield() }
+        XCTAssertEqual(link.hookFlushes, 1)
+        XCTAssertEqual(link.hookFinalized, [false], "decision 31: 31 minutes after Focus ended, the night waits for the margin")
+        XCTAssertTrue(flushes.isEmpty)
+    }
+
+    /// Review-225d SF-A's third route: a Focus run started on an already-cancelled task, with the app in
+    /// front and an idle session up, hands off at once. Nothing may be left on that idle session.
+    func testARunOnAnAlreadyCancelledTaskLeavesNoFinalizationOnAnIdleSession() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        // An idle, authenticated link left by an earlier foreground sync (flushed by the app's hook).
+        _ = link.connectForBackground()
+        link.transport?.drain()
+        let idle = try XCTUnwrap(link.session)
+        XCTAssertEqual(idle.syncsFinished, 1)
+        XCTAssertFalse(idle.syncing)
+        let focusEnd = clock
+        let focusService = service(link, store: store, flushes: { flushes.append($0) }, appIsActive: true)
+        let run = await Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await focusService.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout,
+                                          nightsFinalized: self.focusEnded(at: focusEnd))
+        }.value
+        XCTAssertEqual(run.ending, .handedToApp)
+        XCTAssertNil(idle.finalizeNightsOnHandOff, "SF-A: nothing is left on the idle session")
+        clock = clock.addingTimeInterval(6 * 3600)
+        let later = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(later.ending, .synced)
+        XCTAssertEqual(flushes.map(\.finalized), [false], "an app-refresh run 6 h later keeps the quiet margin")
+    }
+
+    /// A Focus run hands its sync to the app, and the app's sync ends 31 minutes after Focus ended
+    /// (a long stall). Decision 31: that flush is not finalized.
+    func testAHandedOffFocusSyncThatEndsThirtyOneMinutesLaterIsNotFinalized() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        let focusEnd = clock
+        let focus = await service(link, store: store, appIsActive: true, pause: { link.transport?.drainSteps(2) })
+            .run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: focusEnded(at: focusEnd))
+        XCTAssertEqual(focus.ending, .handedToApp)
+        let session = try XCTUnwrap(link.session)
+        XCTAssertTrue(session.syncing)
+        clock = focusEnd.addingTimeInterval(31 * 60)
+        link.transport?.drain()
+        for _ in 0..<200 where link.hookFlushes == 0 { await Task.yield() }
+        XCTAssertEqual(link.hookFlushes, 1)
+        XCTAssertEqual(link.hookFinalized, [false], "decision 31: 31 minutes after Focus ended, the night waits for the margin")
+    }
+
+    /// A Focus run whose own flush starts 31 minutes after Focus ended (T passed in 31 minutes old):
+    /// not finalized (decision 31).
+    func testTheFocusRunsOwnFlushStartingThirtyOneMinutesAfterFocusEndedIsNotFinalized() async throws {
+        let store = try makeStore()
+        let link = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let run = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout,
+                 nightsFinalized: clock.addingTimeInterval(-31 * 60))
+        XCTAssertEqual(run.ending, .synced)
+        XCTAssertEqual(flushes.count, 1)
+        XCTAssertNotNil(flushes.first?.focusEndedAt, "the Focus end reached the flush")
+        XCTAssertEqual(flushes.first?.finalized, false, "…but more than 30 minutes after it, the night waits for the margin")
+    }
+
+    /// Decision 31's boundary: a flush that starts exactly 30 minutes after Focus ended is finalized; one
+    /// a second later is not; no Focus end, never. And the latest of two Focus ends is the one kept.
+    func testTheThirtyMinuteBoundaryAndTheLatestFocusEnd() {
+        let t = Date(timeIntervalSince1970: midnight + 7 * 3600)
+        XCTAssertEqual(SleepFocusFinalization.window, 30 * 60)
+        XCTAssertTrue(SleepFocusFinalization.applies(focusEndedAt: t, flushStartsAt: t))
+        XCTAssertTrue(SleepFocusFinalization.applies(focusEndedAt: t, flushStartsAt: t.addingTimeInterval(30 * 60)))
+        XCTAssertFalse(SleepFocusFinalization.applies(focusEndedAt: t, flushStartsAt: t.addingTimeInterval(30 * 60 + 1)))
+        XCTAssertFalse(SleepFocusFinalization.applies(focusEndedAt: nil, flushStartsAt: t))
+        let later = t.addingTimeInterval(600)
+        XCTAssertEqual(SleepFocusFinalization.latest(t, later), later)
+        XCTAssertEqual(SleepFocusFinalization.latest(later, t), later)
+        XCTAssertEqual(SleepFocusFinalization.latest(nil, t), t)
+        XCTAssertNil(SleepFocusFinalization.latest(nil, nil))
+    }
+
+    /// The same boundary end to end, through a hand-off: the app's flush of the handed-over Focus sync
+    /// starting exactly 30 minutes after Focus ended is finalized.
+    func testAHandedOffFocusSyncThatEndsExactlyThirtyMinutesLaterIsFinalized() async throws {
+        let store = try makeStore()
+        let link = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        let focusEnd = clock
+        let focus = await service(link, store: store, appIsActive: true, pause: { link.transport?.drainSteps(2) })
+            .run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: focusEnded(at: focusEnd))
+        XCTAssertEqual(focus.ending, .handedToApp)
+        clock = focusEnd.addingTimeInterval(30 * 60)
+        link.transport?.drain()
+        for _ in 0..<200 where link.hookFlushes == 0 { await Task.yield() }
+        XCTAssertEqual(link.hookFinalized, [true])
+    }
+
     // MARK: review-225c SF-1: a waiting Focus run's request lives only as long as the run it was left for
 
     /// A run that only waits for its turn: its pause yields without moving the shared fake clock or the
