@@ -41,6 +41,23 @@ private func sessionRecord() -> [UInt8] {
     return r
 }
 
+/// Back to bed within the hour (decision 28f): 07:40 → 08:30, 40 min after `sessionRecord()`'s night
+/// ends, one light stage. Same midnight reference.
+private func laterSessionRecord() -> [UInt8] {
+    var r = [UInt8](repeating: 0, count: ZeppSleepSession.recordLength)
+    func put(_ bytes: [UInt8], at offset: Int) { for (i, b) in bytes.enumerated() { r[offset + i] = b } }
+    put(le32(UInt32(midnight + 7 * 3600 + 40 * 60)), at: 0x000)
+    put(le32(UInt32(midnight)), at: 0x004)
+    r[0x008] = 1
+    r[0x009] = 1
+    put(le16(1900), at: 0x00A)
+    put(le16(1950), at: 0x00C)
+    r[0x016] = 70
+    r[0x054] = 1
+    put(le16(1900) + le16(1950) + [0x04], at: 0x056)
+    return r
+}
+
 /// 60 activity minutes from 23:00: worn (kind 0x01, 5 steps, HR 55), except minutes 10–14 not
 /// worn (0x73, no HR) and 20–24 charging (0x76, no HR).
 private func activityData() -> [UInt8] {
@@ -1642,6 +1659,57 @@ final class HelioBackgroundSyncTests: XCTestCase {
         clock = end.addingTimeInterval(3 * 3600)
         let later = await service(link, store: store).run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
         XCTAssertNil(later.refreshAt, "settled: nothing waiting")
+    }
+
+    // MARK: steer 12: 28f stitching vs a night already written to Apple Health
+
+    /// The night key the stored strap night files under, and its mirror record cleared afterwards
+    /// (`MirroredNightOverlay` lives in the standard defaults).
+    private func clearMirror(_ night: Date) {
+        UserDefaults.standard.removeObject(forKey: "sleep.mirror.night.\(Calendar.current.startOfDay(for: night).timeIntervalSince1970)")
+    }
+
+    /// A night already written to Apple Health stands. Back to bed 40 min after it ended, the next sync
+    /// re-delivers both sessions and 28f would stitch them into a longer night: that night is kept out,
+    /// so the stored night is unchanged and the flush carries no night (no second Health write, no
+    /// silent replacement). Before the night is written, the same sessions do stitch.
+    func testANightAlreadyInHealthIsNotGrownByALaterStitchableSession() async throws {
+        for written in [true, false] {
+            let store = try makeStore()
+            let device = makeStrap()
+            let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+            var flushes: [FlushCall] = []
+            let first = await service(link, store: store, flushes: { flushes.append($0) })
+                .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+            XCTAssertEqual(first.ending, .synced)
+            let night = try XCTUnwrap(try store.context.fetch(FetchDescriptor<StoredSleepSummary>()).first)
+            let firstWindow = DateInterval(start: night.inBedStart, end: night.inBedEnd)
+            defer { clearMirror(night.night) }
+            if written {
+                // What `mirrorSettledNight` records once the night is in Apple Health.
+                store.setMirroredNight(night: night.night, signature: "written", spanStart: firstWindow.start, spanEnd: firstWindow.end)
+            }
+            // The back-to-bed session arrives; the strap re-delivers both on the overlapping fetch.
+            device.fetchData[.sleepSession] = (stamp(midnight), sessionRecord() + laterSessionRecord())
+            clock = clock.addingTimeInterval(3600)
+            let second = await service(link, store: store, flushes: { flushes.append($0) })
+                .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+            XCTAssertEqual(second.ending, .synced)
+            let nights = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
+            XCTAssertEqual(nights.count, 1, "one night per key")
+            let stored = try XCTUnwrap(nights.first)
+            if written {
+                XCTAssertEqual(stored.inBedStart, firstWindow.start)
+                XCTAssertEqual(stored.inBedEnd, firstWindow.end, "the written night stands")
+                XCTAssertEqual(second.result?.nights.count, 0)
+                XCTAssertEqual(flushes.last?.nights, 0, "no second Health write of the night")
+                XCTAssertEqual(store.mirroredNight(night: night.night)?.signature, "written", "nothing re-mirrored")
+            } else {
+                XCTAssertEqual(stored.inBedStart, firstWindow.start)
+                XCTAssertEqual(stored.inBedEnd, Date(timeIntervalSince1970: midnight + 8 * 3600 + 30 * 60), "not yet written: stitched (28f)")
+                XCTAssertEqual(flushes.last?.nights, 1)
+            }
+        }
     }
 
     // MARK: decision 35: the held, idle link's own traffic is a wake

@@ -139,6 +139,16 @@ extension LocalStore {
                                     extras: extras, device: device)
     }
 
+    /// The span of the night already mirrored to Apple Health under `night`'s key (`mirrorSettledNight`
+    /// records it), if any: the key of the stored summary it overlaps, else the key its window files
+    /// under, as the mirror resolves it.
+    func writtenNightSpan(for night: HelioSleepSelection.Night) -> DateInterval? {
+        let row = try? sleepSummaryOverlapping(start: night.window.start, end: night.window.end)
+        let key = row?.night ?? SleepNightKey.night(inBedStart: night.window.start, inBedEnd: night.window.end)
+        guard let record = mirroredNight(night: key), record.spanEnd > record.spanStart else { return nil }
+        return DateInterval(start: record.spanStart, end: record.spanEnd)
+    }
+
     /// `device`'s stored skin temperatures in `window` (already gated when stored).
     func helioTemperatures(in window: DateInterval, device: SyncDeviceID) -> [TemperatureSample] {
         let kindRaw = MetricKind.temperature.rawValue
@@ -165,6 +175,8 @@ final class HelioStoreSink: HelioHistorySink {
     private var storedNights: [HelioSleepSelection.Night] = []
     /// Daytime sessions already logged this sync (decision 28c), so a re-run logs each once.
     private var notOvernightLogged: Set<DateInterval> = []
+    /// Sleeps kept out of a night already written to Apple Health (28f), logged once per sync.
+    private var keptApartLogged: Set<DateInterval> = []
     private var latestStress: HelioReading?
     private var latestPAI: HelioReading?
 
@@ -194,6 +206,7 @@ final class HelioStoreSink: HelioHistorySink {
         sessions = []
         storedNights = []
         notOvernightLogged = []
+        keptApartLogged = []
         latestStress = nil
         latestPAI = nil
     }
@@ -278,6 +291,20 @@ final class HelioStoreSink: HelioHistorySink {
         for night in HelioSleepSelection.nightsToWrite(overnight, manuallyEdited: edited)
         where log.owner(ofNightFrom: night.window.start, to: night.window.end) == family
             && !storedNights.contains(where: { $0.window == night.window }) {
+            // Decision 28f stitches sessions 60 min or less apart into one night, so a night can grow
+            // after it was written to Apple Health (back to bed within the hour, after the Sleep Focus
+            // finalization or the settle margin let the first part through). The written night stands:
+            // a different night for its key (the stitched one, or another sleep that would replace it)
+            // is kept out, so Health gets no second write of the night and nothing written is silently
+            // replaced. A night not yet written still stitches. The later session is not stored as a
+            // row of its own in v1 (strap naps are 28c's follow-up): an open question for Juan.
+            if let written = store.writtenNightSpan(for: night),
+               abs(written.start.timeIntervalSince(night.window.start)) > 1 || abs(written.end.timeIntervalSince(night.window.end)) > 1 {
+                if keptApartLogged.insert(night.window).inserted {
+                    helioLog.notice("helio: sleep \(Self.clockSpan(night.window, in: night.recordedTimeZone), privacy: .public) would change a night already in Apple Health (\(Self.clockSpan(written, in: night.recordedTimeZone), privacy: .public)); the written night stands")
+                }
+                continue
+            }
             let outcome = try store.saveHelioNight(night, device: timeline)
             if outcome == .inserted || outcome == .updated { storedNights.append(night) }
         }
