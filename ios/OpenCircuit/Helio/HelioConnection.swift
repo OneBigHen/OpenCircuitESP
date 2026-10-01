@@ -255,7 +255,9 @@ final class HelioConnection: NSObject {
             findState: findState,
             onSyncFinished: { result, timeline in
                 await HelioConnection.flushToHealth(result: result, timeline: timeline, store: store)
-            })
+            },
+            // A strap workout holds the link (#227): syncs wait until it ends.
+            workoutHoldsLink: { StrapWorkoutRecorder.holdsStrapLink })
         self.session = session
         session.start()
     }
