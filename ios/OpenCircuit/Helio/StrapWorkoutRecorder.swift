@@ -132,7 +132,8 @@ final class StrapWorkoutRecorder {
     /// A workout is running in THIS process: the strap's history syncs wait (`HelioSession.syncHistory`),
     /// like the ring's drain waits for its workout (T6). In memory on purpose: a killed process leaves
     /// nothing holding the link.
-    private(set) static var holdsStrapLink = false
+    static var holdsStrapLink: Bool { running?.isRecording == true }
+    private static weak var running: StrapWorkoutRecorder?
 
     // MARK: Collaborators
 
@@ -211,7 +212,7 @@ final class StrapWorkoutRecorder {
         guard state == .idle, let session = source(), canStart(session) else { return }
         let now = clock()
         let sport = selectedSport
-        Self.holdsStrapLink = true
+        Self.running = self
         timeline = session.timeline
         ledger = WorkoutActivityLedger(start: now)
         profileSnapshot = profile()
@@ -357,7 +358,7 @@ final class StrapWorkoutRecorder {
         let end = ledger.openPauseStart ?? now
         tickTask?.cancel()
         tickTask = nil
-        Self.holdsStrapLink = false
+        if Self.running === self { Self.running = nil }
         attached?.stopWorkoutHeartRate()
         attached?.heartRateObserver = nil
         attached = nil
@@ -396,7 +397,7 @@ final class StrapWorkoutRecorder {
         guard state == .active else { return }
         tickTask?.cancel()
         tickTask = nil
-        Self.holdsStrapLink = false
+        if Self.running === self { Self.running = nil }
         attached?.stopWorkoutHeartRate()
         attached?.heartRateObserver = nil
         attached = nil

@@ -279,19 +279,20 @@ public enum StrapWorkoutRecovery {
     /// Decide what to do with a journal the previous process left behind.
     ///
     /// The workout closes at its LAST SAMPLE: the app has evidence the person was exercising up to
-    /// the last reading it received, and none after. When no reading ever arrived (the strap never
-    /// connected, say), it closes at the last heartbeat, exactly like the ring's recovery. A pause
-    /// open at death closes it at the pause's start (the last running instant). Readings after
-    /// `lastAliveAt` can't exist (they are appended before the heartbeat that follows them), and
-    /// anything dated in the future is refused rather than written into Apple Health.
+    /// the last reading it journaled (readings are appended every second, the heartbeat every ten),
+    /// and none after. When no reading ever arrived (the strap never connected, say), it closes at
+    /// the last heartbeat, exactly like the ring's recovery. A pause open at death closes it at the
+    /// pause's start (the last running instant; pauses are journaled the moment they happen).
+    /// Anything dated in the future is refused rather than written into Apple Health.
     public static func decide(journal: StrapWorkoutJournal?, samples: [HRSample], now: Date = Date()) -> Decision {
         guard let journal else { return .nothingToRecover }
         let start = journal.ledger.start
-        let inSpan = samples.filter { $0.end > start && $0.end <= max(journal.lastAliveAt, start) }
+        guard journal.lastAliveAt <= now else { return .discard(.endsInTheFuture) }
+        let inSpan = samples.filter { $0.end > start }
         var end = inSpan.map(\.end).max() ?? journal.lastAliveAt
         if let paused = journal.ledger.openPauseStart { end = min(end, paused) }
         guard end > start, journal.ledger.activeSeconds(until: end) > 0 else { return .discard(.noObservedSpan) }
-        guard end <= now, journal.lastAliveAt <= now else { return .discard(.endsInTheFuture) }
+        guard end <= now else { return .discard(.endsInTheFuture) }
         return .offer(RecoveredStrapWorkout(sport: journal.sport, ledger: journal.ledger, end: end,
                                             samples: inSpan.filter { $0.end <= end }, timelineRaw: journal.timelineRaw))
     }
