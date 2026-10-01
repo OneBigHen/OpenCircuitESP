@@ -172,8 +172,11 @@ final class HelioStoreSink: HelioHistorySink {
         self.store = store
     }
 
+    /// The clock the one-time stress backfill measures its week from (#239). Tests set the session's.
+    var clock: () -> Date = { Date() }
+
     func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date] {
-        store.applyHelioStressBackfillIfNeeded(device: timeline)   // #239: once per strap, before the plan
+        store.applyHelioStressBackfillIfNeeded(device: timeline, now: clock())   // #239: once per strap, before the plan
         return store.helioFetchCursors(device: timeline)
     }
 
