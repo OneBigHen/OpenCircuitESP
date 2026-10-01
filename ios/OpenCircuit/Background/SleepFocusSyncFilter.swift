@@ -158,8 +158,10 @@ private enum SleepFocusSyncRunner {
     /// itself ("helio strap: …", kind `sleepFocus`); the alert passes follow a finished sync.
     private static func runStrap(store: LocalStore) async {
         let scheduler = BackgroundRefreshScheduler()
+        // T, the moment Sleep Focus ended (now): its nights skip the margin only within 30 min of it
+        // (decision 31).
         let run = await HelioBackgroundSyncService.live(store: store).run(
-            kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: true)
+            kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: Date())
         guard !Task.isCancelled else { return }
         await evaluateAlerts()
         if run.ending == .synced {

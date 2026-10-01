@@ -27,6 +27,32 @@ import ZeppKit
 // for the launch only: the next launch (a background relaunch too) tries once more, which is how the
 // strap comes back once Zepp lets go of it (review-225 F1).
 
+/// Decision 31: Sleep Focus turning off at time T ("the night is over") lets the strap's nights skip
+/// the 20-minute settle margin only in a Health flush that STARTS within `window` of T. Every path that
+/// carries it (the Focus run itself, a waiting run's request on the link, a hand-off to a session, a
+/// sync result an adopting run reads) carries T, and the decision is made in one place, where the
+/// flush starts (`HelioConnection.healthFlush`). So a path that carries a stale T can only delay a
+/// night (the margin applies), never write one early.
+enum SleepFocusFinalization {
+    /// Decision 31's window. It covers every legitimate use: the Focus run's own budget, a sync handed
+    /// to the app (at most a 90 s stall), and a waiting run's request used by the active run.
+    static let window: TimeInterval = 30 * 60
+
+    /// Whether a flush starting at `flushStart` may skip the margin for a Focus that ended at `focusEnd`.
+    static func applies(focusEndedAt focusEnd: Date?, flushStartsAt flushStart: Date) -> Bool {
+        guard let focusEnd else { return false }
+        return flushStart.timeIntervalSince(focusEnd) <= window
+    }
+
+    /// One T when two meet (a run's own and a waiting run's request, or a hand-off onto a session that
+    /// already carries one): the latest. It is the most recent "the night is over", the one the flush
+    /// answers; an earlier T only expires sooner, so keeping it would only delay a night that a real,
+    /// later Focus end already allows.
+    static func latest(_ a: Date?, _ b: Date?) -> Date? {
+        [a, b].compactMap { $0 }.max()
+    }
+}
+
 /// What the background run needs from the strap's connection: `HelioConnection` in the app, a
 /// simulated strap in the tests.
 @MainActor
@@ -57,7 +83,7 @@ protocol HelioBackgroundLink: AnyObject {
     /// run holding the link (review-225b N-a). That run ORs it into its flush or hand-off, and it is
     /// cleared when that run returns, used or not (review-225c SF-1), so it never reaches a later run.
     /// A waiter that iOS expires leaves nothing.
-    var pendingNightsFinalization: Bool { get set }
+    var pendingNightsFinalization: Date? { get set }
     /// Arm a connect to the saved strap by identifier (no scan). false when there is none.
     func connectForBackground() -> Bool
     /// End the link cleanly and don't reconnect by itself: stop a running find, ack an open round
@@ -166,7 +192,7 @@ struct HelioBackgroundSyncService {
     /// own): the rows of `timeline`, attributed from the row and the strap's `identity`, never from
     /// the current device choice (decision 28).
     let flush: @MainActor (_ timeline: SyncDeviceID, _ nights: [HelioSleepSelection.Night],
-                           _ identity: WearableIdentity?, _ finalized: Bool) async -> HealthKitWriter.FlushResult?
+                           _ identity: WearableIdentity?, _ focusEndedAt: Date?) async -> HealthKitWriter.FlushResult?
     let now: @MainActor () -> Date
     /// One wait between checks (250 ms in the app; the tests move the simulated strap along instead).
     let pause: @MainActor () async -> Void
@@ -177,9 +203,10 @@ struct HelioBackgroundSyncService {
     /// its sync to the app instead of tearing down the link the person is now using (review-225 S1).
     let appIsActive: @MainActor () -> Bool
 
-    /// One bounded run. `nightsFinalized` is the Sleep Focus wake's "the night is over" signal: the
-    /// strap's nights then skip the 20-minute quiet margin, as the ring's do on that wake.
-    func run(kind: TaskRecord.Kind, timeout: TimeInterval, nightsFinalized: Bool = false) async -> HelioBackgroundRun {
+    /// One bounded run. `nightsFinalized` is the Sleep Focus wake's "the night is over": the time T
+    /// Sleep Focus ended. The strap's nights then skip the 20-minute quiet margin, as the ring's do on
+    /// that wake, but only in a flush that starts within 30 minutes of T (decision 31).
+    func run(kind: TaskRecord.Kind, timeout: TimeInterval, nightsFinalized: Date? = nil) async -> HelioBackgroundRun {
         let start = now()
         var run = HelioBackgroundRun(ending: .outOfTime)
         let syncDeadline = start.addingTimeInterval(max(0, timeout - Self.flushReserve))
@@ -191,7 +218,9 @@ struct HelioBackgroundSyncService {
         while link.activeBackgroundRuns > 0 {
             if Task.isCancelled || now() >= syncDeadline {
                 // Review-225c SF-1: only a waiter that gave up (not one iOS expired) leaves its request.
-                if nightsFinalized, !Task.isCancelled { link.pendingNightsFinalization = true }
+                if let focusEnd = nightsFinalized, !Task.isCancelled {
+                    link.pendingNightsFinalization = SleepFocusFinalization.latest(link.pendingNightsFinalization, focusEnd)
+                }
                 // Review-225b N-c: an expiry while waiting is an expiry (no alert pass follows).
                 run.ending = Task.isCancelled ? .expired : .anotherRunActive
                 return record(run, kind: kind)
@@ -217,7 +246,7 @@ struct HelioBackgroundSyncService {
             // Review-225c SF-1: a waiter's request lives only as long as this run. Unused (this run
             // expired, ended quietly, or was already in its flush), it goes with it, so it can never
             // finalize an unrelated flush hours later.
-            link.pendingNightsFinalization = false
+            link.pendingNightsFinalization = nil
         }
         // Review-225b S-A: sessions made from here to the end of the watch loop are this run's. The
         // mark is dropped before anything after the loop awaits (teardown grace, Health flush), so a
@@ -287,9 +316,9 @@ struct HelioBackgroundSyncService {
             link.session?.backgroundRunOwnsSyncs = false   // one made during the loop's last turn, not yet watched
             // Review-225b S-B: the Sleep Focus run's "the night is over" goes with the sync, so the
             // hook's flush writes the night without the 20-minute margin, as this run would have.
-            if takeNightsFinalized(nightsFinalized) {
-                watched?.finalizeNightsOnHandOff = true
-                link.session?.finalizeNightsOnHandOff = true
+            if let focusEnd = takeNightsFinalized(nightsFinalized) {
+                watched?.finalizeNightsOnHandOff = SleepFocusFinalization.latest(watched?.finalizeNightsOnHandOff, focusEnd)
+                link.session?.finalizeNightsOnHandOff = SleepFocusFinalization.latest(link.session?.finalizeNightsOnHandOff, focusEnd)
             }
             run.ending = .handedToApp
             return record(run, kind: kind)
@@ -322,19 +351,21 @@ struct HelioBackgroundSyncService {
             let flushStart = now()
             // Review-225c SF-2: a sync a Focus run handed over, then adopted here, keeps that run's
             // finalization (it rides on the result).
-            let finalized = takeNightsFinalized(nightsFinalized) || run.result?.nightsFinalized == true
+            // Decision 31: whichever Focus end reaches this flush, `healthFlush` decides at its start.
+            let focusEnd = SleepFocusFinalization.latest(takeNightsFinalized(nightsFinalized), run.result?.nightsFinalized)
             run.flush = await flush(timeline, run.result?.nights ?? [], run.result?.identity ?? watched?.identity,
-                                    finalized)
+                                    focusEnd)
             run.flushMS = Self.ms(from: flushStart, to: now())
             if run.flush?.wroteAnything == true { observability.recordHealthWrite() }
         }
         return record(run, kind: kind)
     }
 
-    /// This run's finalization, ORed with one a waiting Sleep Focus run left on the link (consumed).
-    private func takeNightsFinalized(_ own: Bool) -> Bool {
-        defer { link.pendingNightsFinalization = false }
-        return own || link.pendingNightsFinalization
+    /// This run's Focus end, or the one a waiting Sleep Focus run left on the link, whichever is later
+    /// (the link's is consumed).
+    private func takeNightsFinalized(_ own: Date?) -> Date? {
+        defer { link.pendingNightsFinalization = nil }
+        return SleepFocusFinalization.latest(own, link.pendingNightsFinalization)
     }
 
     /// Ack an open round `03 09` and drop the link (the find stop goes out first). false when no
@@ -367,9 +398,9 @@ extension HelioBackgroundSyncService {
         connection.setLocalStore(store)
         return HelioBackgroundSyncService(
             link: connection, keyStore: connection.keyStore, observability: ObservabilityStore(),
-            flush: { timeline, nights, identity, finalized in
+            flush: { timeline, nights, identity, focusEndedAt in
                 await HelioConnection.healthFlush(timeline: timeline, store: store, nights: nights,
-                                                  identity: identity, nightsFinalized: finalized)
+                                                  identity: identity, nightsFinalized: focusEndedAt)
             },
             now: { Date() },
             pause: { try? await Task.sleep(for: .milliseconds(250)) },

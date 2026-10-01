@@ -69,7 +69,7 @@ final class HelioConnection: NSObject {
     @ObservationIgnored var backgroundRunAdoptsNewSessions = false
     /// A Sleep Focus run's finalization, left when it gave up waiting for the run holding the link
     /// (`HelioBackgroundLink`, review-225b N-a); cleared when that run returns (review-225c SF-1).
-    @ObservationIgnored var pendingNightsFinalization = false
+    @ObservationIgnored var pendingNightsFinalization: Date?
 
     private enum PendingAction { case scan, reconnect, resumeRestored }
 
@@ -297,11 +297,14 @@ final class HelioConnection: NSObject {
 
     /// The strap's Apple Health pass, shared by the post-sync hook and the background run (#215
     /// phase 4): its timeline's pending samples (HRV withheld, decision 14) and `nights`. nil when
-    /// Health isn't available on this device, or when `mayFlush` says no. `nightsFinalized` skips
-    /// the nights' 20-minute quiet margin (the Sleep Focus wake, as for the ring).
+    /// Health isn't available on this device, or when `mayFlush` says no. `nightsFinalized` is the
+    /// time T Sleep Focus ended, if a Focus wake is behind this flush: the nights skip their 20-minute
+    /// quiet margin (as the ring's do on that wake) only if this flush starts within 30 minutes of T.
+    /// This is the one place that decides it (decision 31).
     static func healthFlush(timeline: SyncDeviceID, store: LocalStore, nights: [HelioSleepSelection.Night],
-                            identity: WearableIdentity?, nightsFinalized: Bool = false) async -> HealthKitWriter.FlushResult? {
+                            identity: WearableIdentity?, nightsFinalized: Date? = nil) async -> HealthKitWriter.FlushResult? {
         guard HealthKitWriter.isAvailable else { return nil }
+        let finalized = SleepFocusFinalization.applies(focusEndedAt: nightsFinalized, flushStartsAt: Date())
         // Decision 28 (review-224 S3): record the identity the sync ended with, so this flush — and
         // any later one for these rows — names THIS strap even if the wearer has switched back to
         // the ring meanwhile. A strap that never passed the first-write guard writes nothing once
@@ -314,7 +317,7 @@ final class HelioConnection: NSObject {
         }
         let flush = await HealthKitWriter().flushToHealth(
             store: store, device: timeline, mirroredKinds: HelioHealthPolicy.healthMirroredKinds(),
-            strapNights: nights.map(\.segments), strapNightsFinalized: nightsFinalized)
+            strapNights: nights.map(\.segments), strapNightsFinalized: finalized)
         helioLog.notice("helio: Health flush samples=\(flush.samples, privacy: .public) sleep=\(flush.sleepSegments, privacy: .public) steps=\(flush.steps, privacy: .public) rhr=\(flush.restingDays, privacy: .public)")
         return flush
     }
