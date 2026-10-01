@@ -1071,6 +1071,9 @@ final class HealthKitWriter {
     /// THE app's only HealthKit authorization request. Adding a second one is the defect fixed on
     /// this branch — see `authorizationReadTypes`. A new type belongs in `allTypes` (to write) or in
     /// `authorizationReadTypes` (to read), never in a request of its own.
+    ///
+    /// The one exception is `vo2Max` (#232), asked lazily by `VO2MaxHealthWriter` when the first
+    /// estimate is written. It is safe only because this request never names it — see that file.
     func requestAuthorization() async throws {
         // `authorizationReadTypes` is passed BY NAME at every call site here and in
         // `authorizationPromptAvailable()` — never bound to a local first. A local is how the probe

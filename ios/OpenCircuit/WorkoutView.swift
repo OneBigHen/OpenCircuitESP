@@ -478,6 +478,13 @@ struct WorkoutView: View {
                 }
                 .padding(.horizontal)
 
+                // Training load, and the VO₂ max estimate for an outdoor run (#232).
+                WorkoutTrainingMetricsSection(summary: summary,
+                                              vo2Outcome: manager.vo2MaxOutcome,
+                                              vo2HealthStatus: manager.vo2MaxHealthStatus,
+                                              distanceUnit: distanceUnit)
+                    .padding(.horizontal)
+
                 // Honesty notes
                 VStack(alignment: .leading, spacing: 6) {
                     if summary.hrSampleCount < 30 {

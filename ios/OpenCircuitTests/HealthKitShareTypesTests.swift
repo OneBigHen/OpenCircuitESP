@@ -50,6 +50,19 @@ final class HealthKitShareTypesTests: XCTestCase {
                        + "second request.")
     }
 
+    /// VO₂ max (#232) is shared through its OWN lazy request (`VO2MaxHealthWriter`), so it must
+    /// appear in neither half of the main request: a type named by two requests is the build-50
+    /// shape, and a type in `allTypes` would also make the #129 probe prompt every install at launch.
+    func testVO2MaxStaysOutOfTheMainRequest() {
+        let writer = HealthKitWriter()
+        let vo2 = HKQuantityType(.vo2Max)
+        XCTAssertFalse(writer.allTypes.contains(vo2),
+                       "vo2Max is requested lazily by VO2MaxHealthWriter, never at launch")
+        XCTAssertFalse(writer.authorizationReadTypes.contains(vo2),
+                       "no type may be named by both authorization requests")
+        XCTAssertEqual(VO2MaxHealthWriter.vo2MaxType, vo2)
+    }
+
     /// The read half must stay clear of the same crash class the share half is pinned against.
     func testAuthorizationReadSetContainsNoCorrelationTypes() {
         XCTAssertFalse(HealthKitWriter().authorizationReadTypes.contains { $0 is HKCorrelationType },
