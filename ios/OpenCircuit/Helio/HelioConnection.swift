@@ -324,10 +324,16 @@ final class HelioConnection: NSObject {
         observability.recordSyncOutcome(kind: kind, success: !result.interrupted && result.roundsFailed == 0,
                                         detail: "helio: \(result.roundsStored) round(s) stored, \(result.roundsFailed) failed, \(result.nights.count) night(s)")
         guard let store else { return }
+        let flushStart = Date()
         guard let flush = await healthFlush(timeline: timeline, store: store, nights: result.nights,
                                             identity: result.identity,
                                             nightsFinalized: result.nightsFinalized) else { return }
         if flush.wroteAnything { observability.recordHealthWrite() }
+        // #233 item 5: a night this flush held back gets a refresh at its margin's end.
+        if let at = StrapNightRefresh.aim(nights: result.nights, focusEndedAt: result.nightsFinalized,
+                                          flushStartedAt: flushStart, afterWokeUp: false) {
+            BackgroundRefreshScheduler().scheduleRefresh(notBefore: at)
+        }
     }
 
     /// The strap's Apple Health pass, shared by the post-sync hook and the background run (#215

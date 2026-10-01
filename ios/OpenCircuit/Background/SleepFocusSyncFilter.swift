@@ -175,6 +175,8 @@ private enum SleepFocusSyncRunner {
         }
         scheduler.schedule()
         scheduler.scheduleProcessing()
+        // #233 item 5: a night this flush held back (it started over 30 min after Focus ended).
+        if let at = run.refreshAt { scheduler.scheduleRefresh(notBefore: at) }
     }
 
     private static func evaluateAlerts() async {

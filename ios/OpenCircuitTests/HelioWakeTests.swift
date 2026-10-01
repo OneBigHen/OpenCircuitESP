@@ -1,4 +1,6 @@
+import OpenCircuitKit
 import XCTest
+import ZeppKit
 @testable import OpenCircuit
 
 // Decision 33 (#233): when a wake syncs, and the catch-up coordinator's guarantees (one at a time,
@@ -66,6 +68,32 @@ final class HelioWakeTests: XCTestCase {
         XCTAssertFalse(gate.shouldCheck(now: now.addingTimeInterval(299), appIsActive: false, syncing: false, runActive: false))
         XCTAssertTrue(gate.shouldCheck(now: now.addingTimeInterval(300), appIsActive: false, syncing: false, runActive: false))
         XCTAssertEqual(HelioWakePolicy.kind(for: .idleTraffic), .cbWake)
+    }
+
+    // MARK: #233 item 5: the refresh after a held night
+
+    private func night(endingAt end: Date) -> HelioSleepSelection.Night {
+        let start = end.addingTimeInterval(-7 * 3600)
+        return HelioSleepSelection.Night(segments: [SleepSegment(start: start, end: end, stage: .asleepCore)],
+                                         window: DateInterval(start: start, end: end), strapScore: 80)
+    }
+
+    func testAHeldNightAimsTheNextRefreshAtItsMarginsEnd() {
+        let held = night(endingAt: now.addingTimeInterval(-5 * 60))
+        let settled = night(endingAt: now.addingTimeInterval(-3 * 3600))
+        XCTAssertEqual(StrapNightRefresh.aim(nights: [settled, held], focusEndedAt: nil, flushStartedAt: now, afterWokeUp: false),
+                       now.addingTimeInterval(15 * 60), "the held night's end + 20 min")
+        XCTAssertNil(StrapNightRefresh.aim(nights: [settled], focusEndedAt: nil, flushStartedAt: now, afterWokeUp: false))
+        XCTAssertNil(StrapNightRefresh.aim(nights: [], focusEndedAt: nil, flushStartedAt: now, afterWokeUp: false))
+        XCTAssertNil(StrapNightRefresh.aim(nights: [held], focusEndedAt: now.addingTimeInterval(-60), flushStartedAt: now,
+                                           afterWokeUp: false), "finalized by Sleep Focus (decision 31): written already")
+        XCTAssertEqual(StrapNightRefresh.aim(nights: [held], focusEndedAt: now.addingTimeInterval(-31 * 60), flushStartedAt: now,
+                                             afterWokeUp: false), now.addingTimeInterval(15 * 60), "a stale Focus end doesn't count")
+        // After a woke-up catch-up the record may be late (§21.4): at least 30 min, one request for both.
+        XCTAssertEqual(StrapNightRefresh.aim(nights: [], focusEndedAt: nil, flushStartedAt: now, afterWokeUp: true),
+                       now.addingTimeInterval(30 * 60))
+        XCTAssertEqual(StrapNightRefresh.aim(nights: [held], focusEndedAt: nil, flushStartedAt: now, afterWokeUp: true),
+                       now.addingTimeInterval(30 * 60))
     }
 
     // MARK: Coordinator

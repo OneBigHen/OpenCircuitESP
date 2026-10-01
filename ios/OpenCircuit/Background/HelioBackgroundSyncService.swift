@@ -53,6 +53,31 @@ enum SleepFocusFinalization {
     }
 }
 
+/// #233 item 5: when the next app-refresh should come after a strap flush, so a night the flush held
+/// back doesn't wait for the next generic grant. nil when nothing is waiting.
+enum StrapNightRefresh {
+    /// After the strap's woke-up event the night's record may be late or partial (ZEPP_PROTOCOL.md
+    /// §21.4): look again this much later.
+    static let afterWokeUp: TimeInterval = 30 * 60
+
+    /// The latest of: the end of the earliest held night's settle margin (a night the flush didn't
+    /// write because its last segment ended under 20 minutes before the flush started, and no Sleep
+    /// Focus finalization applied, decision 31), and, after a woke-up catch-up, `afterWokeUp`. One
+    /// request covers both. The scheduler keeps it at least a minute away.
+    static func aim(nights: [HelioSleepSelection.Night], focusEndedAt: Date?, flushStartedAt: Date,
+                    afterWokeUp wokeUp: Bool) -> Date? {
+        var candidates: [Date] = []
+        if !SleepFocusFinalization.applies(focusEndedAt: focusEndedAt, flushStartsAt: flushStartedAt) {
+            let held = nights.compactMap { $0.segments.map(\.end).max() }
+                .filter { !SleepHealthGate.isSettled(latestSegmentEnd: $0, now: flushStartedAt) }
+                .map { $0.addingTimeInterval(SleepHealthGate.settleMargin) }
+            if let earliest = held.min() { candidates.append(earliest) }
+        }
+        if wokeUp { candidates.append(flushStartedAt.addingTimeInterval(afterWokeUp)) }
+        return candidates.max()
+    }
+}
+
 /// The run holding the link, as a later run sees it (#233 item 3: coalescing).
 struct HelioActiveRun: Equatable {
     enum Stage: Equatable {
@@ -185,6 +210,8 @@ struct HelioBackgroundRun: Equatable {
     var flush: HealthKitWriter.FlushResult?
     /// This run acked an open round `03 09` and dropped the link (out of time, or expired).
     var disconnected = false
+    /// When the next app-refresh should come for a night this run's flush held back (#233 item 5).
+    var refreshAt: Date?
 
     /// A quiet ending: nothing was fetched and nothing may be written (decision 7).
     var endedQuietly: Bool {
@@ -505,6 +532,8 @@ struct HelioBackgroundSyncService {
             run.flush = await flush(timeline, run.result?.nights ?? [], run.result?.identity ?? watched?.identity,
                                     focusEnd)
             run.flushMS = Self.ms(from: flushStart, to: now())
+            run.refreshAt = StrapNightRefresh.aim(nights: run.result?.nights ?? [], focusEndedAt: focusEnd,
+                                                  flushStartedAt: flushStart, afterWokeUp: wake == .strapEvent)
             if run.flush?.wroteAnything == true { observability.recordHealthWrite() }
         }
         return record(run, kind: kind)

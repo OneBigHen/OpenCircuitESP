@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // nothing, so a ring user's launch is unchanged.
         MainActor.assumeIsolated {
             HelioWakeCoordinator.afterRun = { run in
+                if let at = run.refreshAt { BackgroundRefreshScheduler().scheduleRefresh(notBefore: at) }
                 // A coalesced run's alert passes are the other run's (#233 item 3).
                 guard run.ending != .expired, !run.ending.isCoalesced else { return }
                 await Self.evaluateAlerts()
@@ -306,6 +307,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 }
                 scheduler.schedule()
                 scheduler.scheduleProcessing()
+                // #233 item 5: a night the flush held back gets its own refresh at the margin's end.
+                if let at = run.refreshAt { scheduler.scheduleRefresh(notBefore: at) }
                 completion.complete(success: run.success)
             } catch {
                 observability.recordSyncOutcome(kind: kind, success: false,

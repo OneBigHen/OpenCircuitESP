@@ -1592,6 +1592,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
         clock = clock.addingTimeInterval(6 * 3600)
         var flushes: [FlushCall] = []
         var begun = 0, ended: [Int] = [], done = 0
+        var catchUp: HelioBackgroundRun?
         let wake = HelioWakeCoordinator(.init(
             strapChosen: { true }, appIsActive: { false }, runActive: { link.activeBackgroundRuns > 0 },
             state: HelioWakeState(defaults), now: { [unowned self] in self.clock },
@@ -1602,7 +1603,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
                 await self.service(link, store: store, flushes: { flushes.append($0) })
                     .run(kind: HelioWakePolicy.kind(for: wake), timeout: RingBackgroundSyncService.defaultTimeout, wake: wake)
             },
-            expire: {}, afterRun: { _ in }, note: { _, _ in }))
+            expire: {}, afterRun: { catchUp = $0 }, note: { _, _ in }))
         link.onEvent = { event in if event == .wokeUp { wake.wake(.strapEvent) { done += 1 } } }
         link.transport?.push(link.device.unsolicited(endpoint: 0x001D, [0x06, 0x00]))
         link.transport?.drain()
@@ -1619,6 +1620,28 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertTrue(record.detail?.hasPrefix("helio strap: synced") == true, record.detail ?? "")
         XCTAssertEqual(Set(link.device.fetchAcks), [0x09])
         XCTAssertEqual(link.runStarts.count, 2)
+        // #233 item 5, §21.4: the night's record may be late after a woke-up event; look again later.
+        let refreshAt = try XCTUnwrap(catchUp?.refreshAt)
+        XCTAssertGreaterThanOrEqual(refreshAt.timeIntervalSince(clock), StrapNightRefresh.afterWokeUp - 60)
+    }
+
+    /// #233 item 5: a background run whose flush starts while the night is still inside its 20-minute
+    /// margin holds it back, and asks for the next refresh at the margin's end.
+    func testARunThatHoldsANightBackAimsTheNextRefreshAtItsMarginsEnd() async throws {
+        let store = try makeStore()
+        clock = Date(timeIntervalSince1970: midnight + 7 * 3600 + 5 * 60)   // 5 min after the fake night ends
+        let link = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let run = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(run.ending, .synced)
+        let end = try XCTUnwrap(run.result?.nights.first?.segments.map(\.end).max())
+        XCTAssertEqual(flushes.first?.nights, 1)
+        XCTAssertEqual(run.refreshAt, end.addingTimeInterval(SleepHealthGate.settleMargin))
+
+        clock = end.addingTimeInterval(3 * 3600)
+        let later = await service(link, store: store).run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertNil(later.refreshAt, "settled: nothing waiting")
     }
 
     // MARK: decision 35: the held, idle link's own traffic is a wake
