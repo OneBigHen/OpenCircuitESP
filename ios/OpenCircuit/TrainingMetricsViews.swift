@@ -164,21 +164,27 @@ struct WeeklyTrainingLoadLine: View {
     @State private var trend: TrainingLoad.WeeklyTrend?
 
     var body: some View {
-        Group {
-            if let trend {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Image(systemName: Self.symbol(trend.direction))
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text(Self.text(trend)).font(.caption).foregroundStyle(.secondary)
-                }
-                .accessibilityElement(children: .combine)
-            }
-        }
-        .task(id: reloadToken) {
+        content.task(id: reloadToken) {
             let now = Date()
             let age = HealthKitWriter.storedUserProfile().age
             let loads = await WorkoutLoadReader().recentLoads(now: now, age: age)
-            trend = loads.isEmpty ? nil : TrainingLoad.weeklyTrend(loads, now: now)
+            trend = TrainingLoad.weeklyTrend(loads, now: now)
+        }
+    }
+
+    /// Always a real view, so `.task` has something to attach to while the first load runs (a
+    /// conditional with no branch taken is not guaranteed to appear).
+    @ViewBuilder
+    private var content: some View {
+        if let trend {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: Self.symbol(trend.direction))
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(Self.text(trend)).font(.caption).foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+        } else {
+            Color.clear.frame(height: 0)
         }
     }
 
