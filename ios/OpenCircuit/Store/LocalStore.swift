@@ -1656,8 +1656,12 @@ struct LocalStore {
         return NightKeeping(keep: wentToBedWith && others.isEmpty, otherDeviceRowExists: !others.isEmpty)
     }
 
-    /// Every stored night a save of `[inBedStart, inBedEnd]` could resolve to (`resolveSleepRow`): the
-    /// rows its in-bed window overlaps, and the row on its night key.
+    /// Every stored night a save of `[inBedStart, inBedEnd]` contends with: the rows its in-bed window
+    /// overlaps (whichever synced first keeps those, 28a), and the row on its night key when that row
+    /// is the key's night. Decision 28d (review-224d S-1): of two sleeps that DON'T overlap but share
+    /// one key, the longer one that ends in the wake window is the night, so a shorter or evening
+    /// keyed row never makes this save's night unkeepable (it may be replaced by it). Only reached
+    /// with a non-empty ownership log (`nightKeeping`).
     private func contendingSleepRows(inBedStart: Date, inBedEnd: Date, night: Date?) -> [StoredSleepSummary] {
         var rows: [StoredSleepSummary] = []
         if inBedEnd > inBedStart {
@@ -1667,8 +1671,22 @@ struct LocalStore {
         }
         let dayStart = Calendar.current.startOfDay(for: night ?? SleepNightKey.night(inBedStart: inBedStart, inBedEnd: inBedEnd))
         let keyed = FetchDescriptor<StoredSleepSummary>(predicate: #Predicate { $0.night == dayStart })
-        for row in (try? context.fetch(keyed)) ?? [] where !rows.contains(where: { $0 === row }) { rows.append(row) }
+        for row in (try? context.fetch(keyed)) ?? [] where !rows.contains(where: { $0 === row })
+            && Self.keyedRowIsTheNight(row, againstInBedStart: inBedStart, inBedEnd: inBedEnd) {
+            rows.append(row)
+        }
         return rows
+    }
+
+    /// Decision 28d: whether a disjoint row on the same key is that key's night rather than the
+    /// incoming sleep. It is when it ends in the wake window and the incoming one doesn't, or when
+    /// both do and it is at least as long (a tie keeps the stored one). A row with no known window
+    /// (legacy) is kept as the night, the conservative side.
+    static func keyedRowIsTheNight(_ row: StoredSleepSummary, againstInBedStart inBedStart: Date, inBedEnd: Date) -> Bool {
+        guard row.inBedEnd > row.inBedStart, inBedEnd > inBedStart else { return true }
+        guard SleepNightKey.endsInWakeWindow(row.inBedEnd) else { return false }
+        guard SleepNightKey.endsInWakeWindow(inBedEnd) else { return true }
+        return row.inBedEnd.timeIntervalSince(row.inBedStart) >= inBedEnd.timeIntervalSince(inBedStart)
     }
 
     /// The Health spans of stored nights the OTHER device keeps (recorded ∪ edited window) that touch

@@ -803,4 +803,86 @@ final class DeviceOwnershipAppTests: XCTestCase {
             XCTAssertEqual(SleepCardView.liveSegments(staged, outcome: outcome), staged, "\(String(describing: outcome))")
         }
     }
+
+    // MARK: Review-224d S-1 / decision 28d: a strap sleep takes a night key only if it could be that night
+
+    /// One strap sync of `spans` (local hours of `oNow`'s day, one session each) through the production
+    /// path, under `log`. Returns the sync's night windows.
+    @discardableResult
+    private func strapSync(_ spans: [(Double, Double)], now: Date, log: DeviceOwnershipLog,
+                           store: LocalStore) throws -> [DateInterval] {
+        ownership.install(log)
+        let device = makeStrap()
+        device.fetchData[.sleepSession] = (stamp(localHour(0).timeIntervalSince1970 - 86_400),
+                                           spans.flatMap { localSession($0.0, $0.1, stages: [($0.0, $0.1, 0x04)]) })
+        clock = now
+        let (session, _) = connect(device, store: store)
+        XCTAssertEqual(session.lastSyncResult?.interrupted, false)
+        return session.lastSyncResult?.nights.map(\.window) ?? []
+    }
+
+    private func nightRows(_ store: LocalStore) throws -> [String] {
+        try store.context.fetch(FetchDescriptor<StoredSleepSummary>(sortBy: [SortDescriptor(\.inBedStart)])).map {
+            "\(($0.inBedStart.timeIntervalSince(localHour(0))) / 3600)…\(($0.inBedEnd.timeIntervalSince(localHour(0))) / 3600) asleep=\($0.asleepMin)"
+        }
+    }
+
+    /// From review-224d's probe: ring→strap at 05:00, mid-sleep (the ring went to bed with the night);
+    /// the strap syncs a 20:00–22:30 evening doze the overnight gate accepts (midpoint 21:15). Back to the
+    /// ring at 23:15: the ring's 23:00–07:00 night is stored and mirrored, and the doze took no key.
+    func testAnEveningStrapDozeNeverTakesTheRingsNightKey() throws {
+        let store = try makeStore()
+        let nights = try strapSync([(20, 22.5)], now: localHour(23),
+                                   log: DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: localHour(5))]), store: store)
+        XCTAssertEqual(nights, [], "an evening doze is never a night")
+        XCTAssertEqual(try nightRows(store), [])
+        ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: localHour(5)),
+                                                       .init(family: .ringConn, since: localHour(23.25))]))
+        XCTAssertEqual(try saveRingNight(store, from: localHour(-1), to: localHour(7)), .inserted)
+        XCTAssertTrue(HealthKitWriter.ringOwnsNight(ringNight(from: localHour(-1), to: localHour(7)), store: store))
+    }
+
+    /// The morning variant: a switch at 07:15 after the ring's night, then the strap's 07:30–10:00
+    /// back-to-sleep (a legal night by 28c and 28d, and on the same key). The two don't overlap, so the
+    /// longer one that ends in the wake window, the ring's 23:00–07:00, is the night, in either order.
+    func testAMorningStrapSleepNeverMakesTheRingsLongerNightUnkeepable() throws {
+        let strapTime = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: localHour(7.25))])
+        let backToRing = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: localHour(7.25)),
+                                                      .init(family: .ringConn, since: localHour(12))])
+        // Strap first (the review's order): its sleep is stored, then the ring's night replaces it.
+        let store = try makeStore()
+        XCTAssertEqual(try strapSync([(7.5, 10)], now: localHour(11), log: strapTime, store: store).count, 1)
+        ownership.install(backToRing)
+        XCTAssertTrue(try saveRingNight(store, from: localHour(-1), to: localHour(7)).wroteRow)
+        XCTAssertEqual(try nightRows(store), ["-1.0…7.0 asleep=480"], "one row, the ring's night")
+        XCTAssertTrue(HealthKitWriter.ringOwnsNight(ringNight(from: localHour(-1), to: localHour(7)), store: store))
+        XCTAssertEqual(store.nightKeeping(.zeppOS, inBedStart: localHour(7.5), inBedEnd: localHour(10)).keep, false,
+                       "and the strap's re-sync of its shorter sleep never takes the key back")
+
+        // Ring first: the strap's shorter sleep on the same key is skipped.
+        let other = try makeStore()
+        ownership.install(strapTime)
+        XCTAssertEqual(try saveRingNight(other, from: localHour(-1), to: localHour(7)), .inserted)
+        XCTAssertEqual(try strapSync([(7.5, 10)], now: localHour(11), log: strapTime, store: other), [])
+        XCTAssertEqual(try nightRows(other), ["-1.0…7.0 asleep=480"])
+    }
+
+    /// From review-224d's `evening-then-night` probe, strap only: an evening doze and the night in one
+    /// sync, more than 60 min apart. The doze doesn't end in a wake window, so only the night is stored.
+    /// (The probe's exact shape, a 60-minute gap, is one night under 28f; see the stitching test.)
+    func testAnEveningDozeBeforeTheNightIsNotStoredAsItsOwnNight() throws {
+        let store = try makeStore()
+        let nights = try strapSync([(-4, -2), (-0.5, 7)], now: localHour(9), log: .strapOwnsAllTime, store: store)
+        XCTAssertEqual(nights, [DateInterval(start: localHour(-0.5), end: localHour(7))])
+        XCTAssertEqual(try nightRows(store), ["-0.5…7.0 asleep=450"])
+    }
+
+    /// Decision 28d is only reached with a non-empty log: on an empty log the keyed-row rule never runs.
+    func testTheKeyedRowRuleIsANoOpWithAnEmptyLog() throws {
+        ownership.install(DeviceOwnershipLog())
+        let store = try makeStore()
+        let outcomes = try [(7.5, 10.0), (-1.0, 7.0), (20.0, 22.5)].map { try saveNight(store, .ringConn, $0.0, $0.1) }
+        XCTAssertFalse(outcomes.contains(.ownedByOtherDevice) || outcomes.contains(.ownedByOtherDeviceNoRow))
+        XCTAssertTrue(store.nightKeeping(.ringConn, inBedStart: at(-1), inBedEnd: at(7)).keep)
+    }
 }

@@ -254,11 +254,20 @@ final class HelioStoreSink: HelioHistorySink {
         // Decision 28c (review-224c S-1): only an overnight strap sleep is a night. The ring's own gate,
         // with the ring's parameters (`SleepWindow.isOvernightBlock(start:end:)`, local calendar), so a
         // daytime session never takes a night key and can never make the ring's night unkeepable.
+        // Decision 28d (review-224d S-1): it must also END in its key's wake window, the store's own rule
+        // for "this is the night its key names" (`SleepNightKey.endsInWakeWindow`), so an evening doze
+        // the overnight gate accepts (20:00–22:30) never takes a night key either.
         let overnight = nights.filter { night in
-            if SleepWindow.isOvernightBlock(start: night.window.start, end: night.window.end) { return true }
+            let isOvernight = SleepWindow.isOvernightBlock(start: night.window.start, end: night.window.end)
+            let endsInWakeWindow = SleepNightKey.endsInWakeWindow(night.window.end)
+            if isOvernight, endsInWakeWindow { return true }
             if notOvernightLogged.insert(night.window).inserted {
                 let span = Self.clockSpan(night.window)
-                helioLog.notice("helio: sleep session \(span, privacy: .public) is not overnight; not stored as a night")
+                if !isOvernight {
+                    helioLog.notice("helio: sleep session \(span, privacy: .public) is not overnight; not stored as a night")
+                } else {
+                    helioLog.notice("helio: sleep session \(span, privacy: .public) doesn't end in its night's wake window; not stored as a night")
+                }
             }
             return false
         }
