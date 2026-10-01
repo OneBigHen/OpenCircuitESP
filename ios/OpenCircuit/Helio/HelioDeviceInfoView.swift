@@ -18,6 +18,8 @@ struct HelioDeviceInfoView: View {
     @State private var hasKey = HelioKeyStore.shared.hasKey
     @State private var keyRejected = HelioKeyStore.shared.isRejected
     @State private var diagnosticsURL: URL?
+    /// Decision 33's step-count wake (`HelioHealthWake`).
+    @State private var healthWake = HelioHealthWake.shared.isEnabled
     @State private var diagnosticsError: String?
 
     private var session: HelioSession? { connection.session }
@@ -101,6 +103,19 @@ struct HelioDeviceInfoView: View {
                 } footer: {
                     Text(ringAlarmFooter)
                 }
+            }
+
+            Section {
+                Toggle("Sync in the background more reliably", isOn: Binding(
+                    get: { healthWake },
+                    set: { on in
+                        healthWake = on
+                        Task { if on { await HelioHealthWake.shared.enable() } else { await HelioHealthWake.shared.disable() } }
+                    }))
+            } header: {
+                Text("Background sync")
+            } footer: {
+                Text("When your iPhone counts new steps, Apple Health can wake OpenCircuit about once an hour to sync the strap, so your data reaches Apple Health without opening the app. Turning this on asks to read your iPhone's step count.")
             }
 
             Section {

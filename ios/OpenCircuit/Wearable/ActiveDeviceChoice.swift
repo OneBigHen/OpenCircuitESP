@@ -138,10 +138,13 @@ enum DeviceSwitcher {
             RingScanner.shared.disconnect()
             store.set(.helioStrap)
             HelioConnection.shared.reconnectKnown()
+            if HelioHealthWake.wasEverUsed() { Task { await HelioHealthWake.shared.deviceChanged() } }
         case .ringConn:
             HelioConnection.shared.disconnect()
             store.set(.ringConn)
             RingScanner.shared.reconnectKnownPeripheral()
+            // Decision 33: the step-count wake is the strap's; leaving it turns HealthKit delivery off.
+            if HelioHealthWake.wasEverUsed() { Task { await HelioHealthWake.shared.deviceChanged() } }
         }
     }
 }

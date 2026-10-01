@@ -71,6 +71,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 }
             }
         }
+        // Decision 33 (#233): the iPhone's step count as a second wake, strap users who turned it on
+        // only. The observer query is set up during launch, as HealthKit requires for its background
+        // delivery; with the ring chosen, a delivery left on is turned off. A ring-only install has
+        // neither key, so nothing is constructed.
+        if helioActive || HelioHealthWake.wasEverUsed() {
+            MainActor.assumeIsolated { _ = HelioHealthWake.shared.configureAtLaunch() }
+        }
         if helioActive, HelioConnection.hasSavedStrap {
             MainActor.assumeIsolated {
                 // A fallback-built container is published as `sharedContainer`, so later sites reuse
