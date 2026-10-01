@@ -814,7 +814,6 @@ final class HelioSessionTests: XCTestCase {
     /// sync-end hook flushes and runs the body-alert pass, once. ContentView's foreground hook, if it
     /// fires for the same sync, finds the pass taken.
     func testASyncThatEndsWithTheAppInactiveGetsExactlyOneAlertPass() async throws {
-        StrapSyncAlertPass.reset()
         let rig = connect(makeStrap(), store: try makeStore())
         let result = try XCTUnwrap(rig.session.lastSyncResult)
         XCTAssertEqual(rig.session.syncsFinished, 1)
@@ -840,7 +839,6 @@ final class HelioSessionTests: XCTestCase {
     /// Ending with the app active: the flush, and no pass from this path (ContentView's hook runs it).
     /// And when the foreground hook got there first, this path adds none.
     func testASyncThatEndsWithTheAppActiveGetsNoPassFromThisPath() async throws {
-        StrapSyncAlertPass.reset()
         let rig = connect(makeStrap(), store: try makeStore())
         let result = try XCTUnwrap(rig.session.lastSyncResult)
         var flushes = 0, passes = 0
@@ -853,9 +851,32 @@ final class HelioSessionTests: XCTestCase {
         XCTAssertEqual(passes, 0, "the foreground hook already ran it")
     }
 
+    /// Review-225f SF-1 (its probe P1, kept): a reconnect's new session usually lands at the address of
+    /// the one that was freed, with `syncsFinished` back at 0. Its first sync must still get its alert
+    /// pass. A claim keyed globally by `ObjectIdentifier` refused it every time; the claim now lives on
+    /// the session, so a new one starts unclaimed.
+    func testAReconnectsNewSessionIsNeverRefusedItsFirstAlertPass() async throws {
+        let store = try makeStore()
+        var sameAddress = 0
+        for _ in 0..<20 {
+            var old: Rig? = connect(makeStrap(), store: store)
+            XCTAssertEqual(old?.session.syncsFinished, 1)
+            XCTAssertTrue(StrapSyncAlertPass.claim(try XCTUnwrap(old?.session)), "the old session's sync got its pass")
+            let oldAddress = ObjectIdentifier(try XCTUnwrap(old?.session))
+            old = nil                                    // the link dropped; the session is freed
+            for _ in 0..<50 { await Task.yield() }       // its sync-end task lets go of it
+            let fresh = connect(makeStrap(), store: store)
+            XCTAssertEqual(fresh.session.syncsFinished, 1)
+            if ObjectIdentifier(fresh.session) == oldAddress { sameAddress += 1 }
+            XCTAssertNil(fresh.session.alertPassClaimedSync, "a new session starts unclaimed")
+            XCTAssertTrue(StrapSyncAlertPass.claim(fresh.session), "the new session's first sync gets its pass")
+            XCTAssertFalse(StrapSyncAlertPass.claim(fresh.session), "and only one")
+        }
+        print("review-225f SF-1 test: new session at the freed address \(sameAddress)/20")
+    }
+
     /// A sync a background run owns: nothing from this path; the run flushes and runs its own passes.
     func testASyncABackgroundRunOwnsGetsNothingFromThisPath() async throws {
-        StrapSyncAlertPass.reset()
         let rig = connect(makeStrap(), store: try makeStore())
         var result = try XCTUnwrap(rig.session.lastSyncResult)
         result.endedInBackgroundRun = true
@@ -943,7 +964,6 @@ final class HelioSessionTests: XCTestCase {
     /// With review-236 S1's path: an activation sync, the app goes to the background mid-sync, the sync
     /// ends there → exactly one alert pass (the sync-end hook's), and ContentView's hook adds none.
     func testAnActivationSyncThatEndsInTheBackgroundGetsExactlyOneAlertPass() async throws {
-        StrapSyncAlertPass.reset()
         var results: [HelioSyncResult] = []
         let rig = connect(makeStrap(), store: try makeStore(), autoSync: false, finished: { results.append($0) })
         var gate = HelioActivationSync()
