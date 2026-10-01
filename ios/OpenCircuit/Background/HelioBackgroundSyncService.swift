@@ -40,15 +40,18 @@ protocol HelioBackgroundLink: AnyObject {
     /// Where the strap's rows live (`zeppos:<id>`): the connected strap's, else the saved one's; nil
     /// when no strap was ever connected.
     var strapTimeline: SyncDeviceID? { get }
-    /// Background runs in progress on this link, from the end of a run's turn-wait to its return (0 or
-    /// 1: runs take turns, review-225 S2). It only serialises runs; which sessions belong to a run is
-    /// `backgroundRunAdoptsNewSessions`. A count, not a flag, so one run's exit can never clear
-    /// another's.
+    /// Background runs in progress on this link (0 or 1: runs take turns, review-225 S2). A run is
+    /// counted from the start of its sync work (after its turn-wait and its no-radio quiet checks, so
+    /// a run that ends quietly there is never counted) until it returns. It only serialises runs;
+    /// which sessions belong to a run is `backgroundRunAdoptsNewSessions` plus the loop's adoption. A
+    /// count, not a flag, so one run's exit can never clear another's.
     var activeBackgroundRuns: Int { get set }
-    /// True only while a run's watch loop runs (review-225b S-A): a session the link creates then is
-    /// the run's (`HelioSession.backgroundRunOwnsSyncs`), and the run flushes and logs its syncs. A
-    /// session created before or after the loop (during the run's teardown or Health flush, or once
-    /// the run is over) flushes and logs its own syncs through the connection's post-sync hook.
+    /// True only while a run's watch loop runs (review-225b S-A). A session the link creates then
+    /// belongs to the run (`HelioSession.backgroundRunOwnsSyncs`), and so does a session already up
+    /// when the loop starts (the loop adopts it): the run flushes and logs their syncs, and releases
+    /// a live one when it hands off or ends synced. A session created after the loop (during the run's
+    /// teardown or Health flush, or once the run is over) is never the run's: it flushes and logs its
+    /// own syncs through the connection's post-sync hook.
     var backgroundRunAdoptsNewSessions: Bool { get set }
     /// A Sleep Focus run that gives up waiting for its turn leaves its "the night is over" here for the
     /// run holding the link (review-225b N-a). That run ORs it into its flush or hand-off, and it is

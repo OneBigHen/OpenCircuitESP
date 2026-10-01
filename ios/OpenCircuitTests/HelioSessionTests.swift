@@ -1331,9 +1331,12 @@ final class HelioBackgroundSyncTests: XCTestCase {
 
     /// Review-225b S-A: the session made during the run's Health flush now flushes its own sync, so
     /// the two flushes can overlap. The later one returns empty (the writer's `isFlushing` guard) and
-    /// its rows stay pending; the next flush writes them. Nothing is written twice, nothing is lost.
+    /// its rows stay pending; the next flush writes them. Nothing is written twice; the rows are
+    /// delayed until the next flush, which has no fixed bound in the app (the next sync's hook, the
+    /// next background run, or a foreground flush). The writer here is a model of the guard, not
+    /// `HealthKitWriter` itself (HealthKit is unavailable in the simulator).
     /// The fake link builds the new session synchronously (see LEAK A).
-    func testOverlappingFlushesWriteNothingTwiceAndLoseNothing() async throws {
+    func testOverlappingFlushesWriteNothingTwiceAndDelayTheRestToTheNextFlush() async throws {
         let store = try makeStore()
         let device = makeStrap()
         let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
@@ -1371,7 +1374,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
         let secondWrite = await writer.flush(timeline)
         XCTAssertEqual(secondWrite, stillPending.count)
         XCTAssertTrue(try store.pendingHealthSamples(device: timeline, kinds: HelioHealthPolicy.healthMirroredKinds()).isEmpty,
-                      "nothing lost")
+                      "delayed until the next flush, then written")
         let keys = writer.written.map { "\($0.kind.rawValue) \($0.start.timeIntervalSince1970)" }
         XCTAssertEqual(Set(keys).count, keys.count, "nothing written twice")
         XCTAssertEqual(writer.written.count, firstWrite + stillPending.count)

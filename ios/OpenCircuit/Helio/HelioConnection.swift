@@ -63,8 +63,9 @@ final class HelioConnection: NSObject {
     /// Background runs in progress (`HelioBackgroundLink`, review-225 S2): only serialises runs.
     @ObservationIgnored var activeBackgroundRuns = 0
     /// True only while a background run's watch loop runs (review-225b S-A). `makeSession` reads it:
-    /// a session made then leaves its syncs to that run, which flushes and logs them; a session made
-    /// at any other time, including during a run's teardown or Health flush, flushes and logs its own.
+    /// a session made then leaves its syncs to that run, which flushes and logs them. A session made
+    /// after the loop (including during the run's teardown or Health flush) flushes and logs its own;
+    /// one made before the loop is the run's only if the loop adopts it (`HelioBackgroundLink`).
     @ObservationIgnored var backgroundRunAdoptsNewSessions = false
     /// A Sleep Focus run's finalization, left when it gave up waiting for the run holding the link
     /// (`HelioBackgroundLink`, review-225b N-a); cleared when that run returns (review-225c SF-1).
