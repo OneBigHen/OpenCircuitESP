@@ -1380,6 +1380,148 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(writer.written.count, stored.count, "every mirrored row reached the writer once")
     }
 
+    // MARK: review-225c SF-1: a waiting Focus run's request lives only as long as the run it was left for
+
+    /// A run that only waits for its turn: its pause yields without moving the shared fake clock or the
+    /// radio, so the run holding the link alone sets the pace (review-225c F-1: a waiter that moved the
+    /// clock itself made the active run's 10 s auth time out, depending on how the tasks interleaved).
+    /// Capped, so a waiter that unexpectedly gets its own turn ends instead of spinning forever.
+    private func waitingService(_ link: FakeBackgroundLink, store: LocalStore,
+                                flushes: @escaping (FlushCall) -> Void = { _ in }) -> HelioBackgroundSyncService {
+        let base = service(link, store: store, flushes: flushes)
+        var spins = 0
+        return HelioBackgroundSyncService(
+            link: base.link, keyStore: base.keyStore, observability: base.observability, flush: base.flush,
+            now: base.now,
+            pause: {
+                spins += 1
+                if spins > 100_000 { withUnsafeCurrentTask { $0?.cancel() } }
+                await Task.yield()
+            },
+            grace: base.grace, appIsActive: base.appIsActive)
+    }
+
+    /// Leak path (a): the Focus run gives up, then iOS expires the run it was waiting for (no flush, so
+    /// the request is never taken). An unrelated app-refresh run hours later must flush normally.
+    func testAFinalizationLeftForARunThatExpiresDoesNotReachALaterRun() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        // One radio event a second: still syncing when the Focus run's 20 s window ends.
+        let processing = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        let focus = waitingService(link, store: store, flushes: { flushes.append($0) })
+        let a = Task { @MainActor in await processing.run(kind: .processing, timeout: 3600) }
+        for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
+        let focusRun = await Task { @MainActor in
+            await focus.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: true)
+        }.value
+        XCTAssertEqual(focusRun.ending, .anotherRunActive)
+        a.cancel()   // iOS expires the processing task
+        let first = await a.value
+        XCTAssertEqual(first.ending, .expired)
+        XCTAssertFalse(link.pendingNightsFinalization, "cleared when the run it was left for returned")
+        clock = clock.addingTimeInterval(6 * 3600)
+        let later = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(later.ending, .synced)
+        XCTAssertEqual(flushes.map(\.finalized), [false], "an app-refresh run hours later keeps the quiet margin")
+    }
+
+    /// Leak path (b): the run the Focus request was left for ends quietly (the strap turns out busy).
+    func testAFinalizationLeftForARunThatEndsQuietlyDoesNotReachALaterRun() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        // The strap comes into range only after the Focus run has given up, and then never answers.
+        link.inRange = false
+        link.silent = true
+        let started = clock
+        let processing = service(link, store: store, flushes: { flushes.append($0) }, pause: { [unowned self] in
+            if link.session == nil, self.clock >= started.addingTimeInterval(25) {
+                link.inRange = true
+                _ = link.connectForBackground()
+            }
+            link.transport?.drain()
+        })
+        let focus = waitingService(link, store: store, flushes: { flushes.append($0) })
+        let a = Task { @MainActor in await processing.run(kind: .processing, timeout: 3600) }
+        for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
+        let focusRun = await Task { @MainActor in
+            await focus.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: true)
+        }.value
+        let first = await a.value
+        XCTAssertEqual(focusRun.ending, .anotherRunActive)
+        XCTAssertEqual(first.ending, .strapBusy)
+        XCTAssertFalse(link.pendingNightsFinalization, "cleared when the run it was left for returned")
+        // Hours later, a new launch: the strap answers again.
+        link.silent = false
+        link.endedBusy = false
+        clock = clock.addingTimeInterval(6 * 3600)
+        let later = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(later.ending, .synced)
+        XCTAssertEqual(flushes.map(\.finalized), [false], "an app-refresh run hours later keeps the quiet margin")
+    }
+
+    /// Leak path (c): the Focus run gives up while the run holding the link is already inside its
+    /// Health flush (it took the link's request when it built the flush call, before the save).
+    /// Deterministic: the save advances the fake clock past the waiter's deadline, and only it does.
+    func testAFinalizationLeftDuringTheActiveRunsFlushDoesNotReachALaterRun() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        var slowed = false
+        let processing = leakService(link, store: store, flushes: { flushes.append($0) }, appActive: { false },
+                                     pause: { link.transport?.drain() },
+                                     duringFlush: { [unowned self] in
+                                         guard !slowed else { return }
+                                         slowed = true
+                                         // A slow Health save: 40 s pass while the Focus run waits.
+                                         for _ in 0..<40 { self.clock = self.clock.addingTimeInterval(1); await Task.yield() }
+                                     })
+        let focus = waitingService(link, store: store, flushes: { flushes.append($0) })
+        let a = Task { @MainActor in await processing.run(kind: .processing, timeout: RingBackgroundSyncService.processingTimeout) }
+        for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
+        let b = Task { @MainActor in
+            await focus.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: true)
+        }
+        let first = await a.value
+        let focusRun = await b.value
+        XCTAssertEqual(first.ending, .synced)
+        XCTAssertEqual(focusRun.ending, .anotherRunActive)
+        XCTAssertEqual(flushes.map(\.finalized), [false], "the request came after the active run's flush call")
+        XCTAssertFalse(link.pendingNightsFinalization, "cleared when the run it was left for returned")
+        clock = clock.addingTimeInterval(6 * 3600)
+        let later = await service(link, store: store, flushes: { flushes.append($0) })
+            .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(later.ending, .synced)
+        XCTAssertEqual(flushes.map(\.finalized), [false, false], "an app-refresh run hours later keeps the quiet margin")
+    }
+
+    /// Leak path (d): a waiting Focus run that iOS expires leaves no request at all.
+    func testAWaitingFocusRunThatExpiresLeavesNoFinalization() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let processing = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        let focus = waitingService(link, store: store, flushes: { flushes.append($0) })
+        let a = Task { @MainActor in await processing.run(kind: .processing, timeout: 3600) }
+        for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
+        let b = Task { @MainActor in await focus.run(kind: .sleepFocus, timeout: 3600, nightsFinalized: true) }
+        for _ in 0..<20 { await Task.yield() }
+        b.cancel()   // iOS expires the Focus intent while it waits
+        let focusRun = await b.value
+        XCTAssertEqual(focusRun.ending, .expired)
+        XCTAssertFalse(link.pendingNightsFinalization, "an expired waiter leaves nothing behind")
+        let first = await a.value
+        XCTAssertEqual(first.ending, .synced)
+        XCTAssertEqual(flushes.map(\.finalized), [false], "the active run's flush isn't finalized by it")
+    }
+
     // MARK: review-225 S2: overlapping runs take turns
 
     /// The reviewer's probe (`testReview225TwoConcurrentRunsOnOneLinkBothFlushTheSameSync`), turned

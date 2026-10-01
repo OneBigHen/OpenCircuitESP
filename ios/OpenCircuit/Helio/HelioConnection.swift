@@ -66,7 +66,8 @@ final class HelioConnection: NSObject {
     /// a session made then leaves its syncs to that run, which flushes and logs them; a session made
     /// at any other time, including during a run's teardown or Health flush, flushes and logs its own.
     @ObservationIgnored var backgroundRunAdoptsNewSessions = false
-    /// A waiting Sleep Focus run's finalization, for the active run (review-225b N-a).
+    /// A Sleep Focus run's finalization, left when it gave up waiting for the run holding the link
+    /// (`HelioBackgroundLink`, review-225b N-a); cleared when that run returns (review-225c SF-1).
     @ObservationIgnored var pendingNightsFinalization = false
 
     private enum PendingAction { case scan, reconnect, resumeRestored }

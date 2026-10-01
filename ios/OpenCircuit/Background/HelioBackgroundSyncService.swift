@@ -50,8 +50,10 @@ protocol HelioBackgroundLink: AnyObject {
     /// session created before or after the loop (during the run's teardown or Health flush, or once
     /// the run is over) flushes and logs its own syncs through the connection's post-sync hook.
     var backgroundRunAdoptsNewSessions: Bool { get set }
-    /// A Sleep Focus run that never got a turn leaves its "the night is over" here (review-225b N-a);
-    /// the next run to flush or hand off ORs it in and clears it, so it is used exactly once.
+    /// A Sleep Focus run that gives up waiting for its turn leaves its "the night is over" here for the
+    /// run holding the link (review-225b N-a). That run ORs it into its flush or hand-off, and it is
+    /// cleared when that run returns, used or not (review-225c SF-1), so it never reaches a later run.
+    /// A waiter that iOS expires leaves nothing.
     var pendingNightsFinalization: Bool { get set }
     /// Arm a connect to the saved strap by identifier (no scan). false when there is none.
     func connectForBackground() -> Bool
@@ -185,7 +187,8 @@ struct HelioBackgroundSyncService {
         // its own budget, then runs normally: a cheap second sync with its own `nightsFinalized`.
         while link.activeBackgroundRuns > 0 {
             if Task.isCancelled || now() >= syncDeadline {
-                if nightsFinalized { link.pendingNightsFinalization = true }
+                // Review-225c SF-1: only a waiter that gave up (not one iOS expired) leaves its request.
+                if nightsFinalized, !Task.isCancelled { link.pendingNightsFinalization = true }
                 // Review-225b N-c: an expiry while waiting is an expiry (no alert pass follows).
                 run.ending = Task.isCancelled ? .expired : .anotherRunActive
                 return record(run, kind: kind)
@@ -206,7 +209,13 @@ struct HelioBackgroundSyncService {
         if run.endedQuietly { return record(run, kind: kind) }
 
         link.activeBackgroundRuns += 1
-        defer { link.activeBackgroundRuns -= 1 }
+        defer {
+            link.activeBackgroundRuns -= 1
+            // Review-225c SF-1: a waiter's request lives only as long as this run. Unused (this run
+            // expired, ended quietly, or was already in its flush), it goes with it, so it can never
+            // finalize an unrelated flush hours later.
+            link.pendingNightsFinalization = false
+        }
         // Review-225b S-A: sessions made from here to the end of the watch loop are this run's. The
         // mark is dropped before anything after the loop awaits (teardown grace, Health flush), so a
         // session made then (the app opened during an abandoned run's teardown) owns its own syncs.
