@@ -174,12 +174,39 @@ public enum HelioSleepSelection {
         public let window: DateInterval
         /// The strap's own sleep score, kept for display. Not OpenCircuit's composite score.
         public let strapScore: UInt8
+        /// The time zone the night was recorded in, from the strap's local-midnight reference
+        /// (`ZeppSleepSession.midnightReference`). nil when unknown; then the phone's zone is used.
+        public let recordedTimeZone: TimeZone?
 
-        public init(segments: [SleepSegment], window: DateInterval, strapScore: UInt8) {
+        public init(segments: [SleepSegment], window: DateInterval, strapScore: UInt8,
+                    recordedTimeZone: TimeZone? = nil) {
             self.segments = segments
             self.window = window
             self.strapScore = strapScore
+            self.recordedTimeZone = recordedTimeZone
         }
+
+        /// The calendar to judge this night in (decision 28e, review-224d S-2): the phone's calendar
+        /// in the zone the night was RECORDED in, never the zone the phone is in at sync time.
+        public var recordedCalendar: Calendar {
+            var calendar = Calendar.current
+            if let recordedTimeZone { calendar.timeZone = recordedTimeZone }
+            return calendar
+        }
+    }
+
+    /// The fixed-offset zone whose local midnight is `midnight` (the strap's own reference).
+    ///
+    /// SPEC-GAP: §6.6 gives only the instant, not the offset. An offset is read off the instant's
+    /// time of day, normalised to (−12 h, +12 h]; a zone at +13/+14 h reads as −11/−10 h, which only
+    /// matters for a night judged near the 09:00/21:00 gate edges there.
+    public static func recordedTimeZone(midnight: Date) -> TimeZone? {
+        let seconds = Int(midnight.timeIntervalSince1970.rounded())
+        var utcTimeOfDay = seconds % 86_400
+        if utcTimeOfDay < 0 { utcTimeOfDay += 86_400 }
+        var offset = -utcTimeOfDay
+        if offset <= -12 * 3600 { offset += 86_400 }
+        return TimeZone(secondsFromGMT: offset)
     }
 
     /// A staged night longer than this is not plausible for one sleep and is dropped (it is what a
@@ -220,18 +247,47 @@ public enum HelioSleepSelection {
         let window = DateInterval(start: first, end: last)
         guard window.duration <= maxNightLength, last <= now.addingTimeInterval(3600) else { return nil }
         guard segments.contains(where: { $0.stage != .awake }) else { return nil }
-        return Night(segments: segments, window: window, strapScore: session.score)
+        return Night(segments: segments, window: window, strapScore: session.score,
+                     recordedTimeZone: recordedTimeZone(midnight: session.midnightReference))
     }
 
-    /// Every staged night in `sessions`, oldest first. A night whose window overlaps an earlier one
-    /// in the same batch is dropped (the strap re-delivers sessions on an overlapping fetch).
+    /// Decision 28f (review-224d S-3): consecutive sessions this far apart or closer are one night.
+    /// Amazfit's own rule: sleep more than 60 min from the main sleep is recorded as a nap.
+    public static let stitchGap: TimeInterval = 60 * 60
+
+    /// Every staged night in `sessions`, oldest first: each session's night (`night(from:now:)`), then
+    /// `stitch`.
     public static func nights(from sessions: [ZeppSleepSession], now: Date) -> [Night] {
+        stitch(sessions.compactMap { night(from: $0, now: now) })
+    }
+
+    /// The single stitching rule (decision 28f), for anything that turns strap sleeps into nights or
+    /// naps: oldest first; a sleep whose window overlaps an earlier one is dropped (the strap
+    /// re-delivers sessions on an overlapping fetch); sleeps `stitchGap` or less apart become ONE
+    /// (their segments stay exactly as reported, and the gap between them stays a gap: no segment is
+    /// invented for it), unless the result would exceed `maxNightLength`.
+    public static func stitch(_ sleeps: [Night]) -> [Night] {
         var out: [Night] = []
-        for night in sessions.compactMap({ night(from: $0, now: now) }).sorted(by: { $0.window.start < $1.window.start }) {
+        for night in sleeps.sorted(by: { $0.window.start < $1.window.start }) {
             if let last = out.last, last.window.end > night.window.start { continue }
+            if let last = out.last,
+               night.window.start.timeIntervalSince(last.window.end) <= stitchGap,
+               night.window.end.timeIntervalSince(last.window.start) <= maxNightLength {
+                out[out.count - 1] = stitched(last, night)
+                continue
+            }
             out.append(night)
         }
         return out
+    }
+
+    /// Two sessions as one night: both segment lists as reported, the window spanning both, the
+    /// longer session's score and the first's recorded zone.
+    static func stitched(_ first: Night, _ second: Night) -> Night {
+        Night(segments: first.segments + second.segments,
+              window: DateInterval(start: first.window.start, end: second.window.end),
+              strapScore: second.window.duration > first.window.duration ? second.strapScore : first.strapScore,
+              recordedTimeZone: first.recordedTimeZone ?? second.recordedTimeZone)
     }
 
     /// The nights that may be stored or written: decision 13's "never overwrite a manually edited

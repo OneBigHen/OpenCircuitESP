@@ -25,7 +25,7 @@ struct MetricDetailView: View {
     private var tile: TodayTile? {
         loaded[range].map {
             TodayTiles.build(metric, points: $0.points, restingHR: $0.restingHR,
-                             tempUnit: tempUnit, windowDays: range)
+                             tempUnit: tempUnit, windowDays: range, scope: .from($0))
         }
     }
 

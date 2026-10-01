@@ -1,4 +1,5 @@
 import Foundation
+import os
 import OpenCircuitKit
 import SwiftData
 import ZeppKit
@@ -162,6 +163,8 @@ final class HelioStoreSink: HelioHistorySink {
     private var activity: [ZeppActivityMinute] = []
     private var sessions: [ZeppSleepSession] = []
     private var storedNights: [HelioSleepSelection.Night] = []
+    /// Daytime sessions already logged this sync (decision 28c), so a re-run logs each once.
+    private var notOvernightLogged: Set<DateInterval> = []
     private var latestStress: HelioReading?
     private var latestPAI: HelioReading?
 
@@ -190,6 +193,7 @@ final class HelioStoreSink: HelioHistorySink {
         activity = []
         sessions = []
         storedNights = []
+        notOvernightLogged = []
         latestStress = nil
         latestPAI = nil
     }
@@ -247,12 +251,44 @@ final class HelioStoreSink: HelioHistorySink {
         // one the ring already keeps; only nights stored here reach the Health hand-off).
         let log = LocalStore.ownershipLog()
         let family = DeviceOwnershipLog.Family(timeline: timeline)
-        for night in HelioSleepSelection.nightsToWrite(nights, manuallyEdited: edited)
+        // Decision 28c (review-224c S-1): only an overnight strap sleep is a night. The ring's own gate,
+        // with the ring's parameters (`SleepWindow.isOvernightBlock(start:end:)`, local calendar), so a
+        // daytime session never takes a night key and can never make the ring's night unkeepable.
+        // Decision 28d (review-224d S-1): it must also END in its key's wake window, the store's own rule
+        // for "this is the night its key names" (`SleepNightKey.endsInWakeWindow`), so an evening doze
+        // the overnight gate accepts (20:00–22:30) never takes a night key either.
+        // Decision 28e (review-224d S-2): both judged in the zone the night was RECORDED in (the strap's
+        // own local-midnight reference), never the phone's zone at sync time, so a normal night first
+        // synced after a flight is still a night. Same functions, one explicit calendar.
+        let overnight = nights.filter { night in
+            let calendar = night.recordedCalendar
+            let isOvernight = SleepWindow.isOvernightBlock(start: night.window.start, end: night.window.end, calendar: calendar)
+            let endsInWakeWindow = SleepNightKey.endsInWakeWindow(night.window.end, calendar: calendar)
+            if isOvernight, endsInWakeWindow { return true }
+            if notOvernightLogged.insert(night.window).inserted {
+                let span = Self.clockSpan(night.window, in: night.recordedTimeZone)
+                if !isOvernight {
+                    helioLog.notice("helio: sleep session \(span, privacy: .public) is not overnight; not stored as a night")
+                } else {
+                    helioLog.notice("helio: sleep session \(span, privacy: .public) doesn't end in its night's wake window; not stored as a night")
+                }
+            }
+            return false
+        }
+        for night in HelioSleepSelection.nightsToWrite(overnight, manuallyEdited: edited)
         where log.owner(ofNightFrom: night.window.start, to: night.window.end) == family
             && !storedNights.contains(where: { $0.window == night.window }) {
             let outcome = try store.saveHelioNight(night, device: timeline)
             if outcome == .inserted || outcome == .updated { storedNights.append(night) }
         }
+    }
+
+    /// `HH:mm–HH:mm` in the recorded zone, for the 28c log line: when a session ran, no health value.
+    private static func clockSpan(_ window: DateInterval, in zone: TimeZone?) -> String {
+        let f = DateFormatter()
+        if let zone { f.timeZone = zone }
+        f.dateFormat = "HH:mm"
+        return "\(f.string(from: window.start))–\(f.string(from: window.end))"
     }
 
     func finishSync(timeline: SyncDeviceID, now: Date) -> HelioSyncResult {

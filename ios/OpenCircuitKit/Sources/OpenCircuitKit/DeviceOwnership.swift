@@ -79,8 +79,9 @@ public struct DeviceOwnershipLog: Codable, Equatable, Sendable {
 
     /// Decision 28a (review-224b S-C): the device you went to bed with keeps the night. A window with
     /// a switch inside belongs to the owner just before the first switch; one without belongs to its
-    /// single owner. Both are the owner at the in-bed START. A switch at exactly that instant counts as
-    /// made before bed (`owner(at:)`'s `since <= t`). One instant both devices' windows can share
+    /// single owner. Both are the owner at the in-bed START. A switch at exactly the in-bed start goes
+    /// to the NEW device: it counts as made before bed (`owner(at:)`'s `since <= t`), the opposite of a
+    /// literal "owner just before the switch". One instant both devices' windows can share
     /// would still disagree between two different windows, so the store also never lets one device's
     /// night replace the other's (`LocalStore.nightKeeping`).
     public func owner(ofNightFrom inBedStart: Date, to inBedEnd: Date) -> Family {
@@ -96,6 +97,29 @@ public struct DeviceOwnershipLog: Codable, Equatable, Sendable {
     public func currentStart(of family: Family) -> Date? {
         guard currentFamily == family else { return nil }
         return entries.last?.since ?? .distantPast
+    }
+
+    // MARK: Decision 29: baselines are per device
+
+    /// `items` measured by `family`: those whose time (`time`) it owned. With an empty log every item
+    /// is the ring's, so this returns `items` unchanged.
+    public func only<T>(_ family: Family, _ items: [T], time: (T) -> Date) -> [T] {
+        guard !isEmpty else { return items }
+        return items.filter { owner(at: time($0)) == family }
+    }
+
+    /// `items` from the same device as the NEWEST one (by `time`): the history a "your usual" for that
+    /// item may use (decision 29). With an empty log, `items` unchanged.
+    public func sameDeviceAsNewest<T>(_ items: [T], time: (T) -> Date) -> [T] {
+        guard !isEmpty, let newest = items.max(by: { time($0) < time($1) }) else { return items }
+        return only(owner(at: time(newest)), items, time: time)
+    }
+
+    /// Whether a sample `recordedBy` the device on `timeline` at `start` was measured by `family`
+    /// during `family`'s own time (a device's catch-up of the other's time is neither's baseline).
+    /// Always true for the ring on an empty log.
+    public func isOwn(recordedBy timeline: SyncDeviceID, at start: Date, by family: Family) -> Bool {
+        Family(timeline: timeline) == family && owner(at: start) == family
     }
 
     /// Every half-open `[start, end)` interval `family` owns, oldest first. The last is open-ended

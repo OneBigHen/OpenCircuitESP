@@ -26,8 +26,14 @@ extension TodaySynthesis {
             guard let t = tiles.first(where: { $0.metric == m }), !t.isStale(now: now) else { return nil }
             return t.trend?.direction
         }
-        // Usual sleep = the nights BEFORE the newest one, so last night isn't compared with itself.
-        let nights = trends.points.compactMap(\.sleepMinutes).filter { $0 > 0 }
+        // Usual sleep = the nights BEFORE the newest one, so last night isn't compared with itself, and
+        // only the newest night's device's (decision 29; every night with an empty log).
+        let scope = TodayTiles.DeviceScope.from(trends)
+        let sleepPoints = trends.points.filter { ($0.sleepMinutes ?? 0) > 0 }
+        let sameDevice = sleepPoints.last.map { newest in
+            sleepPoints.filter { scope == nil || scope!.night($0.date) == scope!.night(newest.date) }
+        } ?? []
+        let nights = sameDevice.compactMap(\.sleepMinutes)
         let prior = nights.dropLast()
         let usualSleep = prior.isEmpty ? nil : Double(prior.reduce(0, +)) / Double(prior.count)
         // Nothing in the window but the app HAS synced before: the data is at least as old as the

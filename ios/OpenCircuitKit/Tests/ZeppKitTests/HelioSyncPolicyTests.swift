@@ -258,6 +258,45 @@ final class HelioSleepSelectionTests: XCTestCase {
         XCTAssertEqual(HelioSleepSelection.nights(from: sessions, now: now).count, 1)
     }
 
+    /// Decision 28f: sessions 60 min or less apart are one night; their segments stay as reported and
+    /// the gap stays a gap. More than 60 min apart, they stay two.
+    func testSessionsAnHourOrLessApartAreStitchedIntoOneNight() throws {
+        let first = sessionRecord(stages: [(1380, 1500, 0x04), (1500, 1620, 0x05)])   // 23:00–03:00
+        let second = sessionRecord(stages: [(1650, 1740, 0x08), (1740, 1860, 0x04)])  // 03:30–07:00
+        let nights = HelioSleepSelection.nights(from: try parseSessions([first, second]), now: now)
+        XCTAssertEqual(nights.count, 1)
+        XCTAssertEqual(nights[0].window, DateInterval(start: sessionTime(1380), end: sessionTime(1860)))
+        XCTAssertEqual(nights[0].segments.map(\.start), [1380, 1500, 1650, 1740].map { sessionTime($0) })
+        XCTAssertEqual(nights[0].segments.map(\.end), [1500, 1620, 1740, 1860].map { sessionTime($0) },
+                       "no segment invented for the 30-minute gap")
+        XCTAssertEqual(SleepStaging.summary(nights[0].segments).minutes.asleep, 450)
+
+        let exactlyAnHour = sessionRecord(stages: [(1680, 1860, 0x04)])                // 04:00–07:00
+        XCTAssertEqual(HelioSleepSelection.nights(from: try parseSessions([first, exactlyAnHour]), now: now).count, 1)
+        let moreThanAnHour = sessionRecord(stages: [(1681, 1860, 0x04)])               // 04:01–07:00
+        XCTAssertEqual(HelioSleepSelection.nights(from: try parseSessions([first, moreThanAnHour]), now: now).count, 2,
+                       "more than 60 min from the main sleep is a separate sleep (Amazfit's nap rule)")
+    }
+
+    /// Decision 28e: the zone a night was recorded in comes from the strap's local-midnight reference.
+    func testTheRecordedZoneComesFromTheStrapsLocalMidnight() throws {
+        func offset(_ zone: String) -> Int? {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: zone)!
+            let localMidnight = calendar.date(from: DateComponents(year: 2026, month: 9, day: 20))!
+            return HelioSleepSelection.recordedTimeZone(midnight: localMidnight)?.secondsFromGMT()
+        }
+        XCTAssertEqual(offset("UTC"), 0)
+        XCTAssertEqual(offset("America/New_York"), -4 * 3600)
+        XCTAssertEqual(offset("America/Los_Angeles"), -7 * 3600)
+        XCTAssertEqual(offset("Europe/Berlin"), 2 * 3600)
+        XCTAssertEqual(offset("Asia/Tokyo"), 9 * 3600)
+        XCTAssertEqual(offset("Asia/Kolkata"), 19_800)
+        let night = try XCTUnwrap(HelioSleepSelection.night(from: try parseSessions([sessionRecord(stages: [(1380, 1860, 0x04)])])[0], now: now))
+        XCTAssertEqual(night.recordedTimeZone?.secondsFromGMT(), 0, "the fixtures' reference is UTC midnight")
+        XCTAssertEqual(night.recordedCalendar.timeZone.secondsFromGMT(), 0)
+    }
+
     func testAManuallyEditedNightIsNeverOverwritten() throws {
         let lastNight = try parseSessions([sessionRecord(stages: [(1380, 1860, 0x04)])])
         let nightBefore = try parseSessions([sessionRecord(midnightRef: midnight - 86_400, stages: [(1380, 1860, 0x04)])])

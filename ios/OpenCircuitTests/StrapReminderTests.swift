@@ -67,4 +67,32 @@ final class StrapReminderTests: XCTestCase {
                                                                ringReminders: false, store: nil, now: now, defaults: defaults)
         XCTAssertEqual(pass, [.bedtimeReminder])
     }
+
+    /// Review-224c N-b: the hook runs every step, in order, and fires once per sync.
+    func testTheSyncEndHookRunsEveryStepOncePerSync() {
+        var ran: [HelioSyncEndStep] = []
+        HelioSyncEndStep.runAll { ran.append($0) }
+        XCTAssertEqual(ran, HelioSyncEndStep.allCases)
+        XCTAssertEqual(ran.filter { $0 == .evaluateReminders }.count, 1)
+
+        // `syncing` as the session reports it: two syncs, the second ended by a link drop (→ nil).
+        let observed: [Bool?] = [nil, false, true, true, false, false, true, nil, nil]
+        let ends = zip(observed, observed.dropFirst()).filter { HelioSyncEndStep.syncEnded(from: $0, to: $1) }.count
+        XCTAssertEqual(ends, 2, "one run per sync, however many times `syncing` is re-published")
+    }
+
+    /// Review-224d N-2: the hook itself. `HelioDashboardHooks` forwards every `syncing` change to
+    /// `HelioSyncEndActions.syncingChanged`, which maps each step to its action and runs them once per
+    /// sync: dropping or rewiring a step's action fails here.
+    func testTheSyncEndHookRunsEachActionOncePerSyncInOrder() {
+        var ran: [String] = []
+        let actions = HelioSyncEndActions(reloadTrends: { ran.append("trends") },
+                                          refreshObservability: { ran.append("observability") },
+                                          evaluateHealthAlerts: { ran.append("alerts") },
+                                          evaluateReminders: { ran.append("reminders") })
+        let observed: [Bool?] = [nil, false, true, true, false, false, true, nil]
+        for (old, new) in zip(observed, observed.dropFirst()) { actions.syncingChanged(from: old, to: new) }
+        let once = ["trends", "observability", "alerts", "reminders"]
+        XCTAssertEqual(ran, once + once, "two syncs, every action once each, in order")
+    }
 }

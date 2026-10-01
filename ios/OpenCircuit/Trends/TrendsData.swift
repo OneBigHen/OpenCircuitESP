@@ -29,6 +29,23 @@ struct TrendsData {
     /// Start time of the newest stored ring reading of any kind in the window, or nil when there is
     /// none — what the Today synthesis line judges freshness by (#216).
     var newestSampleAt: Date?
+    /// Decision 29: who owned which time, as of this load. Empty for a ring-only install.
+    var ownership = DeviceOwnershipLog()
+    /// Decision 29: each night point's device (`owner(ofNightFrom:)`), keyed by the point's date.
+    var nightOwners: [Date: DeviceOwnershipLog.Family] = [:]
+
+    /// The device a night point (`date` = its start of day) belongs to; the ring with an empty log.
+    func nightOwner(_ date: Date) -> DeviceOwnershipLog.Family {
+        nightOwners[Calendar.current.startOfDay(for: date)] ?? ownership.owner(at: dayMidpoint(date))
+    }
+
+    /// The device a calendar day belongs to: its owner at midday (a switch day goes to whoever held
+    /// the middle of it). The ring with an empty log.
+    func dayOwner(_ date: Date) -> DeviceOwnershipLog.Family { ownership.owner(at: dayMidpoint(date)) }
+
+    private func dayMidpoint(_ date: Date) -> Date {
+        Calendar.current.startOfDay(for: date).addingTimeInterval(12 * 3600)
+    }
 
     static let lookbackDays = 14
 
@@ -100,12 +117,13 @@ struct TrendsData {
     static func loadAsync(container: ModelContainer, tempUnitRaw: String,
                           lookbackDays: Int = TrendsData.lookbackDays) async -> TrendsData {
         let profile = await MainActor.run { HealthKitWriter.storedUserProfile() }
+        let ownership = await MainActor.run { LocalStore.ownershipLog() }
         // Goals live in UserDefaults, which `@AppStorage` also binds on the main actor; snapshot
         // them here alongside the profile so the detached work touches nothing main-isolated.
         let goals = await MainActor.run { GoalHistory.Goals.fromDefaults() }
         let inputs = await Task.detached {
             fetchInputs(container: container, profile: profile, goals: goals, tempUnitRaw: tempUnitRaw,
-                        lookbackDays: lookbackDays)
+                        lookbackDays: lookbackDays, ownership: ownership)
         }.value
         let points = await Task.detached { computePoints(inputs) }.value
         let goalDays = await Task.detached { computeGoalDays(inputs, points: points) }.value
@@ -114,9 +132,13 @@ struct TrendsData {
             RestingHR.dailyValues(hr: inputs.hr.filter { $0.value > 0 }
                 .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) })
         }.value
+        let nightOwners = inputs.summaryByNight.mapValues {
+            ownership.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd)
+        }
         return TrendsData(points: points, recentRows: recentRows,
                           goalDays: goalDays, goalSummary: GoalHistory.summarize(goalDays, now: Date()),
-                          restingHR: restingHR, newestSampleAt: newestSample(inputs))
+                          restingHR: restingHR, newestSampleAt: newestSample(inputs),
+                          ownership: ownership, nightOwners: nightOwners)
     }
 
     /// Newest reading start across every series the window fetched.
@@ -135,7 +157,8 @@ struct TrendsData {
                                                 profile: UserProfile,
                                                 goals: GoalHistory.Goals,
                                                 tempUnitRaw: String,
-                                                lookbackDays: Int) -> Inputs {
+                                                lookbackDays: Int,
+                                                ownership: DeviceOwnershipLog) -> Inputs {
         let context = ModelContext(container)
         let cal = Calendar.current
         let now = Date()
@@ -152,9 +175,15 @@ struct TrendsData {
         for d in (try? context.fetch(LocalStore.recentDailiesDescriptor(limit: lookbackDays))) ?? [] {
             stepsByDay[cal.startOfDay(for: d.day)] = d.steps
         }
+        // Decision 29: with a switch on record, a reading counts only for the device that measured it
+        // during its own time (the ring's catch-up of the strap's time is neither's "usual", and a
+        // night's averages are its owner's). Empty log: every row, as before.
         func samples(_ kind: MetricKind) -> [QuantitySample] {
-            ((try? context.fetch(LocalStore.samplesDescriptor(kind: kind, from: lookbackStart, to: now))) ?? [])
-                .compactMap(\.sample)
+            let rows = (try? context.fetch(LocalStore.samplesDescriptor(kind: kind, from: lookbackStart, to: now))) ?? []
+            guard !ownership.isEmpty else { return rows.compactMap(\.sample) }
+            return rows.filter {
+                ownership.isOwn(recordedBy: SyncDeviceID(rawValue: $0.deviceID), at: $0.start, by: ownership.owner(at: $0.start))
+            }.compactMap(\.sample)
         }
         let temps = ((try? context.fetch(
             LocalStore.daytimeTemperaturesDescriptor(from: lookbackStart, to: now))) ?? [])

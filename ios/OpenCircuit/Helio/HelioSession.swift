@@ -1013,6 +1013,9 @@ final class HelioSession: WearableSession {
     /// The authenticated stream: start, then `04 02` every second, stop after `duration`.
     func startLiveHeartRate(duration: TimeInterval = 60) {
         guard canStreamHeartRate, !liveHeartRateRunning, let transport else { return }
+        // A new measurement shows only its own readings (decision 30), never the last one's.
+        liveHR = nil
+        liveHRAt = nil
         transport.setNotify(.heartRateMeasurement, enabled: true)
         send(ZeppEndpoint.heartRate, ZeppHeartRateControl.start)
         let now = clock()
