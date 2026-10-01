@@ -958,6 +958,33 @@ final class HelioSessionTests: XCTestCase {
         XCTAssertFalse(StrapSyncAlertPass.claim(rig.session), "ContentView's hook, if it fires later, skips it")
         XCTAssertEqual(passes, 1)
     }
+
+    // MARK: review-225e SF-2: an expiry's teardown ends the fetch
+
+    /// Review-225e P1, as the regression test: with a round open, the teardown acks `03 09` and the
+    /// session no longer reads "syncing", so nothing defers the link cancel.
+    func testTheExpiryTeardownAcksTheOpenRoundAndEndsTheSync() throws {
+        let store = try makeStore()
+        var probed = false
+        for steps in 1...400 {
+            let device = makeStrap()
+            let rig = connect(device, store: store, autoSync: false)
+            rig.session.syncHistory(manual: false)
+            rig.transport.drainSteps(steps)
+            guard rig.session.syncing else { continue }
+            let acksBefore = device.fetchAcks.count
+            rig.session.stopSyncForTeardown()
+            guard device.fetchAcks.count > acksBefore else { continue }   // no round was open yet
+            probed = true
+            XCTAssertEqual(device.fetchAcks.last, 0x09, "keep on the strap")
+            XCTAssertEqual(device.fetchAcks.count, device.fetchStarts.count, "the open round is acked")
+            XCTAssertFalse(rig.session.syncing)
+            XCTAssertEqual(rig.session.lastSyncResult?.interrupted, true)
+            XCTAssertEqual(rig.session.syncsFinished, 1)
+            break
+        }
+        XCTAssertTrue(probed, "found a step count with a round open")
+    }
 }
 
 // MARK: - Key store, device choice
@@ -1183,8 +1210,17 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
         return true
     }
 
-    func disconnectForBackground() {
+    /// What each disconnect saw: asked to cancel now, whether the session still read "syncing" (which
+    /// makes `HelioConnection.disconnect` defer its cancel 500 ms unless `cancelNow`), and how many
+    /// transport writes had been queued before the cancel.
+    private(set) var cancels: [(cancelNow: Bool, sessionSyncing: Bool, writesBefore: Int)] = []
+    /// The transport of the link that was cancelled last (its writes, for ordering checks).
+    private(set) var cancelledTransport: FakeStrapTransport?
+
+    func disconnectForBackground(cancelNow: Bool) {
         disconnects += 1
+        cancels.append((cancelNow, session?.syncing == true, transport?.writes.count ?? 0))
+        cancelledTransport = transport
         if session?.phase == .strapBusy { endedBusy = true }
         session?.stopFind()
         session?.abortSync()
@@ -1861,6 +1897,47 @@ final class HelioBackgroundSyncTests: XCTestCase {
                 XCTAssertEqual(flushes.last?.nights, 1)
             }
         }
+    }
+
+    // MARK: review-225e SF-2: the expiry's teardown happens inside the handler
+
+    /// A catch-up expires mid-round. `tearDownForExpiry` (the expiry handler's teardown) queues the
+    /// `03 09`, ends the fetch, cancels the link in the same call (never the 500 ms deferred cancel,
+    /// which a suspended app wouldn't run) and arms the standing connect; the ack is queued before the
+    /// cancel.
+    func testAnExpiryMidRoundCancelsTheLinkAndReArmsInsideTheHandler() async throws {
+        var probed = false
+        for settle in 0..<60 where !probed {
+            let store = try makeStore()
+            let device = makeStrap()
+            let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+            let run = Task { @MainActor [unowned self] in
+                await self.service(link, store: store, pause: { link.transport?.drainSteps(1) })
+                    .run(kind: .cbWake, timeout: 3600, wake: .strapEvent)
+            }
+            for _ in 0..<20_000 where !(link.session?.syncing == true && device.fetchStarts.count > device.fetchAcks.count) {
+                await Task.yield()
+            }
+            for _ in 0..<settle { await Task.yield() }   // let the start reply land, so the round is open
+            guard link.session?.syncing == true else { run.cancel(); _ = await run.value; continue }
+            let acksBefore = device.fetchAcks.count
+            link.tearDownForExpiry()
+            run.cancel()   // what the expiry handler does next
+            let ended = await run.value
+            guard device.fetchAcks.count > acksBefore else { continue }   // no round was open yet
+            probed = true
+            let cancel = try XCTUnwrap(link.cancels.first)
+            XCTAssertTrue(cancel.cancelNow, "cancelled in the handler")
+            XCTAssertFalse(cancel.sessionSyncing, "the fetch ended first, so nothing would defer the cancel")
+            let writes = try XCTUnwrap(link.cancelledTransport?.writes)
+            let ack = try XCTUnwrap(writes.lastIndex { $0.bytes == [0x03, 0x09] })
+            XCTAssertLessThan(ack, cancel.writesBefore, "the 03 09 is queued before the cancel")
+            XCTAssertEqual(device.fetchAcks.last, 0x09)
+            XCTAssertEqual(link.rearms, 1, "the standing connect is armed in the handler")
+            XCTAssertEqual(ended.ending, .expired)
+            XCTAssertEqual(link.disconnects, 1, "the run found the link already down")
+        }
+        XCTAssertTrue(probed, "found a moment with a round open")
     }
 
     // MARK: decision 35: the held, idle link's own traffic is a wake

@@ -197,7 +197,11 @@ final class HelioConnection: NSObject {
     }
 
     /// Drop the link and stop reconnecting. The saved strap stays, for a later reconnect.
-    func disconnect() {
+    /// `cancelNow`: cancel the link in this call even when a find or a sync was running. Only an
+    /// expiry's teardown asks for it (`tearDownForExpiry`, review-225e SF-2): iOS suspends the app when
+    /// that returns, so a cancel deferred by 500 ms would never run. Everything else, a foreground
+    /// disconnect with a find running included, keeps the 500 ms (§15.4).
+    func disconnect(cancelNow: Bool = false) {
         wantConnection = false
         pendingAction = nil
         scanTimeoutTask?.cancel()
@@ -222,7 +226,7 @@ final class HelioConnection: NSObject {
             self?.characteristics = [:]
             self?.writeQueue = []
         }
-        if wasBusy {
+        if wasBusy && !cancelNow {
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(500))
                 cancel()
@@ -528,14 +532,6 @@ extension HelioConnection {
         Self.wakeHandler(wake)
     }
 
-    /// iOS is ending a catch-up's background time (`HelioWakeCoordinator`): ack an open round `03 09`,
-    /// drop the link, and arm a standing connect again, now, before the app is suspended.
-    func tearDownForExpiry() {
-        session?.abortSync()
-        disconnectForBackground()
-        rearmAfterTeardown()
-    }
-
     static var appIsActive: Bool { UIApplication.shared.applicationState == .active }
 
     /// CoreBluetooth's error code for a drop, when there is one.
@@ -570,11 +566,11 @@ extension HelioConnection: HelioBackgroundLink {
         reconnectKnown()
     }
 
-    func disconnectForBackground() {
+    func disconnectForBackground(cancelNow: Bool) {
         // `disconnect()` drops the session before the link goes, so `didDisconnectPeripheral` can't see
         // a busy strap any more: note it here, so nothing reconnects by itself (decision 7).
         if session?.phase == .strapBusy { endedBusy = true }
-        disconnect()
+        disconnect(cancelNow: cancelNow)
     }
 
     /// Decision 33: after a run's teardown (out of time, or expired), arm a standing connect again, so

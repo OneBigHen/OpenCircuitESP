@@ -143,13 +143,33 @@ protocol HelioBackgroundLink: AnyObject {
     /// Arm a connect to the saved strap by identifier (no scan). false when there is none.
     func connectForBackground() -> Bool
     /// End the link cleanly and don't reconnect by itself: stop a running find, ack an open round
-    /// `03 09`, then drop the link.
-    func disconnectForBackground()
+    /// `03 09`, then drop the link. `cancelNow`: in this call, never deferred (an expiry's teardown).
+    func disconnectForBackground(cancelNow: Bool)
     /// After a run's own teardown (out of time, or expired): arm a standing connect again, so the strap
     /// can wake the app later (decision 33). Never after a quiet ending (decision 7).
     func rearmAfterTeardown()
     /// A run started its sync work (`HelioWakeState.lastBackgroundRunStart`: the reconnect cooldown).
     func noteBackgroundRunStarted(at date: Date)
+}
+
+extension HelioBackgroundLink {
+    func disconnectForBackground() { disconnectForBackground(cancelNow: false) }
+
+    /// iOS is ending a catch-up's background time (`HelioWakeCoordinator`), and suspends the app when
+    /// this returns. Review-225e SF-2: everything has to happen in this call.
+    /// - The open round's `03 09` is queued first, then the fetch ends (`stopSyncForTeardown`), so the
+    ///   session no longer reads "syncing" and nothing defers the cancel.
+    /// - The link cancel is issued in this call (`cancelNow`), never 500 ms later in a task the
+    ///   suspended app wouldn't run. A `03 09` still waiting in the write queue can be lost with it, which
+    ///   is safe: an unacked round stays on the strap (keep-on-device, decision 8).
+    /// - The standing connect is armed in this call (`rearmAfterTeardown`). Its `connect` is issued when
+    ///   the cancel lands (`didDisconnectPeripheral`, an event iOS wakes the app for), not before: one
+    ///   issued while the cancel is in flight could keep the session-less link up, the state this fixes.
+    func tearDownForExpiry() {
+        session?.stopSyncForTeardown()
+        disconnectForBackground(cancelNow: true)
+        rearmAfterTeardown()
+    }
 }
 
 /// How one background run ended, for the run log and the task's success flag.

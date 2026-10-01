@@ -491,6 +491,14 @@ final class HelioSession: WearableSession {
         perform(actions)
     }
 
+    /// An expiry's teardown (review-225e SF-2): ack the open round `03 09` (queued first), then end the
+    /// fetch now as interrupted. `abortSync` alone leaves the session "syncing" (the fetch machine emits
+    /// no `.finished` on an abort), which made the caller's disconnect defer its cancel.
+    func stopSyncForTeardown() {
+        abortSync()
+        if fetch != nil || phase == .syncing { finishFetch(interrupted: true) }
+    }
+
     /// Decision 18: backgrounding stops a find; the live heart-rate stream stops too, and so does the
     /// keyless Tier 0 subscription (§16.5: none for background work).
     func appDidEnterBackground() {

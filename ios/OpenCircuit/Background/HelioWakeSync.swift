@@ -157,8 +157,9 @@ final class HelioWakeCoordinator {
         var endAssertion: @MainActor (Int) -> Void
         /// One bounded background run for `wake`; nil when it couldn't start (no store yet).
         var run: @MainActor (_ wake: HelioWake) async -> HelioBackgroundRun?
-        /// iOS ended the assertion: ack an open round `03 09`, drop the link and re-arm a standing
-        /// connect, synchronously, before the app is suspended.
+        /// iOS is ending the assertion: in this call, before the app is suspended, queue the open
+        /// round's `03 09`, end the fetch, issue the link cancel and arm the standing connect (its
+        /// `connect` goes out when the cancel lands; `HelioBackgroundLink.tearDownForExpiry`).
         var expire: @MainActor () -> Void
         /// After a run: the alert passes, and the margin re-aim.
         var afterRun: @MainActor (HelioBackgroundRun) async -> Void
@@ -203,7 +204,7 @@ final class HelioWakeCoordinator {
             // iOS is about to suspend the app: the teardown can't wait for the run's next turn.
             box.task?.cancel()
             env.expire()
-            env.note(wake, "iOS ended the background time; open round acked 03 09, link dropped, standing connect re-armed")
+            env.note(wake, "iOS ended the background time; open round acked 03 09 (queued), link cancel issued, standing connect armed")
             self?.finish(box, once)
         }
         box.token = token
