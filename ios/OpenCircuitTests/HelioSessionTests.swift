@@ -1027,7 +1027,13 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
 
     func rearmAfterTeardown() { rearms += 1 }
 
-    func noteBackgroundRunStarted(at date: Date) { runStarts.append(date) }
+    /// Where the run starts go for the wake rules (`HelioConnection` persists them the same way).
+    var wakeState: HelioWakeState?
+
+    func noteBackgroundRunStarted(at date: Date) {
+        runStarts.append(date)
+        wakeState?.lastBackgroundRunStart = date
+    }
 }
 
 /// The Health writer's flush contract, over the real store (HealthKit itself is unavailable in the
@@ -1613,6 +1619,108 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertTrue(record.detail?.hasPrefix("helio strap: synced") == true, record.detail ?? "")
         XCTAssertEqual(Set(link.device.fetchAcks), [0x09])
         XCTAssertEqual(link.runStarts.count, 2)
+    }
+
+    // MARK: decision 35: the held, idle link's own traffic is a wake
+
+    /// An idle night on a held link (B.5): connected, authenticated, never dropped, so no reconnect wake
+    /// ever comes. What the strap sends on its own over that link goes through `HelioIdleTrafficGate`
+    /// and `HelioWakePolicy` like a reconnect, so `HelioConnection`'s routing is reproduced here.
+    private func idleNight(_ link: FakeBackgroundLink, store: LocalStore, state: HelioWakeState,
+                           flushes: @escaping (FlushCall) -> Void, recordsCompletion: Bool = true)
+        -> (coordinator: HelioWakeCoordinator, wakes: () -> [HelioWake]) {
+        var wakes: [HelioWake] = []
+        var gate = HelioIdleTrafficGate()
+        link.wakeState = state
+        let coordinator = HelioWakeCoordinator(.init(
+            strapChosen: { true }, appIsActive: { false }, runActive: { link.activeBackgroundRuns > 0 },
+            state: state, now: { [unowned self] in self.clock },
+            syncInForeground: {},
+            beginAssertion: { _ in 1 }, endAssertion: { _ in },
+            run: { [unowned self] wake in
+                wakes.append(wake)
+                return await self.service(link, store: store, flushes: flushes)
+                    .run(kind: HelioWakePolicy.kind(for: wake), timeout: RingBackgroundSyncService.defaultTimeout, wake: wake)
+            },
+            expire: {},
+            afterRun: { [unowned self] run in
+                // `HelioConnection`'s post-sync hook records a completed sync; `recordsCompletion: false`
+                // models one that never completes (so only the cooldown holds the next one back).
+                if recordsCompletion, run.ending == .synced, run.result?.interrupted == false { state.lastCompletedSync = self.clock }
+            },
+            note: { _, _ in }))
+        link.onEvent = { [unowned self] event in
+            switch event {
+            case .strapMessage, .strapNotification:
+                if gate.shouldCheck(now: self.clock, appIsActive: false, syncing: link.session?.syncing == true,
+                                    runActive: link.activeBackgroundRuns > 0) {
+                    coordinator.wake(.idleTraffic)
+                }
+            default: break
+            }
+        }
+        return (coordinator, { wakes })
+    }
+
+    /// The steer's case: heart-rate notifications on a timer over a link that never drops. (On a real
+    /// idle link these don't come: the strap streams `0x2A37` only while the phone keeps sending `04 02`,
+    /// §7.1, and §16.5's fail-safe stops unasked frames. The routing is the same for any message the
+    /// strap sends on its own.) A catch-up fires once the 4 h gate is crossed, and not again until the
+    /// next one.
+    func testHeartRateOnAHeldIdleLinkWakesACatchUpOnlyAfterFourHours() async throws {
+        let store = try makeStore()
+        let link = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        let state = HelioWakeState(defaults)
+        var flushes: [FlushCall] = []
+        // The evening sync: the link stays up, idle and authenticated (B.5).
+        let evening = await service(link, store: store, flushes: { flushes.append($0) }).run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(evening.ending, .synced)
+        let eveningSync = clock
+        state.lastCompletedSync = eveningSync
+        let night = idleNight(link, store: store, state: state, flushes: { flushes.append($0) })
+        var catchUpsAt: [TimeInterval] = []
+        for step in 1...54 {   // every 10 minutes for 9 hours
+            clock = eveningSync.addingTimeInterval(TimeInterval(step * 600))
+            let before = night.wakes().count
+            link.transport?.push(.heartRateMeasurement, [0x00, 58])
+            link.transport?.drain()
+            for _ in 0..<3000 where night.coordinator.isRunning || link.activeBackgroundRuns > 0 { await Task.yield() }
+            if night.wakes().count > before { catchUpsAt.append(TimeInterval(step * 600)) }
+        }
+        XCTAssertEqual(night.wakes(), [.idleTraffic, .idleTraffic])
+        XCTAssertEqual(catchUpsAt.first, 4 * 3600, "the first message at or past the 4 h gate")
+        XCTAssertEqual(catchUpsAt.count, 2)
+        XCTAssertGreaterThanOrEqual((catchUpsAt.last ?? 0) - (catchUpsAt.first ?? 0), 4 * 3600, "not again until the next 4 h")
+        XCTAssertEqual(link.connects, 1, "no reconnect all night")
+        XCTAssertEqual(link.disconnects, 0)
+        XCTAssertEqual(flushes.count, 3, "the evening sync and the two catch-ups, each flushed once")
+        let records = ObservabilityStore(defaults).records().filter { $0.kind == .cbWake }
+        XCTAssertEqual(records.count, 2)
+        XCTAssertTrue(records.allSatisfy { $0.detail?.hasPrefix("helio strap: synced") == true })
+    }
+
+    /// The cooldown: when a catch-up's sync never completes, the 4 h gate stays open, and only the
+    /// 30-minute cooldown keeps the strap's pings from starting a run every few minutes.
+    func testPingsOnAHeldIdleLinkCannotChainCatchUpsInsideTheCooldown() async throws {
+        let store = try makeStore()
+        let link = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        let state = HelioWakeState(defaults)
+        let evening = await service(link, store: store).run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(evening.ending, .synced)
+        let start = clock
+        state.lastCompletedSync = start.addingTimeInterval(-5 * 3600)
+        let night = idleNight(link, store: store, state: state, flushes: { _ in }, recordsCompletion: false)
+        var catchUpsAt: [TimeInterval] = []
+        for step in 1...10 {   // a ping every 6 minutes for an hour
+            clock = start.addingTimeInterval(TimeInterval(step * 360))
+            let before = night.wakes().count
+            link.transport?.push(link.device.unsolicited(endpoint: 0x0015, [0x03]))
+            link.transport?.drain()
+            for _ in 0..<3000 where night.coordinator.isRunning || link.activeBackgroundRuns > 0 { await Task.yield() }
+            if night.wakes().count > before { catchUpsAt.append(TimeInterval(step * 360)) }
+        }
+        XCTAssertEqual(catchUpsAt.count, 2, "one at the first ping, the next only once the cooldown has passed")
+        XCTAssertGreaterThanOrEqual((catchUpsAt.last ?? 0) - (catchUpsAt.first ?? 0), HelioWakePolicy.reconnectCooldown)
     }
 
     /// A run that tears the link down (out of time) arms a standing connect again, so the strap can

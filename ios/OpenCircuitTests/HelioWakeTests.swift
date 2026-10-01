@@ -20,7 +20,10 @@ final class HelioWakeTests: XCTestCase {
 
     func testTheWokeUpEventAlwaysCatchesUpInTheBackground() {
         XCTAssertEqual(action(.strapEvent), .catchUp)
-        XCTAssertEqual(action(.strapEvent, lastSync: 60, lastRun: 60), .catchUp, "the night just ended: no freshness gate")
+        XCTAssertEqual(action(.strapEvent, lastSync: 60), .catchUp, "the night just ended: no freshness gate")
+        XCTAssertEqual(action(.strapEvent, lastRun: 29 * 60), .skip("a background run started under 30 min ago"),
+                       "review-235 S3: at most one event-triggered catch-up per cooldown")
+        XCTAssertEqual(action(.strapEvent, lastRun: 30 * 60), .catchUp)
         XCTAssertEqual(action(.strapEvent, appIsActive: true), .syncInForeground)
         XCTAssertEqual(action(.strapEvent, runActive: true), .skip("a background run already holds the strap"))
         XCTAssertEqual(action(.strapEvent, strapChosen: false), .skip("the strap isn't the chosen device"))
@@ -29,7 +32,7 @@ final class HelioWakeTests: XCTestCase {
     /// N = 4 h, and a 30-minute cooldown after a background run's start (the reconnect after its own
     /// teardown, or a flapping link).
     func testAReconnectCatchesUpOnlyAfterFourHoursWithoutASync() {
-        for wake in [HelioWake.reconnect, .restoration] {
+        for wake in [HelioWake.reconnect, .restoration, .idleTraffic] {
             XCTAssertEqual(action(wake), .catchUp, "never synced")
             XCTAssertEqual(action(wake, lastSync: 3 * 3600 + 59 * 60), .skip("last completed sync under 4 h ago"))
             XCTAssertEqual(action(wake, lastSync: 4 * 3600), .catchUp)
@@ -49,6 +52,20 @@ final class HelioWakeTests: XCTestCase {
         XCTAssertEqual(HelioWakePolicy.kind(for: .healthDelivery), .backgroundSync)
         XCTAssertEqual(HelioWakePolicy.kind(for: .strapEvent), .cbWake)
         XCTAssertEqual(HelioWakePolicy.kind(for: .reconnect), .cbWake)
+    }
+
+    /// Decision 35's debounce: the idle link's traffic is looked at no more than every 5 minutes, and
+    /// never in front, during a sync, or while a run holds the strap.
+    func testIdleLinkTrafficIsCheckedAtMostEveryFiveMinutes() {
+        var gate = HelioIdleTrafficGate()
+        XCTAssertFalse(gate.shouldCheck(now: now, appIsActive: true, syncing: false, runActive: false))
+        XCTAssertFalse(gate.shouldCheck(now: now, appIsActive: false, syncing: true, runActive: false))
+        XCTAssertFalse(gate.shouldCheck(now: now, appIsActive: false, syncing: false, runActive: true))
+        XCTAssertTrue(gate.shouldCheck(now: now, appIsActive: false, syncing: false, runActive: false))
+        XCTAssertFalse(gate.shouldCheck(now: now.addingTimeInterval(1), appIsActive: false, syncing: false, runActive: false))
+        XCTAssertFalse(gate.shouldCheck(now: now.addingTimeInterval(299), appIsActive: false, syncing: false, runActive: false))
+        XCTAssertTrue(gate.shouldCheck(now: now.addingTimeInterval(300), appIsActive: false, syncing: false, runActive: false))
+        XCTAssertEqual(HelioWakePolicy.kind(for: .idleTraffic), .cbWake)
     }
 
     // MARK: Coordinator

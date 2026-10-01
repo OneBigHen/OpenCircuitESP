@@ -21,6 +21,9 @@ enum HelioWake: String, Equatable, Sendable {
     case strapEvent
     /// The link came back (out of range, Bluetooth toggled) while the app was in the background.
     case reconnect
+    /// The strap sent something on its own over the idle link (decision 35): a ping, a sleep event,
+    /// any §16.2 message. Gated exactly like `reconnect`.
+    case idleTraffic
     /// HealthKit delivered new iPhone steps in the background.
     case healthDelivery
     case foreground
@@ -44,6 +47,7 @@ enum HelioWake: String, Equatable, Sendable {
         case .restoration: return "restoration"
         case .strapEvent: return "strap-event"
         case .reconnect: return "reconnect"
+        case .idleTraffic: return "idle-link traffic"
         case .healthDelivery: return "Health-delivery"
         case .foreground: return "foreground"
         }

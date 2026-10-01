@@ -88,6 +88,8 @@ final class HelioConnection: NSObject {
     /// Where decision 33's wakes go (the strap's woke-up event, a reconnect or restoration in the
     /// background). Static, so setting it never constructs the connection for a ring user.
     static var wakeHandler: @MainActor (HelioWake) -> Void = { HelioWakeCoordinator.shared.wake($0) }
+    /// Decision 35: the strap's own traffic over the idle link, checked at most every few minutes.
+    @ObservationIgnored private var idleTraffic = HelioIdleTrafficGate()
 
     private enum PendingAction { case scan, reconnect, resumeRestored }
 
@@ -398,8 +400,10 @@ extension HelioConnection {
             breadcrumbs.syncStarted(wake: Self.appIsActive ? .foreground : (restoredThisLaunch ? .restoration : .reconnect))
         case .strapMessage(let endpoint, let opcode, let length):
             breadcrumbs.strapMessage(endpoint: endpoint, opcode: opcode, length: length)
+            idleTrafficArrived()
         case .strapNotification(let characteristic):
             breadcrumbs.strapNotification(characteristic: characteristic.rawValue)
+            idleTrafficArrived()
         case .wokeUp:
             // Decision 33, §16.4: an opportunistic hint (🔴 whether the Helio sends it). It carries no
             // time, so nothing is written from it: the catch-up fetches history and the night selection
@@ -409,6 +413,14 @@ extension HelioConnection {
         case .fellAsleep:
             break   // a breadcrumb only (the strap-message line above)
         }
+    }
+
+    /// Decision 35: something the strap sent on its own over the held link, with the app in the
+    /// background and no sync running, is a wake gated like a reconnect (`HelioWakePolicy`).
+    private func idleTrafficArrived() {
+        guard idleTraffic.shouldCheck(now: Date(), appIsActive: Self.appIsActive, syncing: session?.syncing == true,
+                                      runActive: activeBackgroundRuns > 0) else { return }
+        Self.wakeHandler(.idleTraffic)
     }
 
     /// The link came up while the app is in the background: the restoration's wake, or a reconnect.

@@ -7,8 +7,13 @@ import UIKit
 // mattering. With the authenticated link kept up in the background (B.5) and a standing connect armed
 // whenever it drops, these can wake a suspended app, and each runs at most one bounded catch-up sync:
 //   • the link coming back (a pending connect completing, or a state-restoration relaunch), after
-//     `reconnectCatchUpAfter` without a completed sync. This is the main strap-side wake
-//     (ZEPP_PROTOCOL.md §16.3–§16.4: no strap message is a dependable wake source);
+//     `reconnectCatchUpAfter` without a completed sync (ZEPP_PROTOCOL.md §16.3–§16.4: no strap message
+//     is a dependable wake source). B.5 holds the link up, so a strap worn in range all night never
+//     reconnects (decision 35);
+//   • for that held link, anything the strap sends on its own over it (decision 35, `idleTraffic`),
+//     gated exactly like a reconnect. Not dependable either: an idle authenticated link carries no
+//     heart-rate stream (that needs `04 01` plus a `04 02` from the phone every second, §7.1, which
+//     would be manufactured traffic), so this fires only if the strap pings or sends a §16.2 message;
 //   • HealthKit delivering new iPhone steps (`HelioHealthWake`), for strap users who turned it on: the
 //     only wake that doesn't depend on the strap;
 //   • the strap's woke-up event (`06 00` on `0x001D`), an opportunistic hint only (§16.4: 🔴 whether
@@ -54,8 +59,13 @@ enum HelioWakePolicy {
         if runActive { return .skip("a background run already holds the strap") }
         switch wake {
         case .strapEvent:
+            // Review-235 S3: a woke-up event can repeat at every night-time awakening; at most one
+            // event-triggered catch-up per cooldown.
+            if let start = lastBackgroundRunStart, now >= start, now.timeIntervalSince(start) < reconnectCooldown {
+                return .skip("a background run started under \(Int(reconnectCooldown / 60)) min ago")
+            }
             return .catchUp
-        case .reconnect, .restoration:
+        case .reconnect, .restoration, .idleTraffic:
             if let last = lastCompletedSync, now.timeIntervalSince(last) < reconnectCatchUpAfter, now >= last {
                 return .skip("last completed sync under \(Int(reconnectCatchUpAfter / 3600)) h ago")
             }
@@ -77,6 +87,22 @@ enum HelioWakePolicy {
     /// logged as a background sync.
     static func kind(for wake: HelioWake) -> TaskRecord.Kind {
         wake == .healthDelivery ? .backgroundSync : .cbWake
+    }
+}
+
+/// Decision 35: the strap's own traffic over the held, idle link is a wake, gated like a reconnect by
+/// `HelioWakePolicy`. This only keeps it from being evaluated on every packet: at most once per
+/// `checkInterval`, never with the app in front, never during a sync's own traffic or while a
+/// background run holds the strap. Nothing here makes the strap send anything.
+struct HelioIdleTrafficGate {
+    static let checkInterval: TimeInterval = 5 * 60
+    private(set) var lastCheck: Date?
+
+    mutating func shouldCheck(now: Date, appIsActive: Bool, syncing: Bool, runActive: Bool) -> Bool {
+        guard !appIsActive, !syncing, !runActive else { return false }
+        if let last = lastCheck, now >= last, now.timeIntervalSince(last) < Self.checkInterval { return false }
+        lastCheck = now
+        return true
     }
 }
 
