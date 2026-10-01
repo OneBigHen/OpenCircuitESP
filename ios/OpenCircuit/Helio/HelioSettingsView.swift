@@ -1,30 +1,33 @@
 import SwiftUI
 import ZeppKit
 
-// The strap's own settings (#228 measurement, #230 alerts): read from the strap and changed on the
-// strap, one setting per user action, through `ZeppHealthConfigEditor` (ZEPP_PROTOCOL.md §15.3: a
-// fresh read, ONE arg written echoing the group version, `06 01`, a re-read). The strap is the truth:
-// the screens show what the strap reports, and the only thing kept on the phone is the last read,
-// for display while the strap can't be reached.
+// The strap's own settings (#228 measurement, #229 workout detection, #230 alerts): read from the
+// strap and changed on the strap, one setting per user action, through `ZeppSettingsEditor`
+// (ZEPP_PROTOCOL.md §17.8: read the setting and its parent, validate, write ONE entry echoing the
+// version read, wait for `06`, re-read). The strap is the truth: the screens show what the strap
+// reports, and the only thing kept on the phone is the last read, for display while the strap
+// can't be reached.
 //
 // Left out on purpose:
-// - Heart Rate Push: the spec can't yet say which arg it is (HEALTH `0x05` is 🔴 "probably", §5.5).
-// - Inactivity and goal alerts: whether they buzz on the Helio is 🔴 (§13.4).
-// - Workout detection (#229): waits for the spec to identify the args (decision 34).
+// - Heart Rate Push: the spec can't say which arg it is (HEALTH `05` is 🔴 "probably", §5.5).
+// - Inactivity and goal alerts: whether they buzz on the Helio is 🔴 (§13.4, §20).
+// - A workout-detection on/off switch: no arg is known (§19.2); WORKOUT `40` (categories) is never
+//   written (§19.3).
+// - "Your strap probably alerted you" (§20.2): a follow-up, not this screen.
 
 /// The strap's last read settings, per strap, in memory only: shown (read-only) while the strap
 /// can't be reached. Never written back and never treated as the setting.
 @MainActor
 enum HelioSettingsDisplayCache {
     struct Entry: Equatable {
-        let config: ZeppHealthConfig
+        let snapshot: ZeppSettingsSnapshot
         let readAt: Date
     }
 
     private static var entries: [String: Entry] = [:]
 
-    static func store(_ config: ZeppHealthConfig, strap: String, at date: Date = Date()) {
-        entries[strap] = Entry(config: config, readAt: date)
+    static func store(_ snapshot: ZeppSettingsSnapshot, strap: String, at date: Date = Date()) {
+        entries[strap] = Entry(snapshot: snapshot, readAt: date)
     }
 
     static func entry(strap: String) -> Entry? { entries[strap] }
@@ -34,7 +37,7 @@ enum HelioSettingsDisplayCache {
 /// battery cost (in words: no figures are known), and why the controls are unavailable.
 enum HelioSettingsCopy {
 
-    static func label(_ setting: ZeppHealthSetting) -> String {
+    static func label(_ setting: ZeppSetting) -> String {
         switch setting {
         case .heartRateMonitoring: return "All-day heart rate"
         case .activeHeartRateMonitoring: return "Active heart-rate monitoring"
@@ -46,11 +49,13 @@ enum HelioSettingsCopy {
         case .lowHeartRateAlert: return "Low heart rate"
         case .relaxReminder: return "Relax reminder"
         case .lowSpO2Alert: return "Low SpO₂"
+        case .workoutDetectionAlert: return "Alert when a workout is detected"
+        case .workoutDetectionSensitivity: return "Detection sensitivity"
         }
     }
 
-    /// What the setting does, then what it costs in battery.
-    static func explanation(_ setting: ZeppHealthSetting) -> String {
+    /// What the setting does, then what it costs in battery. The alert rules are Amazfit's (§20).
+    static func explanation(_ setting: ZeppSetting) -> String {
         switch setting {
         case .heartRateMonitoring:
             return "How often the strap measures your heart rate. Heart rate, resting heart rate and HRV history come from these readings. "
@@ -67,24 +72,28 @@ enum HelioSettingsCopy {
         case .allDaySpO2:
             return "Measures blood oxygen through the day. Running the sensor uses more battery. The low SpO₂ alert needs it on."
         case .highHeartRateAlert:
-            return "Buzzes when your heart rate stays above this for 10 minutes while you're at rest. Not during sleep."
+            return "Buzzes when your heart rate stays above this for 10 minutes in a row while you're at rest. Never during sleep."
         case .lowHeartRateAlert:
-            return "Buzzes when your heart rate stays below this for 10 minutes while you're at rest. Not during sleep."
+            return "Buzzes when your heart rate stays below this for 10 minutes in a row while you're at rest. Never during sleep."
         case .relaxReminder:
-            return "Buzzes when your stress stays high for 10 minutes while you're at rest."
+            return "Buzzes when your stress stays high for 10 minutes in a row while you're at rest. Never during sleep."
         case .lowSpO2Alert:
-            return "Buzzes when your blood oxygen stays below this for 10 minutes. Not during sleep."
+            return "Buzzes when your blood oxygen stays below this for 10 minutes in a row. Never during sleep."
+        case .workoutDetectionAlert:
+            return "Lets you know when the strap detects a workout. On the strap this is probably a buzz; that isn't confirmed yet."
+        case .workoutDetectionSensitivity:
+            return "Higher notices a workout sooner; lower waits longer."
         }
     }
 
     /// What goes missing while a recording switch is off; nil when either value is fine.
-    static func offConsequence(_ setting: ZeppHealthSetting, _ value: ZeppConfigValue) -> String? {
+    static func offConsequence(_ setting: ZeppSetting, _ value: ZeppConfigValue) -> String? {
         let off = value == .bool(false) || value == .byte(0)
         guard off else { return nil }
         switch setting {
         case .heartRateMonitoring: return "Off: heart rate, resting heart rate and HRV history may be missing."
         case .highAccuracySleep: return "Off: sleep stages may be missing."
-        case .sleepBreathingQuality: return "Off: sleep respiratory rate may be missing."
+        case .sleepBreathingQuality: return "Off: sleep SpO₂ and sleep respiratory rate may be missing."
         case .stressMonitoring: return "Off: stress will be empty."
         case .allDaySpO2: return "Off: automatic SpO₂ readings will be empty."
         default: return nil
@@ -92,12 +101,17 @@ enum HelioSettingsCopy {
     }
 
     /// One value as the strap means it.
-    static func value(_ value: ZeppConfigValue, for setting: ZeppHealthSetting) -> String {
+    static func value(_ value: ZeppConfigValue, for setting: ZeppSetting) -> String {
         switch (setting, value) {
         case (_, .bool(let on)): return on ? "On" : "Off"
+        case (.workoutDetectionSensitivity, .byte(0)): return "High"
+        case (.workoutDetectionSensitivity, .byte(1)): return "Standard"
+        case (.workoutDetectionSensitivity, .byte(2)): return "Low"
+        case (.workoutDetectionSensitivity, .byte(let n)): return "Level \(n)"
         case (_, .byte(0)): return "Off"
-        // SPEC-GAP: `ff` = "smart"/automatic is 🟡 (§5.5).
+        // §17.9: ff smart, fe continuous, 01–78 every N minutes.
         case (.heartRateMonitoring, .byte(0xff)): return "Smart"
+        case (.heartRateMonitoring, .byte(0xfe)): return "Continuous"
         case (.heartRateMonitoring, .byte(1)): return "Every minute"
         case (.heartRateMonitoring, .byte(let n)): return "Every \(n) min"
         case (.highHeartRateAlert, .byte(let n)): return "Above \(n) bpm"
@@ -107,18 +121,24 @@ enum HelioSettingsCopy {
         }
     }
 
-    /// The dependent control's one-line reason.
-    static func needs(_ prerequisite: ZeppHealthSetting) -> String {
-        "Needs \(label(prerequisite).lowercasedFirst) on. Turn it on in Measurement."
+    /// The dependent control's one-line reason (§17.7).
+    static func needs(_ parent: ZeppSetting) -> String {
+        switch parent {
+        case .heartRateMonitoring: return "Needs all-day heart rate set to anything but Off, in Measurement."
+        default: return "Needs \(label(parent).lowercasedFirst) on. Turn it on in Measurement."
+        }
     }
 
+    static let readOnly = "Read-only: the strap's version of these settings isn't one OpenCircuit knows."
+
     /// Why the settings can't be changed right now; nil when they can.
-    static func blockedReason(status: HelioStatus, sessionCanChange: Bool, offered: Bool?) -> String? {
+    static func blockedReason(status: HelioStatus, canChange: Bool, offered: Bool?) -> String? {
         switch status.kind {
         case .ready, .syncing:
-            if sessionCanChange { return nil }
-            return offered == false
-                ? "The strap didn't offer its health settings on this connection."
+            if canChange { return nil }
+            if offered == false { return "The strap didn't offer these settings on this connection." }
+            return status.kind == .syncing
+                ? "Syncing history. Settings can be changed when the sync finishes."
                 : "The strap isn't ready for changes yet."
         case .notSetUp, .keyNeeded:
             return "Add the strap's key to change its settings."
@@ -137,8 +157,14 @@ enum HelioSettingsCopy {
         }
     }
 
-    static let alertsHeader = "These are the strap's own alerts: it buzzes by itself when one triggers, even when your phone "
-        + "isn't nearby. They're separate from OpenCircuit's notifications."
+    /// §20.1: no message tells the phone when the strap buzzes.
+    static let alertsHeader = "Your strap buzzes on its own when one of these triggers, even when your phone isn't nearby. "
+        + "OpenCircuit isn't notified when it buzzes, and these are separate from OpenCircuit's own notifications."
+    /// §19, decision 34.
+    static let workoutHeader = "The strap can notice a workout from your heart rate and record it by itself. "
+        + "Amazfit says workout detection greatly reduces battery life. "
+        + "OpenCircuit doesn't import the strap's workout records, so these settings only change what the strap and the Zepp app record."
+    static let workoutSwitchNote = "Turning detection itself on or off isn't here yet: which strap setting does that hasn't been identified."
     static let savedOnStrap = "Saved on the strap itself. OpenCircuit changes a setting only when you do."
     static let heartRatePushNote = "Heart Rate Push isn't here yet: which strap setting it is hasn't been confirmed. "
         + "OpenCircuit doesn't need it once the key is saved."
@@ -148,25 +174,29 @@ private extension String {
     var lowercasedFirst: String { prefix(1).lowercased() + dropFirst() }
 }
 
-/// The state both settings screens share: the strap's values (live, or last read for display), and
+/// The state every settings screen shares: the strap's values (live, or last read for display), and
 /// whether they can be changed.
 @MainActor
 private struct HelioSettingsModel {
     let connection: HelioConnection
     let status: HelioStatus
+    let group: UInt8
 
     var session: HelioSession? { connection.session }
-    var editor: ZeppHealthConfigEditor? { session?.healthConfigEditor }
-    var canChange: Bool { session?.canUseHealthSettings == true }
+    var editor: ZeppSettingsEditor? { session?.settingsEditor }
+    var canRead: Bool { session?.canReadStrapSettings == true }
+    var canChange: Bool { session?.canChangeStrapSettings == true && editor?.isOffered(group: group) == true }
     var blockedReason: String? {
-        HelioSettingsCopy.blockedReason(status: status, sessionCanChange: canChange, offered: editor?.isOffered)
+        HelioSettingsCopy.blockedReason(status: status, canChange: canChange,
+                                        offered: canRead ? editor?.isOffered(group: group) : nil)
     }
     var isBusy: Bool { editor?.isBusy == true }
+    var hasLiveRead: Bool { canRead && editor?.hasRead(group: group) == true }
 
-    /// The live read when there is one; otherwise the last read, for display only.
-    var config: ZeppHealthConfig? {
-        if canChange, let live = editor?.config { return live }
-        return cached?.config
+    /// This connection's read when there is one; otherwise the last read, for display only.
+    var snapshot: ZeppSettingsSnapshot? {
+        if hasLiveRead, let live = editor?.snapshot { return live }
+        return cached?.snapshot
     }
 
     var cached: HelioSettingsDisplayCache.Entry? {
@@ -174,29 +204,35 @@ private struct HelioSettingsModel {
     }
 
     /// Showing the last read rather than a read from this connection.
-    var showingCache: Bool { !(canChange && editor?.config != nil) && cached != nil }
+    var showingCache: Bool { !hasLiveRead && cached != nil }
 }
 
-/// One setting: a toggle or a picker of the strap's allowed values, its explanation, and (for a
-/// dependent alert) why it is disabled.
+/// One setting: a toggle or a picker of the strap's allowed values, its explanation, and why it is
+/// disabled when it is.
 private struct HelioSettingRow: View {
-    let setting: ZeppHealthSetting
-    let config: ZeppHealthConfig
+    let setting: ZeppSetting
+    let snapshot: ZeppSettingsSnapshot
     let enabled: Bool
     let onChange: (ZeppConfigValue, ZeppConfigValue) -> Void
 
     var body: some View {
-        if let current = config.value(setting) {
-            let availability = config.availability(setting)
-            let usable = enabled && availability == .available
+        if let current = snapshot.value(setting) {
+            let availability = snapshot.availability(setting)
+            let usable = enabled && availability == .available && !snapshot.options(setting).isEmpty
             VStack(alignment: .leading, spacing: 6) {
                 control(current: current).disabled(!usable)
                 Text(HelioSettingsCopy.explanation(setting)).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if case .needs(let prerequisite) = availability {
-                    Text(HelioSettingsCopy.needs(prerequisite)).font(.caption.weight(.semibold)).foregroundStyle(.orange)
-                } else if let consequence = HelioSettingsCopy.offConsequence(setting, current) {
-                    Text(consequence).font(.caption.weight(.semibold)).foregroundStyle(.orange)
+                switch availability {
+                case .needs(let parent):
+                    // §17.7: shown inactive, with its stored value visible.
+                    Text(HelioSettingsCopy.needs(parent)).font(.caption.weight(.semibold)).foregroundStyle(.orange)
+                case .readOnly:
+                    Text(HelioSettingsCopy.readOnly).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                default:
+                    if let consequence = HelioSettingsCopy.offConsequence(setting, current) {
+                        Text(consequence).font(.caption.weight(.semibold)).foregroundStyle(.orange)
+                    }
                 }
             }
             .padding(.vertical, 2)
@@ -212,7 +248,8 @@ private struct HelioSettingRow: View {
         } else {
             // The strap's allowed values, in its order; the current value too if the strap reports
             // one outside its own list (shown, never offered as a change).
-            let options = config.options(setting) + (config.options(setting).contains(current) ? [] : [current])
+            let allowed = snapshot.options(setting)
+            let options = allowed + (allowed.contains(current) ? [] : [current])
             Picker(HelioSettingsCopy.label(setting), selection: Binding(
                 get: { current },
                 set: { new in onChange(current, new) })) {
@@ -227,7 +264,8 @@ private struct HelioSettingRow: View {
 /// Shared shell: the reason the controls are unavailable, the rows, the outcome of the last change.
 private struct HelioSettingsList: View {
     let connection: HelioConnection
-    let settings: [ZeppHealthSetting]
+    let group: UInt8
+    let settings: [ZeppSetting]
     let header: String?
     let footer: String
     @State private var hasKey = HelioKeyStore.shared.hasKey
@@ -240,7 +278,7 @@ private struct HelioSettingsList: View {
     }
 
     var body: some View {
-        let model = HelioSettingsModel(connection: connection, status: status)
+        let model = HelioSettingsModel(connection: connection, status: status, group: group)
         List {
             if let reason = model.blockedReason {
                 Section { Text(reason).font(.subheadline) }
@@ -248,11 +286,11 @@ private struct HelioSettingsList: View {
             if let header {
                 Section { Text(header).font(.subheadline) }
             }
-            if let config = model.config {
+            if let snapshot = model.snapshot, settings.contains(where: { snapshot.value($0) != nil }) {
                 Section {
-                    ForEach(settings.filter { config.value($0) != nil }, id: \.self) { setting in
-                        HelioSettingRow(setting: setting, config: config, enabled: model.canChange && !model.isBusy) { from, to in
-                            model.session?.changeHealthSetting(setting, from: from, to: to)
+                    ForEach(settings.filter { snapshot.value($0) != nil }, id: \.self) { setting in
+                        HelioSettingRow(setting: setting, snapshot: snapshot, enabled: model.canChange && !model.isBusy) { from, to in
+                            model.session?.changeStrapSetting(setting, from: from, to: to)
                         }
                     }
                 } footer: {
@@ -262,14 +300,13 @@ private struct HelioSettingsList: View {
                         Text(footer)
                     }
                 }
-                if settings.allSatisfy({ config.value($0) == nil }) {
-                    Section { Text("The strap didn't report these settings.").foregroundStyle(.secondary) }
-                }
-            } else if model.canChange {
+            } else if model.hasLiveRead {
+                Section { Text("The strap didn't report these settings.").foregroundStyle(.secondary) }
+            } else if model.canRead, model.editor?.isOffered(group: group) == true {
                 Section {
-                    if case .unreadable? = model.editor?.state {
+                    if model.editor?.readFailures[group] != nil {
                         Text("Couldn't read the strap's settings.").foregroundStyle(.secondary)
-                        Button("Read again") { model.session?.readHealthSettings() }.disabled(model.isBusy)
+                        Button("Read again") { model.session?.readStrapSettings(groups: [group]) }.disabled(model.isBusy)
                     } else {
                         Text("Reading the strap's settings…").foregroundStyle(.secondary)
                     }
@@ -277,22 +314,25 @@ private struct HelioSettingsList: View {
             }
             if model.isBusy, model.editor?.changeInFlight != nil {
                 Section { Text("Saving to the strap…").font(.caption) }
-            } else if model.canChange, let notice = model.session?.healthSettingsNotice {
+            } else if model.canRead, let notice = model.session?.settingsNotice {
                 Section { Text(notice).font(.caption) }
             }
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Refresh") { model.session?.readHealthSettings() }.disabled(!model.canChange || model.isBusy)
+                Button("Refresh") { model.session?.readStrapSettings(groups: [group]) }.disabled(!model.canRead || model.isBusy)
             }
         }
         .onAppear {
             hasKey = HelioKeyStore.shared.hasKey
             keyRejected = HelioKeyStore.shared.isRejected
-            model.session?.readHealthSettings()
+            model.session?.readStrapSettings(groups: [group])
         }
         .onChange(of: connection.session?.phase) { _, phase in
-            if phase == .ready { connection.session?.readHealthSettings() }
+            // A connection made while the screen is open: read once it is set up.
+            if phase == .ready, connection.session?.settingsEditor?.hasRead(group: group) == false {
+                connection.session?.readStrapSettings(groups: [group])
+            }
         }
     }
 }
@@ -302,7 +342,7 @@ struct HelioMeasurementSettingsView: View {
     let connection: HelioConnection
 
     var body: some View {
-        HelioSettingsList(connection: connection, settings: ZeppHealthSetting.measurement, header: nil,
+        HelioSettingsList(connection: connection, group: ZeppConfig.healthGroup, settings: ZeppSetting.measurement, header: nil,
                           footer: HelioSettingsCopy.savedOnStrap + " " + HelioSettingsCopy.heartRatePushNote)
             .navigationTitle("Measurement")
             .navigationBarTitleDisplayMode(.inline)
@@ -314,9 +354,22 @@ struct HelioAlertsView: View {
     let connection: HelioConnection
 
     var body: some View {
-        HelioSettingsList(connection: connection, settings: ZeppHealthSetting.alerts, header: HelioSettingsCopy.alertsHeader,
-                          footer: HelioSettingsCopy.savedOnStrap)
+        HelioSettingsList(connection: connection, group: ZeppConfig.healthGroup, settings: ZeppSetting.alerts,
+                          header: HelioSettingsCopy.alertsHeader, footer: HelioSettingsCopy.savedOnStrap)
             .navigationTitle("Health alerts")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// #229: workout detection's alert and sensitivity (decision 34: detection settings only).
+struct HelioWorkoutDetectionView: View {
+    let connection: HelioConnection
+
+    var body: some View {
+        HelioSettingsList(connection: connection, group: ZeppConfig.workoutGroup, settings: ZeppSetting.workoutDetection,
+                          header: HelioSettingsCopy.workoutHeader,
+                          footer: HelioSettingsCopy.savedOnStrap + " " + HelioSettingsCopy.workoutSwitchNote)
+            .navigationTitle("Workout detection")
             .navigationBarTitleDisplayMode(.inline)
     }
 }

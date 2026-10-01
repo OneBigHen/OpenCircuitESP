@@ -1,4 +1,5 @@
 import XCTest
+import OpenCircuitKit
 import ZeppKit
 @testable import OpenCircuit
 
@@ -13,18 +14,50 @@ private let services: [(endpoint: UInt16, flag: UInt8)] = [
     (0x0000, 0), (0x000A, 1), (0x000F, 0), (0x001A, 1), (0x0029, 0), (0x0043, 0), (0x0047, 0), (0x0082, 0),
 ]
 
-/// A HEALTH read reply with constraints, made-up values: HR smart; active HR off; sleep on;
-/// breathing on; stress `stress`; SpO₂ off; high HR off (0/100/110/120); low HR off (0/40/45/50);
-/// relax off; low SpO₂ off (0/80/85/90).
-private func settingsReply(stress: Bool = true, spo2: Bool = false, highHR: UInt8 = 0) -> [UInt8] {
-    let entries: [[UInt8]] = [
-        [0x01, 0x10, 0xff, 0x04, 0x00, 0xff, 0x05, 0x0a],
-        [0x04, 0x0b, 0x00], [0x11, 0x0b, 0x01], [0x12, 0x0b, 0x01],
-        [0x13, 0x0b, stress ? 0x01 : 0x00], [0x31, 0x0b, spo2 ? 0x01 : 0x00],
-        [0x02, 0x10, highHR, 0x04, 0, 100, 110, 120], [0x03, 0x10, 0x00, 0x04, 0, 40, 45, 50],
-        [0x14, 0x0b, 0x00], [0x32, 0x10, 0x00, 0x04, 0, 80, 85, 90],
-    ]
-    return [0x04, 0x01, 0x08, 0x03, 0x01, UInt8(entries.count)] + entries.flatMap { $0 }
+/// The strap's HEALTH and WORKOUT settings, made up: HR smart; active HR off; sleep on; breathing on;
+/// stress on; SpO₂ off; high HR off (0/100/110/120); low HR off (0/40/45/50); relax off; low SpO₂ off
+/// (0/80/85/90); workout alert off; sensitivity standard (high/standard/low).
+private final class StrapSettings {
+    var stress = true
+    var spo2 = false
+    var highHR: UInt8 = 0
+    var workoutAlert = false
+
+    func entry(_ group: UInt8, _ arg: UInt8) -> [UInt8]? {
+        switch (group, arg) {
+        case (0x08, 0x01): return [0x01, 0x10, 0xff, 0x04, 0x00, 0xff, 0x05, 0x0a]
+        case (0x08, 0x04): return [0x04, 0x0b, 0x00]
+        case (0x08, 0x11): return [0x11, 0x0b, 0x01]
+        case (0x08, 0x12): return [0x12, 0x0b, 0x01]
+        case (0x08, 0x13): return [0x13, 0x0b, stress ? 0x01 : 0x00]
+        case (0x08, 0x31): return [0x31, 0x0b, spo2 ? 0x01 : 0x00]
+        case (0x08, 0x02): return [0x02, 0x10, highHR, 0x04, 0, 100, 110, 120]
+        case (0x08, 0x03): return [0x03, 0x10, 0x00, 0x04, 0, 40, 45, 50]
+        case (0x08, 0x14): return [0x14, 0x0b, 0x00]
+        case (0x08, 0x32): return [0x32, 0x10, 0x00, 0x04, 0, 80, 85, 90]
+        case (0x09, 0x41): return [0x41, 0x0b, workoutAlert ? 0x01 : 0x00]
+        case (0x09, 0x42): return [0x42, 0x10, 0x01, 0x03, 0x00, 0x01, 0x02]
+        default: return nil
+        }
+    }
+
+    /// Answers `03 01 <group> <n> <args…>` with the args it has (HEALTH v3, WORKOUT v1).
+    func answer(_ request: [UInt8]) -> [UInt8]? {
+        guard request.count >= 4, request[0] == 0x03, request[1] == 0x01 else { return nil }
+        let group = request[2]
+        let entries = request.dropFirst(4).compactMap { entry(group, $0) }
+        return [0x04, 0x01, group, group == 0x08 ? 0x03 : 0x01, 0x01, UInt8(entries.count)] + entries.flatMap { $0 }
+    }
+
+    /// Applies a write the way a strap that takes it would.
+    func apply(_ write: [UInt8]) {
+        switch Array(write.dropFirst(5)) {
+        case [0x31, 0x0b, 0x01]: spo2 = true
+        case [0x13, 0x0b, 0x00]: stress = false
+        case [0x41, 0x0b, 0x01]: workoutAlert = true
+        default: break
+        }
+    }
 }
 
 @MainActor
@@ -73,10 +106,26 @@ private final class Keys: HelioKeyStoring {
     func markRejected() { isRejected = true }
 }
 
+/// A sink that stores nothing: these tests only need a sync to be running.
+@MainActor
+private final class NullSink: HelioHistorySink {
+    func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date] { [:] }
+    func notBefore(timeline: SyncDeviceID, now: Date) -> Date? { nil }
+    func beginSync(timeline: SyncDeviceID, now: Date) {}
+    func persist(_ round: ZeppFetchRound, timeline: SyncDeviceID, now: Date) -> Bool { true }
+    func finishSync(timeline: SyncDeviceID, now: Date) -> HelioSyncResult { HelioSyncResult() }
+}
+
 @MainActor
 final class HelioSettingsTests: XCTestCase {
     private let strapID = "5B1E4C2A-0000-4000-8000-0000000000B2"
     private var now = Date(timeIntervalSince1970: 1_789_905_600)
+    private var strap = StrapSettings()
+
+    override func setUp() {
+        super.setUp()
+        strap = StrapSettings()
+    }
 
     private func makeStrap() -> FakeZeppDevice {
         let device = FakeZeppDevice(authKey: ZeppHex.bytes(keyHex)!, privateKey: Array(UInt8(0x81)...UInt8(0x98)),
@@ -84,14 +133,15 @@ final class HelioSettingsTests: XCTestCase {
         device.services = services
         device.deviceInfoReply = [0x02, 0x01, 0x0c, 0, 0, 0, 0, 0, 0, 0] + Array("9.9.9.9".utf8) + [0] + Array("1.2.3.4".utf8) + [0]
         device.configCapabilitiesReply = [0x02, 0x03, 0x05, 0x00, 0x0b, 0x08, 0x09, 0x0a]
-        device.configReplies[ZeppHealthConfigEditor.readRequest] = settingsReply()
+        device.configReadHandler = { [strap = self.strap] in strap.answer($0) }
         return device
     }
 
-    private func connect(_ device: FakeZeppDevice, key: String? = keyHex) -> (HelioSession, SettingsTransport) {
+    private func connect(_ device: FakeZeppDevice, key: String? = keyHex,
+                         sink: (any HelioHistorySink)? = nil) -> (HelioSession, SettingsTransport) {
         let transport = SettingsTransport(device: device)
         let keys = Keys(key)
-        let session = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys, sink: nil,
+        let session = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys, sink: sink,
                                    findState: HelioFindState(), clock: { [unowned self] in self.now },
                                    autoTick: false, autoSyncOnConnect: false)
         transport.session = session
@@ -105,39 +155,35 @@ final class HelioSettingsTests: XCTestCase {
         let (session, _) = connect(device)
         XCTAssertEqual(session.phase, .ready)
         XCTAssertEqual(device.configWrites, [], "§15.1: nothing is written at setup")
-        XCTAssertTrue(session.canUseHealthSettings)
-        XCTAssertEqual(session.healthConfigEditor?.state, .notRead)
+        XCTAssertTrue(session.canChangeStrapSettings)
+        XCTAssertEqual(session.settingsEditor?.hasRead(group: 0x08), false)
     }
 
     func testReadingShowsTheStrapsValuesAndFeedsTheRecordingWarnings() throws {
         let device = makeStrap()
         let (session, transport) = connect(device)
-        session.readHealthSettings()
+        session.readStrapSettings(groups: [0x08])
         transport.drain()
-        let config = try XCTUnwrap(session.healthConfigEditor?.config)
+        let config = try XCTUnwrap(session.settingsEditor?.snapshot)
         XCTAssertEqual(config.value(.heartRateMonitoring), .byte(0xff))
         XCTAssertEqual(config.availability(.lowSpO2Alert), .needs(.allDaySpO2))
         XCTAssertEqual(session.recordingWarnings, ["All-day SpO₂ is off, so automatic SpO₂ readings will be empty."])
-        XCTAssertEqual(HelioSettingsDisplayCache.entry(strap: strapID)?.config, config, "kept for display only")
+        XCTAssertEqual(HelioSettingsDisplayCache.entry(strap: strapID)?.snapshot, config, "kept for display only")
         XCTAssertEqual(device.configWrites, [])
     }
 
     func testOneChangeWritesOneArgThenShowsTheReRead() throws {
         let device = makeStrap()
-        device.onConfigWrite = { write in
-            if write == [0x05, 0x08, 0x03, 0x00, 0x01, 0x31, 0x0b, 0x01] {
-                device.configReplies[ZeppHealthConfigEditor.readRequest] = settingsReply(spo2: true)
-            }
-        }
+        device.onConfigWrite = { [strap = self.strap] in strap.apply($0) }
         let (session, transport) = connect(device)
-        session.readHealthSettings()
+        session.readStrapSettings(groups: [0x08])
         transport.drain()
-        XCTAssertNil(session.changeHealthSetting(.allDaySpO2, from: .bool(false), to: .bool(true)))
+        XCTAssertNil(session.changeStrapSetting(.allDaySpO2, from: .bool(false), to: .bool(true)))
         transport.drain()
         XCTAssertEqual(device.configWrites, [[0x05, 0x08, 0x03, 0x00, 0x01, 0x31, 0x0b, 0x01]])
-        XCTAssertEqual(session.healthSettingsNotice, "Saved on the strap.")
-        XCTAssertEqual(session.healthConfigEditor?.config?.value(.allDaySpO2), .bool(true))
-        XCTAssertEqual(session.healthConfigEditor?.config?.availability(.lowSpO2Alert), .available)
+        XCTAssertEqual(session.settingsNotice, "Saved on the strap.")
+        XCTAssertEqual(session.settingsEditor?.snapshot.value(.allDaySpO2), .bool(true))
+        XCTAssertEqual(session.settingsEditor?.snapshot.availability(.lowSpO2Alert), .available)
         XCTAssertEqual(session.recordingWarnings, [], "the warning follows the strap's new value")
     }
 
@@ -145,40 +191,70 @@ final class HelioSettingsTests: XCTestCase {
         let device = makeStrap()
         device.configWriteAckStatus = 0x02
         let (session, transport) = connect(device)
-        session.readHealthSettings()
+        session.readStrapSettings(groups: [0x08])
         transport.drain()
-        XCTAssertNil(session.changeHealthSetting(.highHeartRateAlert, from: .byte(0), to: .byte(110)))
+        XCTAssertNil(session.changeStrapSetting(.highHeartRateAlert, from: .byte(0), to: .byte(110)))
         transport.drain()
         XCTAssertEqual(device.configWrites.count, 1, "never retried")
-        XCTAssertEqual(session.healthConfigEditor?.config?.value(.highHeartRateAlert), .byte(0), "the re-read value")
-        XCTAssertEqual(session.healthSettingsNotice,
-                       "The strap didn't accept the change. Its current value is shown. Nothing was retried.")
+        XCTAssertEqual(session.settingsEditor?.snapshot.value(.highHeartRateAlert), .byte(0), "the re-read value")
+        XCTAssertEqual(session.settingsNotice,
+                       "The strap didn't take the change. Its current value is shown. Nothing was retried.")
     }
 
     func testAValueChangedElsewhereIsNotOverwritten() throws {
         let device = makeStrap()
         let (session, transport) = connect(device)
-        session.readHealthSettings()
+        session.readStrapSettings(groups: [0x08])
         transport.drain()
-        device.configReplies[ZeppHealthConfigEditor.readRequest] = settingsReply(highHR: 120)   // changed in Zepp
-        XCTAssertNil(session.changeHealthSetting(.highHeartRateAlert, from: .byte(0), to: .byte(110)))
+        strap.highHR = 120   // changed in Zepp
+        XCTAssertNil(session.changeStrapSetting(.highHeartRateAlert, from: .byte(0), to: .byte(110)))
         transport.drain()
         XCTAssertEqual(device.configWrites, [])
-        XCTAssertEqual(session.healthConfigEditor?.config?.value(.highHeartRateAlert), .byte(120))
-        XCTAssertTrue(session.healthSettingsNotice?.contains("changed on the strap") == true)
+        XCTAssertEqual(session.settingsEditor?.snapshot.value(.highHeartRateAlert), .byte(120))
+        XCTAssertTrue(session.settingsNotice?.contains("changed on the strap") == true)
     }
 
     func testRefusedChangesSendNothing() throws {
         let device = makeStrap()
         let (session, transport) = connect(device)
-        session.readHealthSettings()
+        session.readStrapSettings(groups: [0x08])
         transport.drain()
-        XCTAssertEqual(session.changeHealthSetting(.lowSpO2Alert, from: .byte(0), to: .byte(90)), "Needs all-day SpO₂ on.")
-        XCTAssertEqual(session.changeHealthSetting(.highHeartRateAlert, from: .byte(0), to: .byte(105)),
+        XCTAssertEqual(session.changeStrapSetting(.lowSpO2Alert, from: .byte(0), to: .byte(90)), "Needs all-day SpO₂ on. Turn it on in Measurement.")
+        XCTAssertEqual(session.changeStrapSetting(.highHeartRateAlert, from: .byte(0), to: .byte(105)),
                        "The strap doesn't allow that value.")
-        XCTAssertEqual(session.changeHealthSetting(.stressMonitoring, from: .bool(true), to: .bool(true)),
+        XCTAssertEqual(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(true)),
                        "That's already the strap's setting.")
         transport.drain()
+        XCTAssertEqual(device.configWrites, [])
+    }
+
+    func testWorkoutDetectionWritesOnlyTheAlertOrTheSensitivity() throws {
+        let device = makeStrap()
+        device.onConfigWrite = { [strap = self.strap] in strap.apply($0) }
+        let (session, transport) = connect(device)
+        session.readStrapSettings(groups: [ZeppConfig.workoutGroup])
+        transport.drain()
+        let snapshot = try XCTUnwrap(session.settingsEditor?.snapshot)
+        XCTAssertEqual(snapshot.value(.workoutDetectionSensitivity), .byte(1))
+        XCTAssertNil(session.changeStrapSetting(.workoutDetectionAlert, from: .bool(false), to: .bool(true)))
+        transport.drain()
+        XCTAssertEqual(device.configWrites, [[0x05, 0x09, 0x01, 0x00, 0x01, 0x41, 0x0b, 0x01]], "WORKOUT v1 echoed, one entry")
+        XCTAssertEqual(session.settingsNotice, "Saved on the strap.")
+        XCTAssertFalse(device.configWrites.contains { $0.count > 5 && $0[1] == 0x09 && $0[5] == 0x40 }, "categories never written")
+    }
+
+    func testNoChangeDuringAHistoryFetch() throws {
+        let device = makeStrap()
+        let sink = NullSink()
+        let (session, transport) = connect(device, sink: sink)
+        session.readStrapSettings(groups: [0x08])
+        transport.drain()
+        session.syncHistory(manual: true)   // notify-enable is queued, not drained: the sync stays open
+        XCTAssertEqual(session.phase, .syncing)
+        XCTAssertTrue(session.canReadStrapSettings)
+        XCTAssertFalse(session.canChangeStrapSettings, "§17.8 step 1")
+        XCTAssertEqual(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)),
+                       "Settings can be changed when the sync finishes.")
         XCTAssertEqual(device.configWrites, [])
     }
 
@@ -186,12 +262,12 @@ final class HelioSettingsTests: XCTestCase {
         let device = makeStrap()
         let (session, transport) = connect(device, key: nil)
         XCTAssertEqual(session.phase, .keyless)
-        XCTAssertFalse(session.canUseHealthSettings)
-        session.readHealthSettings()
-        XCTAssertNotNil(session.changeHealthSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
+        XCTAssertFalse(session.canReadStrapSettings)
+        session.readStrapSettings(groups: [0x08])
+        XCTAssertNotNil(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
         transport.drain()
         XCTAssertEqual(device.configWrites, [])
-        let reason = HelioSettingsCopy.blockedReason(status: HelioStatus.keyNeeded, sessionCanChange: false, offered: nil)
+        let reason = HelioSettingsCopy.blockedReason(status: HelioStatus.keyNeeded, canChange: false, offered: nil)
         XCTAssertEqual(reason, "Add the strap's key to change its settings.")
     }
 
@@ -200,13 +276,13 @@ final class HelioSettingsTests: XCTestCase {
                                     HelioStatus(kind: .disconnected, title: "Not connected", detail: nil, tone: .neutral),
                                     HelioStatus(kind: .settingUp, title: "", detail: nil, tone: .working)]
         for status in kinds {
-            XCTAssertNotNil(HelioSettingsCopy.blockedReason(status: status, sessionCanChange: false, offered: nil))
+            XCTAssertNotNil(HelioSettingsCopy.blockedReason(status: status, canChange: false, offered: nil))
         }
         let ready = HelioStatus(kind: .ready, title: "Connected", detail: nil, tone: .good)
-        XCTAssertNil(HelioSettingsCopy.blockedReason(status: ready, sessionCanChange: true, offered: true))
-        XCTAssertEqual(HelioSettingsCopy.blockedReason(status: ready, sessionCanChange: false, offered: false),
-                       "The strap didn't offer its health settings on this connection.")
-        XCTAssertTrue(HelioSettingsCopy.blockedReason(status: HelioStatus.busy, sessionCanChange: false, offered: nil)!
+        XCTAssertNil(HelioSettingsCopy.blockedReason(status: ready, canChange: true, offered: true))
+        XCTAssertEqual(HelioSettingsCopy.blockedReason(status: ready, canChange: false, offered: false),
+                       "The strap didn't offer these settings on this connection.")
+        XCTAssertTrue(HelioSettingsCopy.blockedReason(status: HelioStatus.busy, canChange: false, offered: nil)!
             .contains("Another phone or app"))
     }
 
@@ -221,10 +297,15 @@ final class HelioSettingsTests: XCTestCase {
         XCTAssertNil(HelioSettingsCopy.offConsequence(.activeHeartRateMonitoring, .bool(false)),
                      "§5.5: it doesn't gate recording, so off is never a warning")
         XCTAssertTrue(HelioSettingsCopy.explanation(.activeHeartRateMonitoring).contains("doesn't decide whether heart rate is recorded"))
-        XCTAssertTrue(HelioSettingsCopy.alertsHeader.contains("separate from OpenCircuit's notifications"))
-        for setting in ZeppHealthSetting.allCases {
+        XCTAssertTrue(HelioSettingsCopy.alertsHeader.contains("OpenCircuit isn't notified"), "§20.1")
+        XCTAssertTrue(HelioSettingsCopy.workoutHeader.contains("doesn't import the strap's workout records"), "decision 34")
+        XCTAssertTrue(HelioSettingsCopy.workoutHeader.contains("battery"), "§19.3")
+        XCTAssertEqual(HelioSettingsCopy.value(.byte(0xfe), for: .heartRateMonitoring), "Continuous")
+        XCTAssertEqual(HelioSettingsCopy.value(.byte(0), for: .workoutDetectionSensitivity), "High")
+        XCTAssertEqual(HelioSettingsCopy.value(.byte(1), for: .workoutDetectionSensitivity), "Standard")
+        for setting in ZeppSetting.allCases {
             let text = HelioSettingsCopy.explanation(setting)
-            if ZeppHealthSetting.measurement.contains(setting) {
+            if ZeppSetting.measurement.contains(setting) {
                 XCTAssertFalse(text.contains { $0.isASCII && $0.isNumber }, "battery cost in words: no invented figures")
             }
             XCTAssertFalse(text.unicodeScalars.contains { $0.properties.isEmojiPresentation }, "no emoji")

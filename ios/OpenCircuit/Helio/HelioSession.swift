@@ -158,11 +158,12 @@ final class HelioSession: WearableSession {
     private(set) var alarmNotice: String?
     private(set) var configCapabilities: ZeppConfigCapabilities?
     private(set) var hapticAlerts: ZeppHapticAlertSettings?
-    /// The HEALTH settings and the strap's own alerts, changed one at a time through §15.3 (#228,
-    /// #230). Built with the services list; nothing is read or written until a settings screen asks.
-    private(set) var healthConfigEditor: ZeppHealthConfigEditor?
+    /// The strap's own settings (measurement, alerts, workout detection), changed one at a time
+    /// through §17.8 (#228, #229, #230). Built with the services list; nothing is read or written
+    /// until a settings screen asks.
+    private(set) var settingsEditor: ZeppSettingsEditor?
     /// The last settings outcome, in plain language, for the settings screens.
-    private(set) var healthSettingsNotice: String?
+    private(set) var settingsNotice: String?
     /// Mirrors of the shared find machine, so the find screen re-renders.
     private(set) var findPhase: ZeppFindDevice.State = .idle
     private(set) var findVersion: UInt8?
@@ -444,10 +445,10 @@ final class HelioSession: WearableSession {
             alarmEditor = editor
             performAlarm(out)
         }
-        if var editor = healthConfigEditor, editor.nextDeadline.map({ now >= $0 }) == true {
+        if var editor = settingsEditor, editor.nextDeadline.map({ now >= $0 }) == true {
             let out = editor.tick(now: now)
-            healthConfigEditor = editor
-            performHealthConfig(out)
+            settingsEditor = editor
+            performSettings(out)
         }
         if let stepDeadline, now >= stepDeadline {
             helioLog.notice("helio: setup step \(String(describing: self.currentStep), privacy: .public) timed out")
@@ -640,7 +641,7 @@ final class HelioSession: WearableSession {
                 link?.apply(servicesList: list)
                 controlCapabilities = ZeppControlCapabilities(model: model, isAuthenticated: isAuthenticated, services: list)
                 alarmEditor = ZeppAlarmEditor(capabilities: controlCapabilities)
-                healthConfigEditor = ZeppHealthConfigEditor(capabilities: controlCapabilities)
+                settingsEditor = ZeppSettingsEditor(capabilities: controlCapabilities)
                 helioLog.notice("helio: services list, \(list.entries.count) endpoints")
             } else {
                 helioLog.error("helio: malformed services list; controls stay off")
@@ -710,7 +711,7 @@ final class HelioSession: WearableSession {
             advance(from: .healthConfig)
         case .alertCapabilities?:
             configCapabilities = ZeppConfigCapabilities.parse(payload)
-            healthConfigEditor?.noteConfigCapabilities(configCapabilities)
+            settingsEditor?.noteConfigCapabilities(configCapabilities)
             advance(from: .alertCapabilities)
         case .alertSettings?:
             let reply = ZeppConfig.parseReadReply(payload)
@@ -718,11 +719,11 @@ final class HelioSession: WearableSession {
                                                    configCapabilities: configCapabilities, healthReply: reply)
             advance(from: .alertSettings)
         default:
-            // Outside setup, config replies belong to the settings editor (#228, #230).
-            guard var editor = healthConfigEditor else { return }
+            // Outside setup, config replies belong to the settings editor (#228, #229, #230).
+            guard var editor = settingsEditor else { return }
             let out = editor.receive(payload, now: clock())
-            healthConfigEditor = editor
-            performHealthConfig(out)
+            settingsEditor = editor
+            performSettings(out)
         }
     }
 
@@ -980,91 +981,106 @@ final class HelioSession: WearableSession {
         }
     }
 
-    // MARK: Strap settings and alerts (§5.5, §13.4, §15.3), #228, #230
+    // MARK: Strap settings (§17, §19), #228, #229, #230
 
-    /// Settings can be read or changed: authenticated, set up, and the link up. Never during setup,
-    /// whose own config reads are routed by step.
-    var canUseHealthSettings: Bool {
+    /// Settings can be read: authenticated, set up, the link up, and the config endpoint offered.
+    /// Never during setup, whose own config reads are routed by step.
+    var canReadStrapSettings: Bool {
         isLinkConnected && isAuthenticated && (phase == .ready || phase == .syncing)
-            && healthConfigEditor?.isOffered == true
+            && settingsEditor?.capabilities.isSupported(.hapticAlerts) == true
     }
 
-    /// Reads every setting with constraints. Read-only.
-    func readHealthSettings() {
-        guard canUseHealthSettings, var editor = healthConfigEditor else { return }
+    /// Settings can be changed: as above, and not during a history fetch (§17.8 step 1).
+    var canChangeStrapSettings: Bool { canReadStrapSettings && phase == .ready }
+
+    /// Reads the groups in full, with constraints. Read-only.
+    func readStrapSettings(groups: [UInt8]) {
+        guard canReadStrapSettings, var editor = settingsEditor else { return }
         do {
-            let out = try editor.read(now: clock())
-            healthConfigEditor = editor
-            performHealthConfig(out)
+            let out = try editor.read(groups: groups, now: clock())
+            settingsEditor = editor
+            performSettings(out)
         } catch {
-            healthSettingsNotice = Self.describe(error)
+            settingsNotice = Self.describe(error)
         }
     }
 
     /// One user edit of one setting: `from` is the value the screen showed. nil when the change
     /// went out to the strap (a fresh read first, then the write, then a re-read), else why not.
     @discardableResult
-    func changeHealthSetting(_ setting: ZeppHealthSetting, from: ZeppConfigValue, to: ZeppConfigValue) -> String? {
-        guard canUseHealthSettings, var editor = healthConfigEditor else {
-            return "The strap isn't ready for changes right now."
+    func changeStrapSetting(_ setting: ZeppSetting, from: ZeppConfigValue, to: ZeppConfigValue) -> String? {
+        guard canChangeStrapSettings, var editor = settingsEditor else {
+            let reason = phase == .syncing ? "Settings can be changed when the sync finishes." : "The strap isn't ready for changes right now."
+            settingsNotice = reason
+            return reason
         }
         do {
             let out = try editor.change(.init(setting: setting, from: from, to: to), now: clock())
-            healthConfigEditor = editor
-            healthSettingsNotice = "Saving to the strap…"
-            performHealthConfig(out)
+            settingsEditor = editor
+            settingsNotice = "Saving to the strap…"
+            performSettings(out)
             return nil
         } catch {
             let reason = Self.describe(error)
-            healthSettingsNotice = reason
+            settingsNotice = reason
             return reason
         }
     }
 
-    private func performHealthConfig(_ out: ZeppHealthConfigEditor.Output) {
+    private func performSettings(_ out: ZeppSettingsEditor.Output) {
         send(out.messages)
+        // §17.8 step 7: group, arg, old and new value and the ack status, logged on the device only
+        // (settings, not health data, but personal: never `.public`).
         for event in out.events {
             switch event {
-            case .read(let config):
-                // The recording warnings follow the strap's current values.
-                recordingWarnings = Self.recordingWarnings(ZeppHealthSettings(config))
-                HelioSettingsDisplayCache.store(config, strap: identityID, at: clock())
-                helioLog.notice("helio: HEALTH settings read, \(config.entries.count, privacy: .public) setting(s)")
-            case .readFailed(let failure):
-                healthSettingsNotice = "Couldn't read the strap's settings."
-                helioLog.error("helio: HEALTH settings unreadable (\(String(describing: failure), privacy: .public))")
+            case .read(let group):
+                if group == ZeppConfig.healthGroup, let snapshot = settingsEditor?.snapshot {
+                    // The recording warnings follow the strap's current values.
+                    recordingWarnings = Self.recordingWarnings(ZeppHealthSettings(snapshot))
+                }
+                cacheSettingsForDisplay()
+                helioLog.notice("helio: config group \(group, privacy: .public) read")
+            case .readFailed(let group, let failure):
+                settingsNotice = "Couldn't read the strap's settings."
+                helioLog.error("helio: config group \(group, privacy: .public) unreadable (\(String(describing: failure), privacy: .public))")
             case .changedOnStrap(let change, _):
-                healthSettingsNotice = "This setting changed on the strap since you opened the screen. Nothing was saved; check it and try again."
-                helioLog.notice("helio: HEALTH arg \(change.setting.argument, privacy: .public) changed on the strap; not written")
+                settingsNotice = "This setting changed on the strap since you opened the screen. Nothing was saved; check it and try again."
+                helioLog.notice("helio: config \(change.setting.group, privacy: .public)/\(change.setting.argument, privacy: .public) changed on the strap; not written")
             case .refused(let change, let error):
-                healthSettingsNotice = Self.describe(error) + " Nothing was saved."
-                helioLog.notice("helio: HEALTH arg \(change.setting.argument, privacy: .public) refused after the fresh read")
+                settingsNotice = Self.describe(error) + " Nothing was saved."
+                helioLog.notice("helio: config \(change.setting.group, privacy: .public)/\(change.setting.argument, privacy: .public) refused after the fresh read")
             case .writeAcknowledged(let change):
-                helioLog.notice("helio: HEALTH arg \(change.setting.argument, privacy: .public) acknowledged; reading back")
+                helioLog.notice("helio: config \(change.setting.group, privacy: .public)/\(change.setting.argument, privacy: .public) \(String(describing: change.from), privacy: .private) → \(String(describing: change.to), privacy: .private): 06 01; reading back")
             case .writeNotAcknowledged(let change, let failure):
-                helioLog.error("helio: HEALTH arg \(change.setting.argument, privacy: .public) write failed (\(String(describing: failure), privacy: .public)); reading back, no retry")
+                helioLog.error("helio: config \(change.setting.group, privacy: .public)/\(change.setting.argument, privacy: .public) \(String(describing: change.from), privacy: .private) → \(String(describing: change.to), privacy: .private): \(String(describing: failure), privacy: .public); reading back, no retry")
             case .writeChecked(let check):
-                recordingWarnings = Self.recordingWarnings(ZeppHealthSettings(check.config))
-                HelioSettingsDisplayCache.store(check.config, strap: identityID, at: clock())
-                healthSettingsNotice = Self.notice(for: check)
-                helioLog.notice("helio: HEALTH arg \(check.change.setting.argument, privacy: .public) re-read: matches \(check.matches, privacy: .public), acked \(check.failure == nil, privacy: .public), others unchanged \(check.otherSettingsUnchanged, privacy: .public)")
+                if check.change.setting.group == ZeppConfig.healthGroup, let snapshot = settingsEditor?.snapshot {
+                    recordingWarnings = Self.recordingWarnings(ZeppHealthSettings(snapshot))
+                }
+                cacheSettingsForDisplay()
+                settingsNotice = Self.notice(for: check)
+                helioLog.notice("helio: config \(check.change.setting.group, privacy: .public)/\(check.change.setting.argument, privacy: .public) re-read: took the change \(check.tookChange, privacy: .public), group version changed \(check.groupVersionChanged, privacy: .public)")
             case .writeUnverified(let change, let failure, let readFailure):
-                healthSettingsNotice = failure == nil
-                    ? "The strap confirmed the change, but its settings couldn't be read back. Reopen this screen to check."
-                    : "The strap didn't confirm the change, and its settings couldn't be read back. Reopen this screen to check."
-                helioLog.error("helio: HEALTH arg \(change.setting.argument, privacy: .public) unverified (\(String(describing: readFailure), privacy: .public))")
+                settingsNotice = failure == nil
+                    ? "The strap confirmed the change, but the setting couldn't be read back. Reopen this screen to check."
+                    : "The strap didn't confirm the change, and the setting couldn't be read back. Reopen this screen to check."
+                helioLog.error("helio: config \(change.setting.group, privacy: .public)/\(change.setting.argument, privacy: .public) unverified (\(String(describing: readFailure), privacy: .public))")
             }
         }
     }
 
-    /// The outcome of a write, from the strap's re-read value.
-    static func notice(for check: ZeppHealthConfigEditor.WriteCheck) -> String {
-        switch (check.failure, check.matches) {
-        case (nil, true): return "Saved on the strap."
-        case (nil, false): return "The strap confirmed the change but reads back a different value. What it holds is shown."
-        case (_?, true): return "The strap didn't confirm the change, but it reads back the new value."
-        case (_?, false): return "The strap didn't accept the change. Its current value is shown. Nothing was retried."
-        }
+    private func cacheSettingsForDisplay() {
+        if let snapshot = settingsEditor?.snapshot { HelioSettingsDisplayCache.store(snapshot, strap: identityID, at: clock()) }
+    }
+
+    /// The outcome of a write, from the strap's re-read value (§17.4: only `06 01` with the new value
+    /// on re-read counts as taken).
+    static func notice(for check: ZeppSettingsEditor.WriteCheck) -> String {
+        if check.readBack == nil { return "The strap no longer reports this setting, so it's hidden until the strap reconnects." }
+        if check.groupVersionChanged { return "The strap's settings changed version, so they're read-only until the strap reconnects." }
+        return check.tookChange
+            ? "Saved on the strap."
+            : "The strap didn't take the change. Its current value is shown. Nothing was retried."
     }
 
     // MARK: Plain-language errors
@@ -1087,16 +1103,16 @@ final class HelioSession: WearableSession {
             case .smartWakeNotOffered: return "Smart wake can't be changed in this version."
             case .invalidAlarm: return "That time isn't valid."
             }
-        case let error as ZeppHealthConfigEditor.Error:
+        case let error as ZeppSettingsEditor.Error:
             switch error {
             case .busy: return "Another change is still being saved."
-            case .groupNotOffered: return "The strap didn't offer its health settings on this connection."
+            case .groupNotOffered: return "The strap didn't offer these settings on this connection."
             case .notRead: return "The strap's settings haven't been read on this connection."
             case .notReported: return "The strap didn't report this setting."
+            case .readOnly: return "The strap's version of these settings isn't one OpenCircuit knows, so they're read-only."
             case .unchanged: return "That's already the strap's setting."
             case .valueNotAllowed: return "The strap doesn't allow that value."
-            case .prerequisiteOff(_, let needs):
-                return needs == .stressMonitoring ? "Needs stress monitoring on." : "Needs all-day SpO₂ on."
+            case .prerequisiteOff(_, let needs): return HelioSettingsCopy.needs(needs)
             }
         default:
             return "That didn't work."

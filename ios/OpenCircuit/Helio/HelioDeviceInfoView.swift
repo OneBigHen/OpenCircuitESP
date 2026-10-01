@@ -71,7 +71,7 @@ struct HelioDeviceInfoView: View {
                 }
             }
 
-            // #228, #230: the strap's own settings. Always listed: a strap that can't be changed right
+            // #228, #229, #230: the strap's own settings. Always listed: a strap that can't be changed right
             // now shows its controls disabled, with the reason.
             Section {
                 NavigationLink("Measurement") { HelioMeasurementSettingsView(connection: connection) }
@@ -79,6 +79,7 @@ struct HelioDeviceInfoView: View {
                     ForEach(warnings, id: \.self) { Text($0).font(.caption).foregroundStyle(.orange) }
                 }
                 NavigationLink("Health alerts") { HelioAlertsView(connection: connection) }
+                NavigationLink("Workout detection") { HelioWorkoutDetectionView(connection: connection) }
             } header: {
                 Text("Strap settings")
             } footer: {
