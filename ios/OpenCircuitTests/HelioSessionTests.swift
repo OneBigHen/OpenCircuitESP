@@ -867,6 +867,97 @@ final class HelioSessionTests: XCTestCase {
         XCTAssertEqual(flushes, 0)
         XCTAssertEqual(passes, 0)
     }
+
+    // MARK: review-225e SF-1: opening the app syncs a session that came up in the background
+
+    /// Review-225e P2, as the regression test: a session made while the app was in the background
+    /// (`autoSyncOnConnect: false`) is ready and idle; the app comes to the front → exactly one sync.
+    func testABackgroundMadeSessionSyncsOnceWhenTheAppComesToTheFront() throws {
+        let rig = connect(makeStrap(), store: try makeStore(), autoSync: false)
+        XCTAssertEqual(rig.session.phase, .ready)
+        XCTAssertEqual(rig.session.syncsFinished, 0)
+        var gate = HelioActivationSync()
+        HelioConnection.becameActive(rig.session, gate: &gate, lastCompletedSync: nil, now: clock)
+        XCTAssertTrue(rig.session.syncing)
+        rig.transport.drain()
+        XCTAssertEqual(rig.session.syncsFinished, 1, "exactly one sync")
+        XCTAssertEqual(rig.session.phase, .ready)
+    }
+
+    /// The last completed strap sync is 2 min old: no sync (the ring's 300 s throttle, one constant).
+    func testNoActivationSyncWithinTheForegroundIntervalOfTheLastSync() throws {
+        let rig = connect(makeStrap(), store: try makeStore(), autoSync: false)
+        var gate = HelioActivationSync()
+        HelioConnection.becameActive(rig.session, gate: &gate, lastCompletedSync: clock.addingTimeInterval(-120), now: clock)
+        rig.transport.drain()
+        XCTAssertEqual(rig.session.syncsFinished, 0)
+        XCTAssertEqual(ForegroundAutoSync.interval, 300)
+        HelioConnection.becameActive(rig.session, gate: &gate, lastCompletedSync: clock.addingTimeInterval(-300),
+                                     now: clock)
+        rig.transport.drain()
+        XCTAssertEqual(rig.session.syncsFinished, 1, "at the interval, it syncs")
+    }
+
+    /// Control Center or a banner flapping `.inactive`/`.active`: two activations 1 s apart give one
+    /// sync, whether the first is still running or already done.
+    func testTwoActivationsOneSecondApartGiveOneSync() throws {
+        for finishFirst in [false, true] {
+            let rig = connect(makeStrap(), store: try makeStore(), autoSync: false)
+            var gate = HelioActivationSync()
+            HelioConnection.becameActive(rig.session, gate: &gate, lastCompletedSync: nil, now: clock)
+            if finishFirst { rig.transport.drain() }
+            HelioConnection.becameActive(rig.session, gate: &gate, lastCompletedSync: nil, now: clock.addingTimeInterval(1))
+            rig.transport.drain()
+            XCTAssertEqual(rig.session.syncsFinished, 1)
+        }
+    }
+
+    /// A session that is syncing, finding, or streaming live heart rate gets no new sync on activation.
+    func testNoActivationSyncWhileTheSessionIsBusy() throws {
+        let syncing = connect(makeStrap(), store: try makeStore(), autoSync: false)
+        syncing.session.syncHistory(manual: true)
+        syncing.transport.drainSteps(2)
+        XCTAssertTrue(syncing.session.syncing)
+        var gate = HelioActivationSync()
+        HelioConnection.becameActive(syncing.session, gate: &gate, lastCompletedSync: nil, now: clock)
+        XCTAssertNil(gate.lastStarted, "nothing started")
+        syncing.transport.drain()
+        XCTAssertEqual(syncing.session.syncsFinished, 1, "only the sync already running")
+
+        let finding = connect(makeStrap(), store: try makeStore(), autoSync: false)
+        XCTAssertNil(finding.session.startFind())
+        finding.transport.drain()
+        XCTAssertTrue(finding.session.isFinding)
+        var findGate = HelioActivationSync()
+        HelioConnection.becameActive(finding.session, gate: &findGate, lastCompletedSync: nil, now: clock)
+        XCTAssertFalse(finding.session.syncing)
+
+        let live = connect(makeStrap(), store: try makeStore(), autoSync: false)
+        live.session.startLiveHeartRate()
+        XCTAssertTrue(live.session.liveHeartRateRunning)
+        var liveGate = HelioActivationSync()
+        HelioConnection.becameActive(live.session, gate: &liveGate, lastCompletedSync: nil, now: clock)
+        XCTAssertFalse(live.session.syncing)
+    }
+
+    /// With review-236 S1's path: an activation sync, the app goes to the background mid-sync, the sync
+    /// ends there → exactly one alert pass (the sync-end hook's), and ContentView's hook adds none.
+    func testAnActivationSyncThatEndsInTheBackgroundGetsExactlyOneAlertPass() async throws {
+        StrapSyncAlertPass.reset()
+        var results: [HelioSyncResult] = []
+        let rig = connect(makeStrap(), store: try makeStore(), autoSync: false, finished: { results.append($0) })
+        var gate = HelioActivationSync()
+        HelioConnection.becameActive(rig.session, gate: &gate, lastCompletedSync: nil, now: clock)
+        rig.transport.drainSteps(3)
+        XCTAssertTrue(rig.session.syncing, "the app leaves here, mid-sync")
+        rig.transport.drain()
+        for _ in 0..<200 where results.isEmpty { await Task.yield() }
+        let result = try XCTUnwrap(results.last)
+        var passes = 0
+        await HelioConnection.syncEnded(result, session: rig.session, appIsActive: false, flush: {}, alertPass: { passes += 1 })
+        XCTAssertFalse(StrapSyncAlertPass.claim(rig.session), "ContentView's hook, if it fires later, skips it")
+        XCTAssertEqual(passes, 1)
+    }
 }
 
 // MARK: - Key store, device choice

@@ -137,15 +137,9 @@ struct ContentView: View {
     /// Last time the foreground auto-refresh ran a sync; debounces repeated foregrounds.
     @State private var lastForegroundSync: Date?
     /// Minimum spacing between foreground/reconnect auto-syncs — one bounded refresh, never a loop,
-    /// conservative about battery/contention. Raised 120→300 s: a FLAKY ring reconnects/relaunches
-    /// repeatedly and each one re-fired the auto-sync, so a ~2-min spacing let almost every reconnect run
-    /// a full ~30 s (usually empty) sync that blocks the workout Start. The periodic/BLE-wake drain still
-    /// delivers the backlog on its own cadence; this only suppresses the redundant reconnect re-sync.
-    /// (Kept at 300 s, NOT 600 s — the throttle now also honours the PERSISTED `lastSuccessfulSync`,
-    /// which a *partial* background drain bumps (epochs>0 yet the night not fully drained); a longer
-    /// window would suppress the foreground continuation drain of the night's tail for that whole window.
-    /// 300 s bounds that delay, and the hourly wake-drain backstops the tail regardless — review MEDIUM.)
-    private static let autoSyncInterval: TimeInterval = 300
+    /// conservative about battery/contention. One constant shared with the strap's activation sync
+    /// (`ForegroundAutoSync.interval`, 300 s; the why is there).
+    private static let autoSyncInterval: TimeInterval = ForegroundAutoSync.interval
 
     private let health = HealthKitWriter()
 

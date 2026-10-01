@@ -53,7 +53,9 @@ enum HelioWakePolicy {
                        lastCompletedSync: Date?, lastBackgroundRunStart: Date?, now: Date) -> Action {
         guard strapChosen else { return .skip("the strap isn't the chosen device") }
         if appIsActive {
-            // A reconnect in front syncs on connect already; only the woke-up event asks for a sync.
+            // In front, a connect made there syncs on connect, and a session that came up in the
+            // background syncs when the app comes to the front (`HelioActivationSync`, review-225e
+            // SF-1); only the woke-up event asks for a sync here.
             return wake == .strapEvent ? .syncInForeground : .skip("the app is in front")
         }
         if runActive { return .skip("a background run already holds the strap") }

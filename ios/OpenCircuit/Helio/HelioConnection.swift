@@ -90,6 +90,8 @@ final class HelioConnection: NSObject {
     static var wakeHandler: @MainActor (HelioWake) -> Void = { HelioWakeCoordinator.shared.wake($0) }
     /// Decision 35: the strap's own traffic over the idle link, checked at most every few minutes.
     @ObservationIgnored private var idleTraffic = HelioIdleTrafficGate()
+    /// Review-225e SF-1: the activation sync's throttle (`HelioActivationSync`).
+    @ObservationIgnored private var activationSync = HelioActivationSync()
 
     private enum PendingAction { case scan, reconnect, resumeRestored }
 
@@ -110,7 +112,11 @@ final class HelioConnection: NSObject {
         activeObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.session?.appDidBecomeActive() }
+            MainActor.assumeIsolated {
+                guard let self, let session = self.session else { return }
+                Self.becameActive(session, gate: &self.activationSync, lastCompletedSync: HelioWakeState().lastCompletedSync,
+                                  now: Date())
+            }
         }
     }
 
@@ -414,6 +420,43 @@ final class HelioConnection: NSObject {
         if let next = writeQueue.first, characteristics[next.characteristic] == nil {
             writeQueue.removeFirst()
             flushWrites()
+        }
+    }
+}
+
+/// Review-225e SF-1: opening the app syncs a strap session that is up and idle. A link that came back
+/// in the background (a run's teardown re-arm, a reconnect or restoration inside the wake gates, or a
+/// connect that completed while the app was `.inactive`) makes a session that doesn't sync on connect
+/// (decision 33), and `ContentView`'s activation reconnect returns early for a connected session; so
+/// without this, nothing synced the night until a pull-to-refresh. Mirrors the ring's
+/// `maybeAutoSyncOnReady` throttle, so Control Center or a banner flapping the app between `.inactive`
+/// and `.active` gives at most one sync.
+struct HelioActivationSync {
+    /// When this throttle last started a sync (in memory, as the ring's `lastForegroundSync`).
+    private(set) var lastStarted: Date?
+
+    /// Sync now: the session is `.ready` and idle (no sync, no find, no live heart rate), and neither
+    /// this throttle's last start nor the last completed strap sync (persisted, so a relaunch counts
+    /// it) is younger than `ForegroundAutoSync.interval`.
+    mutating func shouldSync(phase: HelioSession.Phase, syncing: Bool, finding: Bool, liveHeartRate: Bool,
+                             lastCompletedSync: Date?, now: Date) -> Bool {
+        guard phase == .ready, !syncing, !finding, !liveHeartRate else { return false }
+        if let last = [lastStarted, lastCompletedSync].compactMap({ $0 }).max(),
+           now >= last, now.timeIntervalSince(last) < ForegroundAutoSync.interval { return false }
+        lastStarted = now
+        return true
+    }
+}
+
+extension HelioConnection {
+    /// The app came to the front: the session's own reaction (Tier 0), then the activation sync. A sync
+    /// started here is a foreground sync: if the app leaves before it ends, `syncEnded` runs its alert
+    /// pass (review-236 S1).
+    static func becameActive(_ session: HelioSession, gate: inout HelioActivationSync, lastCompletedSync: Date?, now: Date) {
+        session.appDidBecomeActive()
+        if gate.shouldSync(phase: session.phase, syncing: session.syncing, finding: session.isFinding,
+                           liveHeartRate: session.liveHeartRateRunning, lastCompletedSync: lastCompletedSync, now: now) {
+            session.syncHistory(manual: false)
         }
     }
 }

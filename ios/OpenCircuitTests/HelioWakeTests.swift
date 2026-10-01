@@ -40,7 +40,8 @@ final class HelioWakeTests: XCTestCase {
             XCTAssertEqual(action(wake, lastSync: 4 * 3600), .catchUp)
             XCTAssertEqual(action(wake, lastSync: 9 * 3600, lastRun: 29 * 60), .skip("a background run started under 30 min ago"))
             XCTAssertEqual(action(wake, lastSync: 9 * 3600, lastRun: 30 * 60), .catchUp)
-            XCTAssertEqual(action(wake, appIsActive: true), .skip("the app is in front"), "in front, a connect syncs by itself")
+            XCTAssertEqual(action(wake, appIsActive: true), .skip("the app is in front"),
+                           "in front: a connect made there syncs on connect; one made in the background syncs on activation (SF-1)")
         }
         XCTAssertEqual(HelioWakePolicy.reconnectCatchUpAfter, 4 * 3600)
     }
