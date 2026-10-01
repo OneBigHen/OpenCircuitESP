@@ -74,6 +74,8 @@ struct OpenCircuitApp: App {
             let scheduler = BackgroundRefreshScheduler()
             scheduler.schedule()
             scheduler.scheduleProcessing()
+            // Review-225e SF-3: a strap night's margin refresh survives this `schedule()` (no-op for the ring).
+            StrapNightRefresh.resubmit(scheduler, strapChosen: ActiveDeviceChoiceStore.persisted() == .helioStrap)
             ObservabilityStore().recordScheduled()
         }
     }

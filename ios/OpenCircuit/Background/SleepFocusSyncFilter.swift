@@ -175,8 +175,10 @@ private enum SleepFocusSyncRunner {
         }
         scheduler.schedule()
         scheduler.scheduleProcessing()
-        // #233 item 5: a night this flush held back (it started over 30 min after Focus ended).
-        if let at = run.refreshAt { scheduler.scheduleRefresh(notBefore: at) }
+        // #233 item 5: a night this flush held back (it started over 30 min after Focus ended), and
+        // review-225e SF-3: one still pending survives the `schedule()` above.
+        if run.flushMS != nil { StrapNightRefresh.record(run.refreshAt, scheduler: scheduler) }
+        StrapNightRefresh.resubmit(scheduler, strapChosen: true)
     }
 
     private static func evaluateAlerts() async {

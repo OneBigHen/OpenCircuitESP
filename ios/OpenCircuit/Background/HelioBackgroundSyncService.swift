@@ -76,6 +76,46 @@ enum StrapNightRefresh {
         if wokeUp { candidates.append(flushStartedAt.addingTimeInterval(afterWokeUp)) }
         return candidates.max()
     }
+
+    // Review-225e SF-3: the app's own `schedule()` (scene → background, `applicationDidEnterBackground`,
+    // the start of every BGTask) cancels and resubmits `bgrefresh` at the aimed date, which replaced a
+    // margin request within seconds of a foreground sync. So the pending date is persisted (strap only)
+    // and re-submitted after those calls.
+
+    /// The pending margin refresh (strap only).
+    nonisolated static let pendingKey = "helio.nightRefreshAt.v1"
+
+    /// A strap flush's verdict: the refresh it wants, submitted and kept; or nil (no night is waiting:
+    /// it was written, or none was held), which clears the pending one.
+    static func record(_ aim: Date?, scheduler: BackgroundRefreshScheduler, defaults: UserDefaults = .standard) {
+        if let aim {
+            defaults.set(aim.timeIntervalSince1970, forKey: pendingKey)
+            scheduler.scheduleRefresh(notBefore: aim)
+        } else {
+            defaults.removeObject(forKey: pendingKey)
+        }
+    }
+
+    /// The pending refresh while it is still ahead of `now`; one that has passed is cleared.
+    static func pending(now: Date, defaults: UserDefaults = .standard) -> Date? {
+        let t = defaults.double(forKey: pendingKey)
+        guard t > 0 else { return nil }
+        let date = Date(timeIntervalSince1970: t)
+        guard date > now else {
+            defaults.removeObject(forKey: pendingKey)
+            return nil
+        }
+        return date
+    }
+
+    /// After `schedule()`: submit the pending margin refresh again, with the strap chosen and the date
+    /// still ahead. With the ring chosen nothing happens, so the request stays exactly `schedule()`'s.
+    @discardableResult
+    static func resubmit(_ scheduler: BackgroundRefreshScheduler, strapChosen: Bool, now: Date = Date(),
+                         defaults: UserDefaults = .standard) -> Bool {
+        guard strapChosen, let at = pending(now: now, defaults: defaults) else { return false }
+        return scheduler.scheduleRefresh(notBefore: at)
+    }
 }
 
 /// The run holding the link, as a later run sees it (#233 item 3: coalescing).

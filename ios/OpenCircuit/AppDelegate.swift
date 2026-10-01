@@ -66,7 +66,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             // same body-alert pass as these runs.
             HelioConnection.bodyAlertPass = { store in await Self.evaluateBodyAlerts(store: store) }
             HelioWakeCoordinator.afterRun = { run in
-                if let at = run.refreshAt { BackgroundRefreshScheduler().scheduleRefresh(notBefore: at) }
+                // #233 item 5, review-225e SF-3: the flush's verdict on a held night, kept.
+                if run.flushMS != nil { StrapNightRefresh.record(run.refreshAt, scheduler: BackgroundRefreshScheduler()) }
                 // A coalesced run's alert passes are the other run's (#233 item 3).
                 guard run.ending != .expired, !run.ending.isCoalesced else { return }
                 await Self.evaluateAlerts()
@@ -172,6 +173,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func applicationDidEnterBackground(_ application: UIApplication) {
         scheduler.schedule()
         scheduler.scheduleProcessing()
+        // Review-225e SF-3: a strap night's margin refresh survives this `schedule()` (no-op for the ring).
+        StrapNightRefresh.resubmit(scheduler, strapChosen: ActiveDeviceChoiceStore.persisted() == .helioStrap)
         ObservabilityStore().recordScheduled()
     }
 
@@ -296,6 +299,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let scheduler = BackgroundRefreshScheduler()
         let observability = ObservabilityStore()
         let completion = BackgroundTaskCompletion(task)
+        // Review-225e SF-3: `handle` just called `schedule()`; a pending strap margin refresh stays.
+        StrapNightRefresh.resubmit(scheduler, strapChosen: true)
 
         let operation = Task { @MainActor in
             do {
@@ -310,8 +315,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 }
                 scheduler.schedule()
                 scheduler.scheduleProcessing()
-                // #233 item 5: a night the flush held back gets its own refresh at the margin's end.
-                if let at = run.refreshAt { scheduler.scheduleRefresh(notBefore: at) }
+                // #233 item 5: a night the flush held back gets its own refresh at the margin's end, and
+                // review-225e SF-3: one still pending survives the `schedule()` above.
+                if run.flushMS != nil { StrapNightRefresh.record(run.refreshAt, scheduler: scheduler) }
+                StrapNightRefresh.resubmit(scheduler, strapChosen: true)
                 completion.complete(success: run.success)
             } catch {
                 observability.recordSyncOutcome(kind: kind, success: false,
@@ -319,6 +326,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 await Self.evaluateAlerts()
                 scheduler.schedule()
                 scheduler.scheduleProcessing()
+                StrapNightRefresh.resubmit(scheduler, strapChosen: true)
                 completion.complete(success: false)
             }
         }
@@ -333,6 +341,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 observability.recordSyncOutcome(kind: kind, success: false, detail: "helio strap: iOS ended the task early")
                 scheduler.schedule()
                 scheduler.scheduleProcessing()
+                StrapNightRefresh.resubmit(scheduler, strapChosen: true)
             }
         }
     }
