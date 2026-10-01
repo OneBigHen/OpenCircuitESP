@@ -94,6 +94,21 @@ final class DeviceOwnershipTests: XCTestCase {
         XCTAssertEqual(DeviceOwnershipLog.midpoint(t0, t0), t0, "naps keep the midpoint rule")
     }
 
+    /// Decision 29: a baseline uses only the newest item's device; an empty log changes nothing.
+    func testBaselinesKeepToTheNewestItemsDevice() {
+        let nights = (0..<6).map { t0 + Double($0) * 86_400 }
+        XCTAssertEqual(DeviceOwnershipLog().sameDeviceAsNewest(nights, time: { $0 }), nights)
+        let log = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: nights[4] - 3600)])
+        XCTAssertEqual(log.sameDeviceAsNewest(nights, time: { $0 }), [nights[4], nights[5]], "the strap's own nights only")
+        XCTAssertEqual(log.sameDeviceAsNewest(Array(nights.prefix(4)), time: { $0 }), Array(nights.prefix(4)),
+                       "judging a ring night uses the ring's nights")
+        XCTAssertEqual(log.only(.ringConn, nights, time: { $0 }), Array(nights.prefix(4)))
+        XCTAssertTrue(log.isOwn(recordedBy: strap, at: nights[5], by: .zeppOS))
+        XCTAssertFalse(log.isOwn(recordedBy: .ringConn, at: nights[5], by: .ringConn), "the ring's catch-up of strap time")
+        XCTAssertFalse(log.isOwn(recordedBy: .ringConn, at: nights[5], by: .zeppOS))
+        XCTAssertTrue(DeviceOwnershipLog().isOwn(recordedBy: .ringConn, at: nights[5], by: .ringConn))
+    }
+
     func testFamiliesMapFromTimelines() {
         XCTAssertEqual(DeviceOwnershipLog.Family(timeline: .ringConn), .ringConn)
         XCTAssertEqual(DeviceOwnershipLog.Family(timeline: strap), .zeppOS)

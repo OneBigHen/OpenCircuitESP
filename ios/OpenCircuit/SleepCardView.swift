@@ -1017,7 +1017,8 @@ struct SleepCardView: View {
     /// Build a `SkinTempBaseline.NightReport` for the latest night from the trailing stored nights.
     private var tempReport: SkinTempBaseline.NightReport? {
         guard let latest, latest.skinTempC > 0 else { return nil }
-        let priorNights = storedSleep
+        // Decision 29: only the latest night's own device's nights (every night with an empty log).
+        let priorNights = LocalStore.sameDevice(storedSleep, as: latest)
             .filter { $0.skinTempC > 0 && $0.night != latest.night }
             .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }
         return SkinTempBaseline.report(tonight: latest.skinTempC, priorNights: priorNights)
@@ -1092,7 +1093,8 @@ struct SleepCardView: View {
     /// bar above (warmer) / below (cooler) a center baseline line.
     @ViewBuilder
     private func tempChart() -> some View {
-        let nights = storedSleep.filter { $0.skinTempC > 0 }
+        // Decision 29: the latest night's device's nights only (every night with an empty log).
+        let nights = (latest.map { LocalStore.sameDevice(storedSleep, as: $0) } ?? storedSleep).filter { $0.skinTempC > 0 }
         if nights.count >= SkinTempBaseline.minBaselineNights,
            let baseline = SkinTempBaseline.baseline(
                 priorNights: nights.map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }) {

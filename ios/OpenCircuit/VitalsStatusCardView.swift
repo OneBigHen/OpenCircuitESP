@@ -16,7 +16,11 @@ struct VitalsStatusCardView: View {
     @Query private var hrvSamples: [StoredSample]
     /// Trailing nights for the canonical skin-temp baseline/offset (#69).
     @Query private var sleepNights: [StoredSleepSummary]
-    private let healthBaselineReader = HealthKitVitalsBaselineReader()
+    /// Decision 29: the Apple Health fallback keeps to the current device once a switch is on record.
+    private var healthBaselineReader: HealthKitVitalsBaselineReader {
+        let log = LocalStore.ownershipLog()
+        return HealthKitVitalsBaselineReader(device: log.isEmpty ? nil : log.currentFamily)
+    }
     @State private var healthBaselineReport: HealthKitVitalsBaselineReader.Report?
 
     /// The assembled report, held as STATE and recomputed off the render path in `.task(id:)` below.
@@ -91,7 +95,9 @@ struct VitalsStatusCardView: View {
             } else {
                 Text("Building your baseline")
                     .font(.subheadline.weight(.medium))
-                Text("Wear the ring overnight for about a week so OpenCircuit can learn your personal "
+                // Decision 29: after a switch the new device learns its own baseline, like a new user.
+                Text((LocalStore.ownershipLog().currentFamily == .zeppOS ? "Wear the strap" : "Wear the ring")
+                     + " overnight for about a week so OpenCircuit can learn your personal "
                      + "resting HR, SpO₂, HRV and skin-temperature ranges, then flag unusual days.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -111,11 +117,15 @@ struct VitalsStatusCardView: View {
         // the SwiftData rows + the Health fallback to Sendable value types HERE (main actor), then run
         // the pure OpenCircuitKit math on `Task.detached` and publish the result back.
         .task(id: reportInputsKey) {
-            let hr = hrSamples.map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
-            let spo2 = spo2Samples.map { (start: $0.start, value: $0.value) }
-            let hrv = hrvSamples.map { (start: $0.start, value: $0.value) }
-            let nights = sleepNights.map { (night: $0.night, skinTempC: $0.skinTempC,
-                                            inBedStart: $0.inBedStart, inBedEnd: $0.inBedEnd) }
+            // Decision 29: "today" is the current device's, so its readings and nights are the only
+            // baseline (a new device shows "Building your baseline"). Every row with an empty log.
+            let own = Self.currentDeviceRows(samples: [hrSamples, spo2Samples, hrvSamples], nights: sleepNights,
+                                             log: LocalStore.ownershipLog())
+            let hr = own.samples[0].map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
+            let spo2 = own.samples[1].map { (start: $0.start, value: $0.value) }
+            let hrv = own.samples[2].map { (start: $0.start, value: $0.value) }
+            let nights = own.nights.map { (night: $0.night, skinTempC: $0.skinTempC,
+                                           inBedStart: $0.inBedStart, inBedEnd: $0.inBedEnd) }
             let fbRestingHR = healthBaselineReport?.restingHR.map { (day: $0.day, value: $0.value) }
             let fbSpO2 = healthBaselineReport?.overnightSpO2.map { (day: $0.day, value: $0.value) }
             let fbHRV = healthBaselineReport?.overnightHRV.map { (day: $0.day, value: $0.value) }
@@ -130,6 +140,18 @@ struct VitalsStatusCardView: View {
     }
 
     // MARK: Report
+
+    /// Decision 29: the rows the current device measured in its own time, and its own nights. The rows
+    /// unchanged with an empty log.
+    static func currentDeviceRows(samples: [[StoredSample]], nights: [StoredSleepSummary],
+                                  log: DeviceOwnershipLog) -> (samples: [[StoredSample]], nights: [StoredSleepSummary]) {
+        guard !log.isEmpty else { return (samples, nights) }
+        let device = log.currentFamily
+        return (samples.map { rows in
+                    rows.filter { log.isOwn(recordedBy: SyncDeviceID(rawValue: $0.deviceID), at: $0.start, by: device) }
+                },
+                nights.filter { log.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd) == device })
+    }
 
     /// The Vitals Status report for the latest day, or nil until at least one vital has enough
     /// baseline history. Pure logic lives in OpenCircuitKit.VitalsBaseline; this assembles its inputs.

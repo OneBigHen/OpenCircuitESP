@@ -795,7 +795,7 @@ struct ContentView: View {
     /// The Today metric tiles (#216), built from the shared trends load.
     private var todayTiles: [TodayTile] {
         TodayTiles.build(points: trends.points, restingHR: trends.restingHR,
-                         tempUnit: TemperatureUnit(rawValue: tempUnitRaw) ?? .celsius)
+                         tempUnit: TemperatureUnit(rawValue: tempUnitRaw) ?? .celsius, scope: .from(trends))
     }
 
     /// The Today synthesis sentence (#216) — deterministic rules in `TodaySynthesis`.

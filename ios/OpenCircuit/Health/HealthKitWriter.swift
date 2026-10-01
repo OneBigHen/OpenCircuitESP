@@ -1511,7 +1511,7 @@ final class HealthKitWriter {
         var written = 0
         while hour < currentHour {
             let (rhr, baseline) = Self.restingEnergyInputs(forDay: cal.startOfDay(for: hour),
-                                                           from: dailyRHR)
+                                                           from: dailyRHR, ownership: LocalStore.ownershipLog())
             do {
                 try await writePassiveCalories(profile: profile, date: hour,
                                                restingHR: rhr, baselineRestingHR: baseline)
@@ -1551,11 +1551,17 @@ final class HealthKitWriter {
     /// daily values. RHR is that day's value (nil when the day has none); baseline is the trimmed
     /// mean of PRIOR days' values, or nil below the trusted minimum. Either nil ⇒ caller uses
     /// static BMR.
+    ///
+    /// Decision 29: the baseline uses only prior days of the same device as `day` (each day's owner at
+    /// midday). Every prior day with an empty log.
     static func restingEnergyInputs(forDay day: Date,
-                                            from daily: [RestingHR.DailyValue])
+                                            from daily: [RestingHR.DailyValue],
+                                            ownership: DeviceOwnershipLog = DeviceOwnershipLog())
         -> (restingHR: Double?, baseline: Double?) {
         guard let today = daily.first(where: { $0.day == day })?.bpm else { return (nil, nil) }
-        let prior = daily.filter { $0.day < day }.map(\.bpm)
+        let midday = { (d: Date) in d.addingTimeInterval(12 * 3600) }
+        let prior = ownership.only(ownership.owner(at: midday(day)), daily.filter { $0.day < day },
+                                   time: { midday($0.day) }).map(\.bpm)
         return (today, Calories.restingBaselineBpm(prior: prior))
     }
 

@@ -1258,6 +1258,42 @@ struct LocalStore {
         return try context.fetch(descriptor).compactMap(\.sample)
     }
 
+    /// Decision 29: `samples(kind:from:to:)` measured by `family` during its own time (exactly
+    /// `samples(kind:from:to:)` with an empty log).
+    func ownSamples(kind: MetricKind, from start: Date, to end: Date,
+                    of family: DeviceOwnershipLog.Family) throws -> [QuantitySample] {
+        let log = Self.ownershipLog()
+        guard !log.isEmpty else { return try samples(kind: kind, from: start, to: end) }
+        return try context.fetch(Self.samplesDescriptor(kind: kind, from: start, to: end))
+            .filter { log.isOwn(recordedBy: SyncDeviceID(rawValue: $0.deviceID), at: $0.start, by: family) }
+            .compactMap(\.sample)
+    }
+
+    /// Decision 29: `recentSamples` measured by the CURRENT device during its own time, for a "your
+    /// usual" that is that device's own (a ring's and a strap's readings are never one baseline).
+    /// Exactly `recentSamples` with an empty log.
+    func recentOwnSamples(kind: MetricKind, since: Date) throws -> [QuantitySample] {
+        let log = Self.ownershipLog()
+        guard !log.isEmpty else { return try recentSamples(kind: kind, since: since) }
+        let kindRaw = kind.rawValue
+        let descriptor = FetchDescriptor<StoredSample>(
+            predicate: #Predicate { $0.kindRaw == kindRaw && $0.start >= since && $0.value > 0 },
+            sortBy: [SortDescriptor(\.start, order: .forward)])
+        return try context.fetch(descriptor)
+            .filter { log.isOwn(recordedBy: SyncDeviceID(rawValue: $0.deviceID), at: $0.start, by: log.currentFamily) }
+            .compactMap(\.sample)
+    }
+
+    /// Decision 29: the nights from the same device as `reference` (`owner(ofNightFrom:)`), so a night
+    /// is only ever judged against that device's own. `nights` unchanged with an empty log.
+    @MainActor
+    static func sameDevice(_ nights: [StoredSleepSummary], as reference: StoredSleepSummary) -> [StoredSleepSummary] {
+        let log = ownershipLog()
+        guard !log.isEmpty else { return nights }
+        let device = log.owner(ofNightFrom: reference.inBedStart, to: reference.inBedEnd)
+        return nights.filter { log.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd) == device }
+    }
+
     func latestSample(kind: MetricKind) throws -> QuantitySample? {
         let kindRaw = kind.rawValue
         var descriptor = FetchDescriptor<StoredSample>(
