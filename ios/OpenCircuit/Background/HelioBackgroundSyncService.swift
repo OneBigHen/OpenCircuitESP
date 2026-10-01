@@ -92,6 +92,11 @@ protocol HelioBackgroundLink: AnyObject {
     /// End the link cleanly and don't reconnect by itself: stop a running find, ack an open round
     /// `03 09`, then drop the link.
     func disconnectForBackground()
+    /// After a run's own teardown (out of time, or expired): arm a standing connect again, so the strap
+    /// can wake the app later (decision 33). Never after a quiet ending (decision 7).
+    func rearmAfterTeardown()
+    /// A run started its sync work (`HelioWakeState.lastBackgroundRunStart`: the reconnect cooldown).
+    func noteBackgroundRunStarted(at date: Date)
 }
 
 /// How one background run ended, for the run log and the task's success flag.
@@ -249,6 +254,7 @@ struct HelioBackgroundSyncService {
         if run.endedQuietly { return record(run, kind: kind) }
 
         link.activeBackgroundRuns += 1
+        link.noteBackgroundRunStarted(at: start)
         defer {
             link.activeBackgroundRuns -= 1
             // Review-225c SF-1: a waiter's request lives only as long as this run. Unused (this run
@@ -396,13 +402,14 @@ struct HelioBackgroundSyncService {
         return SleepFocusFinalization.latest(own, link.pendingNightsFinalization)
     }
 
-    /// Ack an open round `03 09` and drop the link (the find stop goes out first). false when no
-    /// session is up: a connect still pending stays armed, so the strap coming into range can wake
-    /// the app through state restoration later.
+    /// Ack an open round `03 09` and drop the link (the find stop goes out first), then arm a standing
+    /// connect again (decision 33). false when no session is up: a connect still pending stays armed,
+    /// so the strap coming into range can wake the app through state restoration later.
     private func abandon() -> Bool {
         guard let session = link.session else { return false }
         session.abortSync()
         link.disconnectForBackground()
+        link.rearmAfterTeardown()
         return true
     }
 

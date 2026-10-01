@@ -74,6 +74,14 @@ final class HelioConnection: NSObject {
     @ObservationIgnored let breadcrumbs: HelioBreadcrumbs
     /// This process was launched (or relaunched) by CoreBluetooth state restoration.
     @ObservationIgnored private(set) var restoredThisLaunch = false
+    /// The first link after a restoration relaunch is the restoration's wake; later ones are reconnects.
+    @ObservationIgnored private var restorationWakePending = false
+    /// A background run tore the link down; arm a standing connect once the cancel has gone through
+    /// (decision 33).
+    @ObservationIgnored private var rearmOnDisconnect = false
+    /// Where decision 33's wakes go (the strap's woke-up event, a reconnect or restoration in the
+    /// background). Static, so setting it never constructs the connection for a ring user.
+    static var wakeHandler: @MainActor (HelioWake) -> Void = { HelioWakeCoordinator.shared.wake($0) }
 
     private enum PendingAction { case scan, reconnect, resumeRestored }
 
@@ -270,16 +278,23 @@ final class HelioConnection: NSObject {
         // screen, or a restoration launch), opened now if launch couldn't (before the first unlock);
         // never `makeContainer()`, whose recovery path can wipe.
         let store = localStore ?? (try? OpenCircuitApp.backgroundStore())
+        // Decision 33: a link that comes back in the background (a reconnect, a restoration relaunch)
+        // doesn't sync by itself; `HelioWakePolicy` decides whether it catches up, under a background
+        // assertion and with the BGTask run's budget and teardown. In front, and for a background run's
+        // own connect, a session syncs on connect as before.
+        let syncOnConnect = Self.appIsActive || backgroundRunAdoptsNewSessions
         let session = HelioSession(
             transport: self, identityID: peripheral.identifier.uuidString, model: .helioStrap,
             key: keyStore.load(), keyStore: keyStore, sink: store.map { HelioStoreSink(store: $0) },
             findState: findState,
             onSyncFinished: { result, timeline in
+                if !result.interrupted { HelioWakeState().lastCompletedSync = Date() }
                 // A background run flushes and logs the syncs it owns itself (#215 phase 4).
                 guard !result.endedInBackgroundRun else { return }
                 await HelioConnection.flushToHealth(result: result, timeline: timeline, store: store)
             },
-            onEvent: { [weak self] event in self?.handle(event) })
+            onEvent: { [weak self] event in self?.handle(event) },
+            autoSyncOnConnect: syncOnConnect)
         session.backgroundRunOwnsSyncs = backgroundRunAdoptsNewSessions
         self.session = session
         session.start()
@@ -373,9 +388,29 @@ extension HelioConnection {
             breadcrumbs.strapMessage(endpoint: endpoint, opcode: opcode)
         case .strapNotification(let characteristic):
             breadcrumbs.strapNotification(characteristic: characteristic.rawValue)
-        case .fellAsleep, .wokeUp:
-            break
+        case .wokeUp:
+            // Decision 33: the strap's own "the night is over". Not a finalization: the night still
+            // waits for its settle margin (decision 31 is about Sleep Focus only).
+            Self.wakeHandler(.strapEvent)
+        case .fellAsleep:
+            break   // a breadcrumb only (the strap-message line above)
         }
+    }
+
+    /// The link came up while the app is in the background: the restoration's wake, or a reconnect.
+    private func linkCameBackInBackground() {
+        guard !Self.appIsActive else { return }
+        let wake: HelioWake = restorationWakePending ? .restoration : .reconnect
+        restorationWakePending = false
+        Self.wakeHandler(wake)
+    }
+
+    /// iOS is ending a catch-up's background time (`HelioWakeCoordinator`): ack an open round `03 09`,
+    /// drop the link, and arm a standing connect again, now, before the app is suspended.
+    func tearDownForExpiry() {
+        session?.abortSync()
+        disconnectForBackground()
+        rearmAfterTeardown()
     }
 
     static var appIsActive: Bool { UIApplication.shared.applicationState == .active }
@@ -417,6 +452,22 @@ extension HelioConnection: HelioBackgroundLink {
         // a busy strap any more: note it here, so nothing reconnects by itself (decision 7).
         if session?.phase == .strapBusy { endedBusy = true }
         disconnect()
+    }
+
+    /// Decision 33: after a run's teardown (out of time, or expired), arm a standing connect again, so
+    /// the strap coming back (or still in range) can wake the app later. Never after a quiet ending
+    /// (decision 7). The reconnect itself doesn't sync: `HelioWakePolicy`'s cooldown sees the run.
+    func rearmAfterTeardown() {
+        guard ActiveDeviceChoiceStore.persisted() == .helioStrap, !endedBusy, Self.hasSavedStrap else { return }
+        if peripheral == nil || peripheral?.state == .disconnected, state == .idle {
+            reconnectKnown()
+        } else {
+            rearmOnDisconnect = true   // the cancel is still on its way: re-arm when it lands
+        }
+    }
+
+    func noteBackgroundRunStarted(at date: Date) {
+        HelioWakeState().lastBackgroundRunStart = date
     }
 }
 
@@ -463,7 +514,16 @@ extension HelioConnection: CBCentralManagerDelegate {
                 case nil: break
                 }
             case .poweredOff:
-                if session != nil || wantConnection { breadcrumbs.bluetoothOff(standingConnectArmed: false) }
+                // Decision 33: the link is gone (CoreBluetooth may not report the disconnect). Keep the
+                // wish to be connected: power-on reconnects (`pendingAction`), and that can wake the app.
+                if session != nil || wantConnection {
+                    session?.linkLost()
+                    session = nil
+                    characteristics = [:]
+                    writeQueue = []
+                    if wantConnection { pendingAction = .reconnect }
+                    breadcrumbs.bluetoothOff(standingConnectArmed: wantConnection)
+                }
                 state = .bluetoothOff
             case .unauthorized:
                 state = .bluetoothDenied
@@ -485,6 +545,7 @@ extension HelioConnection: CBCentralManagerDelegate {
             breadcrumbs.restored(peripheralStates: peripherals.map { Self.describe($0.state) },
                                  savedStrapState: match.map { Self.describe($0.state) })
             guard let restored = match else { return }
+            restorationWakePending = true
             adopt(restored)
             wantConnection = true
             pendingAction = .resumeRestored
@@ -501,6 +562,7 @@ extension HelioConnection: CBCentralManagerDelegate {
             state = .connected
             breadcrumbs.linkUp("restored, already connected", appActive: Self.appIsActive)
             if session == nil { characteristics = [:]; peripheral.discoverServices(nil) }
+            linkCameBackInBackground()
         } else {
             state = .connecting
             central?.connect(peripheral, options: nil)
@@ -532,6 +594,7 @@ extension HelioConnection: CBCentralManagerDelegate {
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
             characteristics = [:]
             peripheral.discoverServices(nil)
+            linkCameBackInBackground()
         }
     }
 
@@ -569,6 +632,10 @@ extension HelioConnection: CBCentralManagerDelegate {
             writeQueue = []
             stopRSSIUpdates()
             let expected = !wantConnection
+            if rearmOnDisconnect {
+                rearmOnDisconnect = false
+                if ActiveDeviceChoiceStore.persisted() == .helioStrap, !endedBusy { wantConnection = true }
+            }
             if wantConnection, central.state == .poweredOn {
                 state = .connecting
                 central.connect(peripheral, options: nil)

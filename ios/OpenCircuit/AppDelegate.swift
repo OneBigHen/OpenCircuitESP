@@ -58,6 +58,18 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // with its own restore identifier, so iOS can hand back its state; a restored or reconnected
         // strap syncs on connect, and the BGTask / Sleep Focus wakes drive it too (#215 phase 4).
         let helioActive = ActiveDeviceChoiceStore.persisted() == .helioStrap
+        // Decision 33 (#233): a strap catch-up (woke-up event, reconnect, restoration, Health delivery)
+        // runs the same alert passes as the strap's BGTask run. A static hook: setting it constructs
+        // nothing, so a ring user's launch is unchanged.
+        MainActor.assumeIsolated {
+            HelioWakeCoordinator.afterRun = { run in
+                guard run.ending != .expired else { return }
+                await Self.evaluateAlerts()
+                if run.ending == .synced, let store = try? OpenCircuitApp.backgroundStore() {
+                    await Self.evaluateBodyAlerts(store: store)
+                }
+            }
+        }
         if helioActive, HelioConnection.hasSavedStrap {
             MainActor.assumeIsolated {
                 // A fallback-built container is published as `sharedContainer`, so later sites reuse

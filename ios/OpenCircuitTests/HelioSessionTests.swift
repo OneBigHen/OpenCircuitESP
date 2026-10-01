@@ -872,6 +872,11 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
     private(set) var transport: FakeStrapTransport?
     private(set) var connects = 0
     private(set) var disconnects = 0
+    /// Standing connects armed again after a run's teardown (decision 33).
+    private(set) var rearms = 0
+    private(set) var runStarts: [Date] = []
+    /// Where the sessions' events go (the app's `HelioConnection.handle`).
+    var onEvent: (@MainActor (HelioSessionEvent) -> Void)?
     /// Flushes `HelioConnection`'s own post-sync hook would run: syncs no background run owns.
     private(set) var hookFlushes = 0
     /// Whether each of those hook flushes would skip the nights' margin: decision 31's check of the
@@ -906,6 +911,7 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
                                            focusEndedAt: result.nightsFinalized, flushStartsAt: self.clock()))
                                        await self.hookAction?(result)
                                    },
+                                   onEvent: { [weak self] event in self?.onEvent?(event) },
                                    clock: clock, autoTick: false)
         session.backgroundRunOwnsSyncs = backgroundRunAdoptsNewSessions
         transport.session = session
@@ -924,6 +930,10 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
         session = nil
         transport = nil
     }
+
+    func rearmAfterTeardown() { rearms += 1 }
+
+    func noteBackgroundRunStarted(at date: Date) { runStarts.append(date) }
 }
 
 /// The Health writer's flush contract, over the real store (HealthKit itself is unavailable in the
@@ -1467,6 +1477,66 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(flushes.count, 1, "one flush")
         XCTAssertEqual(flushes.first?.finalized, true, "the Focus run's finalization is kept")
         XCTAssertEqual(flushes.first?.nights, 1)
+    }
+
+    // MARK: #233: the strap wakes the app (decision 33)
+
+    /// The woke-up event on an idle background link (left up by an earlier run, B.5) runs one bounded
+    /// catch-up under a background assertion: it syncs on the live link (no reconnect), flushes Health
+    /// once without finalizing the night, logs a Bluetooth-wake row, and ends the assertion.
+    func testTheStrapsWokeUpEventOnAnIdleLinkRunsOneBoundedCatchUp() async throws {
+        let store = try makeStore()
+        let link = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        let first = await service(link, store: store).run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(first.ending, .synced)
+        clock = clock.addingTimeInterval(6 * 3600)
+        var flushes: [FlushCall] = []
+        var begun = 0, ended: [Int] = [], done = 0
+        let wake = HelioWakeCoordinator(.init(
+            strapChosen: { true }, appIsActive: { false }, runActive: { link.activeBackgroundRuns > 0 },
+            state: HelioWakeState(defaults), now: { [unowned self] in self.clock },
+            syncInForeground: {},
+            beginAssertion: { _ in begun += 1; return begun },
+            endAssertion: { ended.append($0) },
+            run: { [unowned self] wake in
+                await self.service(link, store: store, flushes: { flushes.append($0) })
+                    .run(kind: HelioWakePolicy.kind(for: wake), timeout: RingBackgroundSyncService.defaultTimeout, wake: wake)
+            },
+            expire: {}, afterRun: { _ in }, note: { _, _ in }))
+        link.onEvent = { event in if event == .wokeUp { wake.wake(.strapEvent) { done += 1 } } }
+        link.transport?.push(link.device.unsolicited(endpoint: 0x001D, [0x06, 0x00]))
+        link.transport?.drain()
+        for _ in 0..<5000 where done == 0 { await Task.yield() }
+        XCTAssertEqual(done, 1)
+        XCTAssertEqual(begun, 1)
+        XCTAssertEqual(ended, [1])
+        XCTAssertEqual(link.connects, 1, "the link was up: no reconnect")
+        XCTAssertEqual(link.session?.syncsFinished, 2)
+        XCTAssertEqual(flushes.count, 1)
+        XCTAssertEqual(flushes.first?.finalized, false, "a woke-up event is not a finalization: the night waits for its margin")
+        let record = try XCTUnwrap(lastRecord())
+        XCTAssertEqual(record.kind, .cbWake)
+        XCTAssertTrue(record.detail?.hasPrefix("helio strap: synced") == true, record.detail ?? "")
+        XCTAssertEqual(Set(link.device.fetchAcks), [0x09])
+        XCTAssertEqual(link.runStarts.count, 2)
+    }
+
+    /// A run that tears the link down (out of time) arms a standing connect again, so the strap can
+    /// wake the app later; a quiet ending (strap busy, decision 7) doesn't.
+    func testATornDownRunReArmsAStandingConnectAndAQuietEndingDoesNot() async throws {
+        let store = try makeStore()
+        let link = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        let short = await service(link, store: store, pause: { link.transport?.drainSteps(1) })
+            .run(kind: .appRefresh, timeout: HelioBackgroundSyncService.flushReserve + 3)
+        XCTAssertEqual(short.ending, .outOfTime)
+        XCTAssertTrue(short.disconnected)
+        XCTAssertEqual(link.rearms, 1)
+
+        let busyLink = FakeBackgroundLink(device: makeStrap(), keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        busyLink.silent = true
+        let busy = await service(busyLink, store: store).run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(busy.ending, .strapBusy)
+        XCTAssertEqual(busyLink.rearms, 0)
     }
 
     // MARK: decision 31: "the night is over" expires 30 minutes after Sleep Focus ended
