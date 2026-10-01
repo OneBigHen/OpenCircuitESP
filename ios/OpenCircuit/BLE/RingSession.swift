@@ -1743,7 +1743,9 @@ final class RingSession: NSObject {
         // contaminate its own baseline.
         let stagedDay = BulkSleep.mainSleep(from: records)
             .map { SleepNightKey.night(inBedStart: $0.start, inBedEnd: $0.end) }
-        let recentDeepHR = ((try? localStore.recentSleepSummaries(limit: 8)) ?? [])
+        // Decision 29: the ring's own nights only (all of them with an empty ownership log).
+        let recentDeepHR = LocalStore.ownershipLog().only(.ringConn, (try? localStore.recentSleepSummaries(limit: 8)) ?? [],
+                                                         time: \.inBedStart)
             .filter { stagedDay == nil || Calendar.current.startOfDay(for: $0.night) != stagedDay! }
             .prefix(7)
             .map(\.hrDeep)
@@ -2154,7 +2156,9 @@ final class RingSession: NSObject {
         // drain and a re-stage, which is exactly the non-idempotence `personalSleepBaseline`'s doc
         // says this exclusion exists to prevent.
         let tonightDay = SleepNightKey.night(inBedStart: start, inBedEnd: end)
-        let priorNights: [SkinTempBaseline.NightlyTemp] = ((try? store.recentSleepSummaries(limit: 40)) ?? [])
+        // Decision 29: the ring's own nights only (all of them with an empty ownership log).
+        let priorNights: [SkinTempBaseline.NightlyTemp] = LocalStore.ownershipLog()
+            .only(.ringConn, (try? store.recentSleepSummaries(limit: 40)) ?? [], time: \.inBedStart)
             .filter { $0.skinTempC > 0 && Calendar.current.startOfDay(for: $0.night) != tonightDay }
             .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }
         let baseline = SkinTempBaseline.baseline(priorNights: priorNights)

@@ -697,11 +697,12 @@ final class DeviceOwnershipAppTests: XCTestCase {
 
     /// A strap sleep session record between two local hours (minute fields count from the previous
     /// local midnight, `ZeppSleepSession.absolute`).
-    private func localSession(_ from: Double, _ to: Double, stages: [(Double, Double, UInt8)]) -> [UInt8] {
+    private func localSession(_ from: Double, _ to: Double, stages: [(Double, Double, UInt8)],
+                              midnight reference: Date? = nil) -> [UInt8] {
         var r = [UInt8](repeating: 0, count: ZeppSleepSession.recordLength)
         func put(_ bytes: [UInt8], at offset: Int) { for (i, b) in bytes.enumerated() { r[offset + i] = b } }
         func minute(_ h: Double) -> UInt16 { UInt16((h + 24) * 60) }
-        let midnight = UInt32(localHour(0).timeIntervalSince1970)
+        let midnight = UInt32((reference ?? localHour(0)).timeIntervalSince1970)
         put(le32(midnight), at: 0x000)
         put(le32(midnight), at: 0x004)
         r[0x008] = 1
@@ -809,12 +810,13 @@ final class DeviceOwnershipAppTests: XCTestCase {
     /// One strap sync of `spans` (local hours of `oNow`'s day, one session each) through the production
     /// path, under `log`. Returns the sync's night windows.
     @discardableResult
-    private func strapSync(_ spans: [(Double, Double)], now: Date, log: DeviceOwnershipLog,
+    private func strapSync(_ spans: [(Double, Double)], midnight: Date? = nil, now: Date, log: DeviceOwnershipLog,
                            store: LocalStore) throws -> [DateInterval] {
         ownership.install(log)
         let device = makeStrap()
-        device.fetchData[.sleepSession] = (stamp(localHour(0).timeIntervalSince1970 - 86_400),
-                                           spans.flatMap { localSession($0.0, $0.1, stages: [($0.0, $0.1, 0x04)]) })
+        let reference = midnight ?? localHour(0)
+        device.fetchData[.sleepSession] = (stamp(reference.timeIntervalSince1970 - 86_400),
+                                           spans.flatMap { localSession($0.0, $0.1, stages: [($0.0, $0.1, 0x04)], midnight: reference) })
         clock = now
         let (session, _) = connect(device, store: store)
         XCTAssertEqual(session.lastSyncResult?.interrupted, false)
@@ -944,5 +946,51 @@ final class DeviceOwnershipAppTests: XCTestCase {
         transport.drain()
         XCTAssertEqual(session.phase, .keyless)
         XCTAssertFalse(StrapLiveHeartRate(session: session).canMeasure, "nothing to start without the key")
+    }
+
+    // MARK: Review-224d S-2 / decision 28e: judged in the zone it was recorded in
+
+    /// From review-224d's probe: a night recorded 23:00–07:00 in New York, first synced after flying.
+    /// It is judged in New York's zone (the strap's own local-midnight reference), so every flight
+    /// stores it, Berlin and Tokyo included (the phone's zone would put its midpoint at 09:00 or later).
+    func testANightIsJudgedInTheZoneItWasRecordedIn() throws {
+        let saved = NSTimeZone.default
+        defer { NSTimeZone.default = saved }
+        var newYork = Calendar(identifier: .gregorian)
+        newYork.timeZone = TimeZone(identifier: "America/New_York")!
+        let sep20 = newYork.date(from: DateComponents(year: 2026, month: 9, day: 20))!
+        for zone in ["America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Asia/Tokyo"] {
+            NSTimeZone.default = TimeZone(identifier: zone)!
+            let store = try makeStore()
+            let nights = try strapSync([(-1, 7)], midnight: sep20, now: sep20.addingTimeInterval(14 * 3600),
+                                       log: .strapOwnsAllTime, store: store)
+            XCTAssertEqual(nights, [DateInterval(start: sep20.addingTimeInterval(-3600), end: sep20.addingTimeInterval(7 * 3600))],
+                           "synced in \(zone)")
+            XCTAssertEqual(try store.context.fetch(FetchDescriptor<StoredSleepSummary>()).map(\.asleepMin), [480], zone)
+        }
+    }
+
+    // MARK: Review-224d S-3 / decision 28f: one night is one row
+
+    /// From review-224d's probe: the strap reports one night as 23:00–03:00 and 03:30–07:00. Stitched,
+    /// it is one row with both halves (450 asleep minutes), and the 30-minute gap stays a gap.
+    func testANightReportedAsTwoSessionsIsOneRowWithBothHalves() throws {
+        let store = try makeStore()
+        let nights = try strapSync([(-1, 3), (3.5, 7)], now: localHour(9), log: .strapOwnsAllTime, store: store)
+        XCTAssertEqual(nights, [DateInterval(start: localHour(-1), end: localHour(7))])
+        let rows = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
+        XCTAssertEqual(rows.map(\.asleepMin), [450])
+        let segments = SleepHypnogramCodec.decode(try XCTUnwrap(rows.first).hypnogramData)
+        XCTAssertEqual(segments.map(\.start), [localHour(-1), localHour(3.5)], "both halves, as reported")
+        XCTAssertEqual(segments.map(\.end), [localHour(3), localHour(7)], "the gap stays a gap")
+    }
+
+    /// The `evening-then-night` probe's exact shape, a doze ending 60 minutes before the night: within
+    /// 28f's gap, so it is part of the night (one row, 20:00–07:00), never a night of its own.
+    func testADozeAnHourBeforeTheNightIsPartOfIt() throws {
+        let store = try makeStore()
+        let nights = try strapSync([(-4, -1.5), (-0.5, 7)], now: localHour(9), log: .strapOwnsAllTime, store: store)
+        XCTAssertEqual(nights, [DateInterval(start: localHour(-4), end: localHour(7))])
+        XCTAssertEqual(try nightRows(store), ["-4.0…7.0 asleep=600"])
     }
 }

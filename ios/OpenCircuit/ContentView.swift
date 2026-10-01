@@ -212,17 +212,12 @@ struct ContentView: View {
                 onLiveRunningChanged: { resetLive() },
                 // Its connection already wrote the store and flushed Apple Health; refresh the dashboard
                 // and run the post-sync passes the ring's `session.syncing` hook runs (review-224b F-1).
-                onSyncFinished: {
-                    HelioSyncEndStep.runAll { step in
-                        switch step {
-                        case .reloadTrends: Task { await loadTrends(.syncFinished) }
-                        case .refreshObservability: refreshObservability()
-                        case .evaluateHealthAlerts: evaluateHealthAlerts()
-                        // With the strap chosen only the bedtime reminder can fire (`ringReminders`).
-                        case .evaluateReminders: evaluateReminders(includeSedentary: false)
-                        }
-                    }
-                },
+                syncEnd: HelioSyncEndActions(
+                    reloadTrends: { Task { await loadTrends(.syncFinished) } },
+                    refreshObservability: { refreshObservability() },
+                    evaluateHealthAlerts: { evaluateHealthAlerts() },
+                    // With the strap chosen only the bedtime reminder can fire (`ringReminders`).
+                    evaluateReminders: { evaluateReminders(includeSedentary: false) }),
                 // A switch made from Profile ▸ Device: hand the store to the newly chosen driver.
                 onChoiceChanged: { choice in
                     if choice == .helioStrap { helio.setLocalStore(LocalStore(modelContext)) }
@@ -779,7 +774,7 @@ struct ContentView: View {
     /// The Today metric tiles (#216), built from the shared trends load.
     private var todayTiles: [TodayTile] {
         TodayTiles.build(points: trends.points, restingHR: trends.restingHR,
-                         tempUnit: TemperatureUnit(rawValue: tempUnitRaw) ?? .celsius)
+                         tempUnit: TemperatureUnit(rawValue: tempUnitRaw) ?? .celsius, scope: .from(trends))
     }
 
     /// The Today synthesis sentence (#216) — deterministic rules in `TodaySynthesis`.
@@ -2522,6 +2517,33 @@ enum HelioSyncEndStep: CaseIterable {
     static func syncEnded(from old: Bool?, to new: Bool?) -> Bool { old == true && new != true }
 }
 
+/// What a strap sync's end does, one action per `HelioSyncEndStep`. The step → action mapping and the
+/// "once per sync" rule live HERE, not in the view, and `HelioDashboardHooks` only forwards each
+/// `syncing` change to `syncingChanged`, so a test drives exactly what the hook runs (review-224d N-2).
+struct HelioSyncEndActions {
+    var reloadTrends: () -> Void
+    var refreshObservability: () -> Void
+    var evaluateHealthAlerts: () -> Void
+    var evaluateReminders: () -> Void
+
+    /// Every step's action, in `HelioSyncEndStep` order.
+    func run() {
+        HelioSyncEndStep.runAll { step in
+            switch step {
+            case .reloadTrends: reloadTrends()
+            case .refreshObservability: refreshObservability()
+            case .evaluateHealthAlerts: evaluateHealthAlerts()
+            case .evaluateReminders: evaluateReminders()
+            }
+        }
+    }
+
+    /// The hook's whole reaction to a change of the session's `syncing`.
+    func syncingChanged(from old: Bool?, to new: Bool?) {
+        if HelioSyncEndStep.syncEnded(from: old, to: new) { run() }
+    }
+}
+
 /// ContentView's Helio Strap hooks (#215): the end of a strap sync, a device switch, and the setup sheet.
 private struct HelioDashboardHooks: ViewModifier {
     let syncing: Bool?
@@ -2531,13 +2553,13 @@ private struct HelioDashboardHooks: ViewModifier {
     let liveRunning: Bool?
     let onLiveReading: () -> Void
     let onLiveRunningChanged: () -> Void
-    let onSyncFinished: () -> Void
+    let syncEnd: HelioSyncEndActions
     let onChoiceChanged: (ActiveDeviceChoice) -> Void
 
     func body(content: Content) -> some View {
         content
             // true → false (finished) or true → nil (the link dropped mid-sync and the session went).
-            .onChange(of: syncing) { old, now in if HelioSyncEndStep.syncEnded(from: old, to: now) { onSyncFinished() } }
+            .onChange(of: syncing) { old, now in syncEnd.syncingChanged(from: old, to: now) }
             .onChange(of: choice) { _, now in onChoiceChanged(now) }
             // Each strap reading has its own timestamp, so a steady heart rate still plots every second.
             .onChange(of: liveHRAt) { _, _ in onLiveReading() }

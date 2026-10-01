@@ -71,16 +71,27 @@ switch is recorded (`DeviceOwnershipLog`, persisted by `DeviceOwnershipStore`), 
 stores and writes what it measured for time it owned:
 
 - the ring owns everything before the first switch, so a ring-only install is unchanged;
-- nights (decisions 28a, 28c):
-  - only an overnight sleep is a night. A strap sleep session must pass the ring's own overnight gate
-    (`SleepWindow.isOvernightBlock`); a daytime session gets a log line and no row, so it never takes
-    a night key (strap naps as `StoredNap` are a follow-up);
+- nights (decisions 28a, 28c–28f):
+  - a strap sleep is a night only if it could be that night: it passes the ring's own overnight
+    gate (`SleepWindow.isOvernightBlock`, 28c) AND ends in its key's wake window
+    (`SleepNightKey.endsInWakeWindow`, before noon, 28d), both judged in the time zone it was
+    recorded in, from the strap's own local-midnight reference (28e). Sessions 60 min or less apart
+    are stitched into one night first (`HelioSleepSelection.stitch`, 28f): segments exactly as
+    reported, the gap left a gap. Anything else gets a log line and no row, so it never takes a
+    night key (strap naps as `StoredNap` are a follow-up);
+  - the strap's gate is the ring's pass 1 only: the ring's second pass (a night whose onset was
+    never recorded, `onsetIsUnobserved:`) needs its epoch archive's evidence of a hole, which the
+    strap has no equivalent of, so a strap session recorded only from 06:00 is not a night;
   - the device you went to bed with keeps the night: the device chosen when its in-bed window began,
     however late a switch lands inside it. A switch at exactly the in-bed start goes to the NEW
     device (the switch counts as made before bed);
-  - a stored night is never replaced or merged by the other device's night;
-  - when a switch falls between the two devices' bedtimes, each device's window began under itself,
-    so whichever device syncs first keeps the night;
+  - sleeps that overlap: a stored night is never replaced or merged by the other device's night;
+    when a switch falls between the two devices' bedtimes, each window began under its own device,
+    so whichever device syncs first keeps the night. "Whichever syncs first" applies only to sleeps
+    that overlap;
+  - two sleeps that DON'T overlap but share one key (e.g. the ring's 23:00–07:00 and the strap's
+    07:30–10:00 after a morning switch): the longer one that ends in the wake window is the night,
+    and the shorter one never makes it unkeepable (the night may replace it);
   - the device that doesn't keep the night is skipped (`ownedByOtherDevice`, or
     `ownedByOtherDeviceNoRow` when the owner stored none, which the Sleep card shows as a notice
     instead of the ring's reading). A kept night goes to Health named its owner, even where it covers
@@ -102,6 +113,11 @@ stores and writes what it measured for time it owned:
   strap, or writes nothing when the strap never passed the first-write guard. BP estimates (its PPG
   calibration) and the distance estimate (its per-step constant, a sample starting at midnight) are
   the ring's and always name the ring.
+- baselines ("your usual") are per device (decision 29): every in-app comparison (the Today tiles and
+  sentence, Vitals Status and its Apple Health fallback, the temperature and fever alerts, the Sleep
+  card's skin temperature, cycle and headache signals, the ring's own prior-nights judgement, the
+  basal-energy resting-HR baseline) compares a night or day only with earlier ones from the same
+  device, so a new device starts "Learning your usual". Nothing written to Health changes;
 - **Known limit (v1 is one strap):** untagged rows in strap-owned time name the CURRENTLY saved strap
   (`HelioConnection.savedPeripheralID`). Pairing a second strap before the first one's untagged rows
   (steps, sleep, derived values) are flushed would name the new strap for them. Tagged rows (heart

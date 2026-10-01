@@ -444,7 +444,7 @@ struct HealthNotificationCenter {
     /// computation for its own fever suppression instead of assembling a second skin-temp report
     /// off a second 40-night fetch. One owner for "is this a fever morning", so the fever alert and
     /// the suppression it drives can never disagree.
-    private func tempFeverCandidates(store: LocalStore,
+    func tempFeverCandidates(store: LocalStore,
                                      restingHRDaily: [RestingHR.DailyValue]?)
         -> (candidates: [HealthNotification], night: Date?, fever: Bool) {
         guard let latest = try? store.latestSleepSummary(), latest.skinTempC > 0 else {
@@ -453,7 +453,10 @@ struct HealthNotificationCenter {
             // answer, not a substituted value.
             return ([], nil, false)
         }
-        let nights = ((try? store.recentSleepSummaries(limit: 40)) ?? []).filter { $0.skinTempC > 0 }
+        // Decision 29: only the latest night's own device's nights (none yet on a device's first night,
+        // so no baseline and no night-over-night swing: nothing fires). Every night with an empty log.
+        let nights = LocalStore.sameDevice((try? store.recentSleepSummaries(limit: 40)) ?? [], as: latest)
+            .filter { $0.skinTempC > 0 }
         let cal = Calendar.current
         let tonightDay = cal.startOfDay(for: latest.night)
         let prior = nights
@@ -486,7 +489,8 @@ struct HealthNotificationCenter {
     /// same `RestingHR.dailyValues` defaults, same ascending sort.
     func restingHRDailySeries(store: LocalStore) -> [RestingHR.DailyValue] {
         let since = Date().addingTimeInterval(-Double(VitalsBaseline.Config().maxBaselineDays + 2) * 86_400)
-        let hr = ((try? store.recentSamples(kind: .heartRate, since: since)) ?? [])
+        // Decision 29: the current device's own readings (exactly `recentSamples` with an empty log).
+        let hr = ((try? store.recentOwnSamples(kind: .heartRate, since: since)) ?? [])
             .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
         return RestingHR.dailyValues(hr: hr).sorted { $0.day < $1.day }
     }
