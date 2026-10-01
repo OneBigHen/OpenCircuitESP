@@ -218,6 +218,7 @@ Gadgetbridge resets it to 0 on reconnect before re-auth overwrites it (`ENC:160-
 | `0x0016` | steps (realtime) | no | 🟡 `SVC/Steps:34,45` |
 | `0x0017` | user info | yes | 🟡 `SVC/UserInfo:45,51` |
 | `0x0018` | vibration patterns (§13.1) | yes | 🟡 `SVC/VibrationPatterns:44,50` |
+| `0x0019` | workout status, phone GPS (§16.2, §18) | yes | 🟡 `SVC/Workout:42,70` |
 | `0x001A` | find device / find phone (§11) | yes | 🟡 `SVC/FindDevice:34,60` |
 | `0x001D` | heart rate (realtime control) | no | 🟡 `SVC/HeartRate:36,59` |
 | `0x001E` | notifications: **not used for the strap** (§13.3) | yes | 🟡 `SVC/Notification:59,98` |
@@ -231,7 +232,7 @@ Gadgetbridge resets it to 0 on reconnect before re-auth overwrites it (`ENC:160-
 `0x0017`. They are unrelated namespaces.)
 
 The `0x000F`, `0x0018`, `0x001A` and `0x001E` rows were added by the device-controls addendum
-(§11–§15). As with every row, the services list (§5.2) decides whether the endpoint exists on
+(§11–§15). The `0x0019` row was added by the parity addendum (§16–§21). As with every row, the services list (§5.2) decides whether the endpoint exists on
 the connected strap and whether it is encrypted.
 
 **The Helio Strap's services list** (🟢 `HW:2026-09-30 (hw 0.132.27.2)`): 28 endpoints, `*` = encrypted:
@@ -959,6 +960,22 @@ as the Zepp app shows them, so they can be restored by hand.
 21. **Strap-originated find phone**: is there any gesture (e.g. a multi-tap) that makes the strap
     send `11` on `0x001A`? Promotes §11.5.
 
+Parity addendum (§16–§21). Items 22–24 need nothing but an idle link; leave the Zepp app unable
+to connect (phone Bluetooth off) so that every message seen is the strap's.
+
+22. **Idle link**: after auth and the §5 setup, keep the link up and idle for at least 2 hours
+    (overnight is better), the Mac awake. Log every unsolicited chunked message (time, endpoint,
+    first byte, length, never the payload) and every disconnect (time, reason). Does the strap
+    drop an idle link, and after how long? Does it send pings (`03` on `0x0015`), and how often?
+    Promotes §16.2 rows 12–13 and §16.3.
+23. **Sleep events**: the same idle link through a night, and on another day through a nap.
+    Record the arrival time of any `06 01` / `06 00` on `0x001D`, then compare with that night's
+    `0x48` record (§6.6). Then on another night disconnect before sleep and reconnect after
+    waking: are the events delivered late (queued) or lost? Promotes §16.2 rows 1–2 and §16.4.
+24. **GATT extras and battery**: does `…0010` exist, and with which properties; does `0x2A19`
+    support notify? With the link idle, put the strap on its charger and take it off: does
+    anything arrive (on `…0017`, `0x2A19` or `…0010`)? Promotes §16.2 rows 6–7.
+
 ### 10.1 Results from a real strap (2026-09-30)
 
 Juan ran HelioVerify against his Helio Strap: hardware revision 0.132.27.2, firmware 3.3.6.5
@@ -1583,6 +1600,130 @@ allowed values or min/max → write **one** arg, echoing the group version from 
 
 ---
 
+## 16. What the strap sends on its own
+
+This section and §17–§21 are the **parity addendum** (2026-10-01). §16 lists every message
+the strap may send on an **authenticated, idle link**: after the §5 setup, with no fetch and no
+command of ours in flight. It is written for the background-sync work (#233). New sources
+here are `SVC/Workout` (endpoint `0x0019`), Gadgetbridge's Bluetooth-Classic transport, cited
+only for contrast as `GB/service/devices/huami/zeppos/ZeppOsBtbrSupport.java`, and the legacy
+(pre-Zepp OS) Huami device-event list `GB/service/devices/huami/HuamiDeviceEvent.java`.
+
+### 16.1 What Gadgetbridge subscribes to, and when
+
+| Characteristic | Subscribed | Carries | Tag / source |
+|---|---|---|---|
+| `…0017` chunked-read | **at connect, before auth, for the whole connection** | every chunked message from the strap, on every endpoint (§3) | 🟡 `BTLE:128-147`, `SUP:1069-1074,1131-1142,1167-1181` |
+| `…0004` / `…0005` | around a history-fetch batch only, then disabled | fetch control and data (§6) | 🟡 `SUP:959-965`, `GB/service/devices/huami/HuamiFetcher.java:170-202` |
+| `0x2A37` | only while live HR is on: the user's live-HR screen, a one-shot HR test, or a Sleep as Android session | live HR (§7.1) | 🟡 `SVC/HeartRate:112-149`, `SUP:731-740` |
+| `…0002` raw sensor | only while raw-sensor streaming is on (a Sleep as Android feature) | accelerometer | 🟡 `SUP:998-1012` |
+| `…0023` / `…0024` | only during a file transfer | files (not needed) | 🟡 `GB/service/devices/huami/zeppos/services/filetransfer/ZeppOsFileTransferImpl.java:118-119` |
+| `…0016` chunked-write | **never**. Gadgetbridge has a handler for chunk acks arriving there (§3.4) but no code path enables notifications on it | — | 🟡 `SUP:1074-1076,1144-1156` (no `notify` call for it anywhere in the Zepp OS code) |
+| `0x2A19` battery, `…0010` legacy device events | **never** | — | 🟡 (no subscription in the Zepp OS code) |
+
+So on an idle Gadgetbridge link, the strap can reach the phone **only through chunked messages
+on `…0017`** (plus `0x2A37` while live HR is on). Everything in §16.2 arrives that way.
+
+At session setup (§5), only one of Gadgetbridge's service initialisers changes what the strap
+sends unprompted: it **turns realtime steps off** (`05 00` on `0x0016`), because that stream stays
+enabled across connections. 🟡 `SVC/Steps:53-57`. The others send requests (battery, config,
+alarms, find-device capabilities) or write state (time, user info, vibration patterns, fitness
+goals; §15.1), and none of them subscribes to anything.
+
+### 16.2 Catalogue of unsolicited messages
+
+"Queued" asks whether the strap holds the message while no phone is connected and delivers it
+on the next connection. **Neither reference says so for any message**, and none of these
+messages carries a timestamp, so a late delivery could not be told from a live one. Every
+"queued" cell is therefore 🔴 unknown.
+
+| # | Message | Endpoint (Helio encryption) | When the strap sends it | Needs | What Gadgetbridge does | Tag / source |
+|---|---|---|---|---|---|---|
+| 1 | **fell asleep** `06 01` | `0x001D` heart rate (plaintext) | 🔴 when the strap's own sleep detection decides you fell asleep. Latency, and whether naps (§21) also trigger it, are unknown | the `…0017` subscription. No known setting or subscription; 🔴 whether it depends on a HEALTH sleep switch (`0x11`, §5.5) | raises a "fell asleep" device event. That runs only the user's configured device actions (e.g. an Android broadcast) and **never starts a fetch** | 🟡 format `SVC/HeartRate:40-43,74-88`; event handling `GB/deviceevents/GBDeviceEventSleepStateDetection.java:53-89` (fetched from the pinned commit); 🔴 whether the Helio sends it at all |
+| 2 | **woke up** `06 00` | `0x001D` (plaintext) | 🔴 as row 1, on waking | as row 1 | "woke up" device event, as row 1 | as row 1 |
+| 3 | other `06 xx` | `0x001D` | — | — | logged as unexpected | 🟡 `SVC/HeartRate:84-86` |
+| 4 | **live HR** (standard HRS frames) | `0x2A37` notification | about once a second, only after `04 01` on `0x001D` **and** while the phone keeps sending `04 02` (§7.1). 🔴 whether "Heart Rate Push" (a persistent setting, §5.5 arg `0x05`) makes the strap stream to any subscriber without `04 01` | the `0x2A37` subscription plus the 1 s keep-alive | if a frame arrives while Gadgetbridge did not ask for live HR, it sends `04 00` and unsubscribes (a fail-safe) | 🟢 1/s with the keep-alive `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `SVC/HeartRate:151-172` |
+| 5 | **realtime steps** `07` + 13 bytes (steps = u16 LE at offset 1 of the 13) | `0x0016` steps (plaintext) | 🔴 on step changes, only while enabled | `05 01` on `0x0016`, which **persists across connections** (ack `06 <status> <enabled>`) | normally off: Gadgetbridge sends `05 00` at every connect and `05 01` only for its live-activity screen | 🟡 `SVC/Steps:36-40,53-57,73-80,98-110` |
+| 6 | **battery** `04` + 20 bytes (§5.3) | `0x0029` (plaintext) | 🔴 **no unsolicited battery message is known**. Gadgetbridge only ever sees it as the reply to its `03` request at session setup; its handler would accept one at any time | — | updates the battery level and charging flag | 🟡 `SVC/Battery:46-70` |
+| 7 | **charging / not worn** | — | **no message known.** The strap's own state shows up only in history: activity minutes of kind `0x76` (charging) and `0x73` (not worn), §6.5 | — | — | 🟡 (absent from both references); the legacy Huami bands had a device-event characteristic `…0010` with events "fell asleep" `01`, "woke up" `02` and "start non-wear" `06` (`GB/service/devices/huami/HuamiDeviceEvent.java:20-25`, `GB/devices/huami/HuamiService.java:52`), but the Zepp OS code never subscribes to it. 🔴 whether the Helio exposes `…0010` |
+| 8 | **workout opened on the device** `20 <b1> <gps> <type> …` | `0x0019` workout (**encrypted**) | when a workout is opened on the device's own screen. Byte `[2]` = `01` if the workout needs GPS, byte `[3]` = the workout type code (§18.2); byte `[1]` is not read | — | if GPS is needed: sends a phone-GPS status, then locations while the user allows it (§18.5) | 🟡 `SVC/Workout:46,86-103,152-166`; 🔴 for the Helio, which has no screen (§18.1) |
+| 9 | **workout started** `11 01` / **ended** `11 04` | `0x0019` (encrypted) | when a workout starts / ends | — | optional: starts / stops a recording in the OpenTracks app; on end, stops sending GPS | 🟡 `SVC/Workout:45-49,104-118,168-187`; 🔴 whether the Helio sends them for phone-started (§18) or auto-detected (§19) workouts; other status bytes are logged as unexpected |
+| 10 | **alarms changed** `0f` | `0x000F` alarms (plaintext) | §12.5 | — | re-reads the alarm list | 🟡 §12.5 |
+| 11 | **find stopped on the strap** `07`; **find phone** `11`, `13`, `15 <mode>` | `0x001A` (encrypted) | §11.3, §11.5 | — | §11.5 | 🟡 §11.3, §11.5 |
+| 12 | **connection ping** `03` | `0x0015` connection (plaintext) | 🔴 "sometimes"; no interval is documented | — | answers `04` on the same endpoint | 🟡 `SVC/Connection:34-35,54-58` |
+| 13 | **MTU announce** `02` + u16 LE (= MTU − 3) | `0x0015` (plaintext) | 🔴 unknown trigger | — | adopts the new MTU for its own chunking (if high MTU is allowed and the value is ≥ 23) | 🟡 `SVC/Connection:49-53`, `SUP:1113-1128` |
+| 14 | config reply / ack `04 …` / `06 …` | `0x000A` (encrypted) | as replies only. 🔴 whether the strap pushes a `04` when a setting changes on its side (e.g. from the Zepp app) | — | stores whatever arrives; no special unsolicited handling | 🟡 `SVC/Config:124-146` |
+| 15 | chunk ack `04 …` | `…0016` | §3.4 | an `…0016` subscription, which Gadgetbridge never makes (§16.1) | logged only | 🟡 §3.4 |
+| 16 | **"new data available"** | — | **no such message exists in either reference.** No strap message makes Gadgetbridge fetch; every fetch starts on the phone. HelioCore fetches when its app opens. | — | — | 🟡 (absent from every Zepp OS service handler and from `HC:1115-1131`) |
+| 17 | anything on an endpoint no reference knows | the Helio lists 12: `0x000C*`, `0x0022`, `0x0025`, `0x0028`, `0x0030*`, `0x0031`, `0x0032`, `0x0036*`, `0x0048`, `0x0049`, `0x004D*`, `0x0081*` (`*` = encrypted) | 🔴 | — | Gadgetbridge logs "unhandled" | 🟢 the list `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `SUP:1174-1180` |
+
+Endpoints `0x0048` and `0x0049` coincide numerically with fetch types `0x48`/`0x49` (§6.5).
+They are unrelated namespaces, like the characteristic/endpoint coincidence in §3.5.
+
+### 16.3 Idle links: does the strap drop them, and how do the references keep them?
+
+| Fact | Tag / source |
+|---|---|
+| **No reference documents an idle timeout for the BLE link.** | 🔴 (§10 item 22) |
+| Gadgetbridge's BLE path sends **nothing periodic**: no keep-alive and no ping of its own. It only answers the strap's ping (row 12). | 🟡 `SVC/Connection:68-70` (`sendPing` is never called on the BLE path) |
+| Gadgetbridge's **Bluetooth-Classic** transport (not usable on iOS) does keep its link alive: it writes a ping whenever 24 minutes have passed without a write, and notes that the strap's pong alone is not enough and that the official app re-requests data now and then. Evidence that Zepp OS devices can drop a silent link; 🔴 whether the BLE link behaves the same. | 🟡 `GB/service/devices/huami/zeppos/ZeppOsBtbrSupport.java:367-369,394-408` |
+| Gadgetbridge re-establishes the BLE link with Android's **auto-connect** (the OS reconnects whenever the strap is in range). Every reconnect re-runs the whole setup: chunk encoder/decoder and fetcher reset, MTU back to 23, fresh auth (§4), services list, init (§5). | 🟡 `BTLE:115-118,128-147`, `SUP:292-305` |
+| A Gadgetbridge contributor used a Helio Strap for about two weeks with Sleep as Android, where a running sleep session makes Gadgetbridge fetch SpO₂ (`0x25`) every 60 s. Sleep sessions normally run all night, so the Helio appears to tolerate a link held for hours with periodic traffic (🔴 inference: the report doesn't mention disconnects either way). | 🟡 `GB#6488` (2026-07-29) |
+| HelioCore connects when its app opens and does nothing on a disconnect but update its UI: no reconnect, no keep-alive. | 🟡 `HC:644-720,1086-1088` |
+| Amazfit asks the user to keep the device connected during a workout and says the end of a workout cannot reach the strap without the link (§18.4). It also documents "Heart rate push" to other devices (§7.1). Both need long-lived links. | 🟡 `AMZ-M p.4,10,12` |
+
+**OpenCircuit mapping** (🔴 recommendation): the iOS equivalent of auto-connect is a pending
+`connect(_:options:)`, which never times out, plus CoreBluetooth state restoration; that is what
+the background-sync branch already does (`BACKGROUND_SYNC.md` §B.5 on `feat/helio-background`).
+Re-run §4–§5 after every reconnect. Never reuse a session key, handle counter or sequence
+number (§9).
+
+### 16.4 Wake sources for a suspended iOS app
+
+An iOS app with the `bluetooth-central` background mode is woken for **any notification on a
+characteristic it subscribed to** while the link is up, and for a pending connect that
+completes. That is Apple's CoreBluetooth behaviour, not something the references show. So
+every row of §16.2 that arrives on `…0017` *would* wake the app. The question is whether the
+strap sends it, and whether we must change a persistent strap setting to make it send.
+
+| Message (§16.2 row) | Arrives without changing any persistent strap setting? | Reliable enough to schedule work on? | Verdict |
+|---|---|---|---|
+| sleep events `06 01` / `06 00` (1, 2) | **yes**: nothing is written to the strap; only the `…0017` subscription that every session already has | 🔴 not shown to be sent by the Helio; timing, nap behaviour and queuing unknown | **opportunistic hint only.** On `06 00`, schedule a short sleep fetch (`0x48` + activity). The night's session record may not exist yet (§21.4), so keep the per-type cursor and fetch again later. Never write a sleep sample to Health from the event itself: it carries no time |
+| live HR `0x2A37` (4) | the stream itself needs `04 01` plus a `04 02` from the phone **every second**. That isn't a persistent setting, but a suspended app can't keep sending it. The "Heart Rate Push" route would need a persistent setting | n/a | **no** |
+| realtime steps `07` (5) | **no**: needs `05 01`, which persists across connections | n/a | **no** (never send `05 01` in the background) |
+| battery (6) | no unsolicited form known | — | **no** |
+| charging / not worn (7) | no message known | — | **no** |
+| workout `20` / `11 01` / `11 04` (8, 9) | yes, if sent at all | 🔴 unknown whether the Helio sends them | **no** (rare and unproven) |
+| alarms changed `0f` (10), find `07`/`11` (11) | yes | rare, user-driven | **no** (handle them when they come) |
+| connection ping `03` (12) | yes | 🔴 cadence unknown | **no**, but always answer `04` |
+| MTU announce (13) | yes | rare | **no** |
+| "new data available" (16) | does not exist | — | **no**: the strap never says it has data |
+
+**Bottom line:** no strap message is a dependable wake source. Background sync must rest on
+BGTasks and on the reconnect event (pending connect / restoration), and must fetch on a phone
+schedule. Sleep events are worth handling as a hint once §10 item 23 shows that the Helio sends
+them.
+
+### 16.5 Handling rules (🔴 recommendation)
+
+- Subscribe to `…0017` before auth (§2) and keep it for the whole connection. Don't subscribe to
+  `…0016`, `0x2A19`, `…0010` or `0x2A37` for background work.
+- Dispatch by endpoint, then by first byte. Handle rows 1–2 and 8–15 of §16.2. Answer a ping `03`
+  on `0x0015` with `04`. On an MTU announce, chunk at the smaller of the announced size and
+  `maximumWriteValueLength(for:)`.
+- An unsolicited message must **never** trigger a write that changes strap state. The only
+  replies allowed are the ping answer, the find-phone ack `12 01` (§11.5) and chunk acks (§3.4).
+- If `0x2A37` frames arrive that we did not ask for, do what Gadgetbridge does: send `04 00` on
+  `0x001D` and unsubscribe.
+- Never send `05 01` on `0x0016`. If a session finds realtime steps flowing (row 5 arriving
+  unasked), send `05 00` once: it only undoes a state someone else set and records nothing.
+- Unknown endpoint or first byte: log the endpoint, the first byte and the length, **never the
+  payload** (it may hold health data). Reply nothing.
+- Timestamp every event on arrival, and treat it as "at or before now", never as "now": queuing
+  is unknown.
+
+---
+
 ## Changelog
 
 - 2026-09-30: first version (zepp-spec agent, #215 Phase 0). All claims 🟡/🔴.
@@ -1599,3 +1740,7 @@ allowed values or min/max → write **one** arg, echoing the group version from 
   start/ack/stop and the 0.5 s buzz felt, alarm list and HEALTH alert args read and parsed, no
   config group `03`; the matching §11–§13 tags promoted to 🟢. Nothing was written (zepp-fix
   agent, #215).
+- 2026-10-01: parity addendum, part 1 (zepp-parity-spec agent, #233): §16, what the strap sends
+  on its own, the subscriptions Gadgetbridge holds, idle links and iOS wake sources; endpoint
+  `0x0019` added to §3.5; capture items 22–24 in §10. Existing sections are unchanged. All new
+  claims are 🟡/🔴 except those already confirmed in §10.1.
