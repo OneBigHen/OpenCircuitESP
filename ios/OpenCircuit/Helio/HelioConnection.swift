@@ -70,11 +70,16 @@ final class HelioConnection: NSObject {
     /// A Sleep Focus run's finalization, left when it gave up waiting for the run holding the link
     /// (`HelioBackgroundLink`, review-225b N-a); cleared when that run returns (review-225c SF-1).
     @ObservationIgnored var pendingNightsFinalization: Date?
+    /// The link and wake breadcrumbs (#233).
+    @ObservationIgnored let breadcrumbs: HelioBreadcrumbs
+    /// This process was launched (or relaunched) by CoreBluetooth state restoration.
+    @ObservationIgnored private(set) var restoredThisLaunch = false
 
     private enum PendingAction { case scan, reconnect, resumeRestored }
 
-    init(keyStore: (any HelioKeyStoring)? = nil) {
+    init(keyStore: (any HelioKeyStoring)? = nil, breadcrumbs: HelioBreadcrumbs? = nil) {
         self.keyStore = keyStore ?? HelioKeyStore.shared
+        self.breadcrumbs = breadcrumbs ?? .shared
         super.init()
         // Decision 18: backgrounding sends the find stop. Observed here rather than in a view, so it
         // holds whichever screen is showing.
@@ -273,7 +278,8 @@ final class HelioConnection: NSObject {
                 // A background run flushes and logs the syncs it owns itself (#215 phase 4).
                 guard !result.endedInBackgroundRun else { return }
                 await HelioConnection.flushToHealth(result: result, timeline: timeline, store: store)
-            })
+            },
+            onEvent: { [weak self] event in self?.handle(event) })
         session.backgroundRunOwnsSyncs = backgroundRunAdoptsNewSessions
         self.session = session
         session.start()
@@ -353,6 +359,45 @@ final class HelioConnection: NSObject {
     }
 }
 
+// MARK: - Session events (#233)
+
+extension HelioConnection {
+    /// What the session reports beyond a finished sync: breadcrumbs (and, for the woke-up event, a wake).
+    func handle(_ event: HelioSessionEvent) {
+        switch event {
+        case .syncStarted:
+            // A background run logs its own sync's wake; this is every other sync.
+            guard session?.backgroundRunOwnsSyncs != true else { return }
+            breadcrumbs.syncStarted(wake: Self.appIsActive ? .foreground : (restoredThisLaunch ? .restoration : .reconnect))
+        case .strapMessage(let endpoint, let opcode):
+            breadcrumbs.strapMessage(endpoint: endpoint, opcode: opcode)
+        case .strapNotification(let characteristic):
+            breadcrumbs.strapNotification(characteristic: characteristic.rawValue)
+        case .fellAsleep, .wokeUp:
+            break
+        }
+    }
+
+    static var appIsActive: Bool { UIApplication.shared.applicationState == .active }
+
+    /// CoreBluetooth's error code for a drop, when there is one.
+    nonisolated static func errorCode(_ error: Error?) -> Int? {
+        guard let error else { return nil }
+        if let cb = error as? CBError { return cb.code.rawValue }
+        return (error as NSError).code
+    }
+
+    nonisolated static func describe(_ state: CBPeripheralState) -> String {
+        switch state {
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .disconnecting: return "disconnecting"
+        @unknown default: return "unknown"
+        }
+    }
+}
+
 // MARK: - HelioBackgroundLink
 
 extension HelioConnection: HelioBackgroundLink {
@@ -418,6 +463,7 @@ extension HelioConnection: CBCentralManagerDelegate {
                 case nil: break
                 }
             case .poweredOff:
+                if session != nil || wantConnection { breadcrumbs.bluetoothOff(standingConnectArmed: false) }
                 state = .bluetoothOff
             case .unauthorized:
                 state = .bluetoothDenied
@@ -432,9 +478,13 @@ extension HelioConnection: CBCentralManagerDelegate {
             // Minimal restoration: re-adopt the saved strap's peripheral so its callbacks land here.
             // Nothing is sent to the radio yet (CoreBluetooth ignores calls before power-on); the
             // `.poweredOn` update resumes it (`resumeRestored`).
-            guard let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
-                  let saved = Self.savedPeripheralID,
-                  let restored = peripherals.first(where: { $0.identifier.uuidString == saved }) else { return }
+            restoredThisLaunch = true
+            let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
+            let saved = Self.savedPeripheralID
+            let match = peripherals.first(where: { $0.identifier.uuidString == saved })
+            breadcrumbs.restored(peripheralStates: peripherals.map { Self.describe($0.state) },
+                                 savedStrapState: match.map { Self.describe($0.state) })
+            guard let restored = match else { return }
             adopt(restored)
             wantConnection = true
             pendingAction = .resumeRestored
@@ -449,6 +499,7 @@ extension HelioConnection: CBCentralManagerDelegate {
         guard let peripheral, wantConnection, central?.state == .poweredOn else { return }
         if peripheral.state == .connected {
             state = .connected
+            breadcrumbs.linkUp("restored, already connected", appActive: Self.appIsActive)
             if session == nil { characteristics = [:]; peripheral.discoverServices(nil) }
         } else {
             state = .connecting
@@ -476,6 +527,8 @@ extension HelioConnection: CBCentralManagerDelegate {
         MainActor.assumeIsolated {
             guard peripheral === self.peripheral else { return }
             state = .connected
+            breadcrumbs.linkUp(restoredThisLaunch ? "connected after a restoration relaunch" : "connected",
+                               appActive: Self.appIsActive)
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
             characteristics = [:]
             peripheral.discoverServices(nil)
@@ -515,12 +568,15 @@ extension HelioConnection: CBCentralManagerDelegate {
             characteristics = [:]
             writeQueue = []
             stopRSSIUpdates()
+            let expected = !wantConnection
             if wantConnection, central.state == .poweredOn {
                 state = .connecting
                 central.connect(peripheral, options: nil)
             } else {
                 state = .idle
             }
+            breadcrumbs.linkDown(errorCode: expected ? nil : Self.errorCode(error), expected: expected,
+                                 standingConnectArmed: state == .connecting)
         }
     }
 }

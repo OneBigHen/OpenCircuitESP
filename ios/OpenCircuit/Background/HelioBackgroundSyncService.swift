@@ -205,11 +205,16 @@ struct HelioBackgroundSyncService {
     /// The app is in front (`applicationState == .active`). Then a run that runs out of time hands
     /// its sync to the app instead of tearing down the link the person is now using (review-225 S1).
     let appIsActive: @MainActor () -> Bool
+    /// The link and wake breadcrumbs (#233); nil in tests that don't look at them.
+    var breadcrumbs: HelioBreadcrumbs? = nil
 
     /// One bounded run. `nightsFinalized` is the Sleep Focus wake's "the night is over": the time T
     /// Sleep Focus ended. The strap's nights then skip the 20-minute quiet margin, as the ring's do on
-    /// that wake, but only in a flush that starts within 30 minutes of T (decision 31).
-    func run(kind: TaskRecord.Kind, timeout: TimeInterval, nightsFinalized: Date? = nil) async -> HelioBackgroundRun {
+    /// that wake, but only in a flush that starts within 30 minutes of T (decision 31). `wake` is why
+    /// the run is happening, for the breadcrumbs (#233); a BGTask kind's own by default.
+    func run(kind: TaskRecord.Kind, timeout: TimeInterval, nightsFinalized: Date? = nil,
+             wake: HelioWake? = nil) async -> HelioBackgroundRun {
+        let wake = wake ?? HelioWake(task: kind) ?? .foreground
         let start = now()
         var run = HelioBackgroundRun(ending: .outOfTime)
         let syncDeadline = start.addingTimeInterval(max(0, timeout - Self.flushReserve))
@@ -261,6 +266,7 @@ struct HelioBackgroundSyncService {
         var baseline = 0
         var requested = false
         var syncStartedAt: Date?
+        var loggedSyncStart = false
         if link.session?.isLinkConnected != true { _ = link.connectForBackground() }
 
         loop: while true {
@@ -301,6 +307,10 @@ struct HelioBackgroundSyncService {
                 case .starting, .authenticating, .settingUp:
                     break
                 }
+            }
+            if syncStartedAt != nil, !loggedSyncStart {
+                loggedSyncStart = true
+                breadcrumbs?.syncStarted(wake: wake, detail: "kind=\(kind.rawValue)")
             }
             if now() >= syncDeadline { run.ending = .outOfTime; break }
             await pause()
@@ -428,6 +438,7 @@ extension HelioBackgroundSyncService {
                     DispatchQueue.main.asyncAfter(deadline: .now() + teardownGrace) { done.resume() }
                 }
             },
-            appIsActive: { UIApplication.shared.applicationState == .active })
+            appIsActive: { UIApplication.shared.applicationState == .active },
+            breadcrumbs: connection.breadcrumbs)
     }
 }

@@ -65,6 +65,20 @@ struct HelioSyncResult: Equatable {
     var nightsFinalized: Date?
 }
 
+/// What a session reports to its connection beyond a finished sync (#233): breadcrumbs and wakes.
+enum HelioSessionEvent: Equatable {
+    /// A history sync started on this session.
+    case syncStarted
+    /// A message the strap sent on its own, outside any request this session started: its endpoint
+    /// and opcode bytes only (never the payload, which can hold health data).
+    case strapMessage(endpoint: UInt16, opcode: [UInt8])
+    /// A notification on a standard characteristic that nothing on this connection asked for.
+    case strapNotification(ZeppCharacteristic)
+    /// The strap's sleep events on `0x001D` (§7.1 🟡): `06 01` fell asleep, `06 00` woke up.
+    case fellAsleep
+    case wokeUp
+}
+
 /// Where fetched rounds go. `HelioStoreSink` is the `LocalStore` implementation.
 @MainActor
 protocol HelioHistorySink: AnyObject {
@@ -133,6 +147,9 @@ final class HelioSession: WearableSession {
 
     /// Decision 8: v1 always acks keep-on-strap (`03 09`). There is no delete path in the app.
     static let ackPolicy: ZeppAckPolicy = .keepOnDevice
+    /// How long after this session last sent to an endpoint a message there still counts as a reply
+    /// rather than something the strap sent on its own (twice a setup step's timeout).
+    static let replyWindow: TimeInterval = 10
     /// How long auth may take before the strap is reported busy.
     static let authTimeout: TimeInterval = 10
     /// How long a setup step waits for its reply (the same 5 s HelioVerify and ZeppKit use).
@@ -203,6 +220,7 @@ final class HelioSession: WearableSession {
     @ObservationIgnored private let sink: (any HelioHistorySink)?
     @ObservationIgnored private let findState: HelioFindState
     @ObservationIgnored private let onSyncFinished: @MainActor (HelioSyncResult, SyncDeviceID) async -> Void
+    @ObservationIgnored private let onEvent: @MainActor (HelioSessionEvent) -> Void
     @ObservationIgnored private let clock: () -> Date
     @ObservationIgnored private let random: ZeppRandom
     @ObservationIgnored private let autoTick: Bool
@@ -224,6 +242,10 @@ final class HelioSession: WearableSession {
     @ObservationIgnored private var liveHREndsAt: Date?
     @ObservationIgnored private var disHardwareRevision: String?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
+    /// When this session last sent to each endpoint, to tell a reply from a message the strap sent on
+    /// its own (#233).
+    @ObservationIgnored private var lastSentAt: [UInt16: Date] = [:]
+    @ObservationIgnored private var liveHRStoppedAt: Date?
 
     private enum NotifyPurpose { case auth, fetch }
 
@@ -236,6 +258,7 @@ final class HelioSession: WearableSession {
          key: ZeppAuthKey?, keyStore: (any HelioKeyStoring)?, sink: (any HelioHistorySink)?,
          findState: HelioFindState,
          onSyncFinished: @escaping @MainActor (HelioSyncResult, SyncDeviceID) async -> Void = { _, _ in },
+         onEvent: @escaping @MainActor (HelioSessionEvent) -> Void = { _ in },
          clock: @escaping () -> Date = Date.init, random: ZeppRandom = .system,
          autoTick: Bool = true, autoSyncOnConnect: Bool = true) {
         self.transport = transport
@@ -246,6 +269,7 @@ final class HelioSession: WearableSession {
         self.sink = sink
         self.findState = findState
         self.onSyncFinished = onSyncFinished
+        self.onEvent = onEvent
         self.clock = clock
         self.random = random
         self.autoTick = autoTick
@@ -310,6 +334,7 @@ final class HelioSession: WearableSession {
         transport.setNotify(.activityControl, enabled: true)
         transport.setNotify(.activityData, enabled: true)
         helioLog.notice("helio: sync started (\(manual ? "manual" : "on connect", privacy: .public))")
+        onEvent(.syncStarted)
     }
 
     // MARK: Connection lifecycle (called by HelioConnection)
@@ -384,6 +409,11 @@ final class HelioSession: WearableSession {
         case .batteryLevel:
             if let level = ZeppBatteryLevelCharacteristic.parse(bytes), !isAuthenticated { batteryPercent = level }
         case .heartRateMeasurement:
+            // With a key, `0x2A37` comes only from the stream this app starts (§7.1). Anything else
+            // (a Heart Rate Push setting, say) is the strap talking on its own: noted, never shown.
+            if isAuthenticated, !liveHeartRateRunning, !within(Self.replyWindow, of: liveHRStoppedAt, now: now) {
+                onEvent(.strapNotification(.heartRateMeasurement))
+            }
             guard let measurement = ZeppHeartRateMeasurement.parse(bytes),
                   LiveHR.validBPM.contains(measurement.beatsPerMinute) else { return }
             liveHR = measurement.beatsPerMinute
@@ -395,13 +425,19 @@ final class HelioSession: WearableSession {
             self.link = link
             handle(out)
         case .activityControl:
-            guard var fetch else { return }
+            guard var fetch else {
+                if !within(Self.replyWindow, of: lastFetchProgressAt, now: now) { onEvent(.strapNotification(.activityControl)) }
+                return
+            }
             lastFetchProgressAt = now
             let actions = fetch.receiveControl(bytes)
             self.fetch = fetch
             perform(actions)
         case .activityData:
-            guard var fetch else { return }
+            guard var fetch else {
+                if !within(Self.replyWindow, of: lastFetchProgressAt, now: now) { onEvent(.strapNotification(.activityData)) }
+                return
+            }
             lastFetchProgressAt = now
             let actions = fetch.receiveData(bytes)
             self.fetch = fetch
@@ -538,6 +574,7 @@ final class HelioSession: WearableSession {
 
     private func send(_ endpoint: UInt16, _ payload: [UInt8]) {
         guard var link else { return }
+        lastSentAt[endpoint] = clock()
         do {
             let writes = try link.send(endpoint: endpoint, payload: payload)
             self.link = link
@@ -654,6 +691,9 @@ final class HelioSession: WearableSession {
 
     private func handleMessage(_ message: ZeppMessage) {
         let payload = message.payload
+        if isStrapInitiated(message) {
+            onEvent(.strapMessage(endpoint: message.endpoint, opcode: Self.opcode(of: message)))
+        }
         switch message.endpoint {
         case ZeppEndpoint.servicesList:
             guard currentStep == .servicesList else { return }
@@ -707,6 +747,16 @@ final class HelioSession: WearableSession {
         case ZeppEndpoint.connection:
             // §3.5: a ping `03` is answered `04` on the same endpoint.
             if payload == [0x03] { send(ZeppEndpoint.connection, [0x04]) }
+        case ZeppEndpoint.heartRate:
+            // SPEC-GAP: §7.1 says the strap pushes its sleep events on this endpoint, not whether it
+            // does so without the realtime heart-rate stream running. The app never starts that stream
+            // (or any other persistent strap setting) to get them (decision 33: no manufactured
+            // wakes); if the events never come, this costs nothing.
+            switch ZeppHeartRateControl.parse(payload) {
+            case .fellAsleep?: onEvent(.fellAsleep)
+            case .wokeUp?: onEvent(.wokeUp)
+            case .controlReply?, nil: break
+            }
         case ZeppEndpoint.activityFetch:
             // Path B replies (§6.1). The app drives Path A, so this only arrives if the strap answers there.
             guard var fetch else { return }
@@ -841,6 +891,33 @@ final class HelioSession: WearableSession {
         return result.roundsStored == 0 ? "Up to date" : "Synced"
     }
 
+    // MARK: What the strap sends on its own (#233)
+
+    /// A message this session didn't ask for: one of the strap-to-phone messages the spec lists, or
+    /// anything on an endpoint this session hasn't sent to in the last `replyWindow`.
+    private func isStrapInitiated(_ message: ZeppMessage) -> Bool {
+        let first = message.payload.first
+        switch message.endpoint {
+        case ZeppEndpoint.heartRate where first == 0x06: return true                     // sleep events, §7.1
+        case ZeppEndpoint.connection where first == 0x03: return true                    // ping, §3.5
+        case ZeppEndpoint.alarms where first == 0x0f: return true                        // edited on the strap, §12.5
+        case ZeppEndpoint.findDevice where [0x07, 0x11, 0x13].contains(first): return true  // §11.3, §11.5
+        default: return !within(Self.replyWindow, of: lastSentAt[message.endpoint], now: clock())
+        }
+    }
+
+    /// The opcode bytes logged for a message: its first byte, and the event byte too for the sleep
+    /// events (`06 01` / `06 00`). Never more: the rest can be a measurement.
+    static func opcode(of message: ZeppMessage) -> [UInt8] {
+        let isSleepEvent = message.endpoint == ZeppEndpoint.heartRate && message.payload.first == 0x06
+        return Array(message.payload.prefix(isSleepEvent ? 2 : 1))
+    }
+
+    private func within(_ window: TimeInterval, of time: Date?, now: Date) -> Bool {
+        guard let time else { return false }
+        return now >= time && now.timeIntervalSince(time) <= window
+    }
+
     // MARK: Live heart rate (§7.1)
 
     /// Tier 0 (decision 7): listen to standard heart rate without auth. Shown only if it arrives.
@@ -863,6 +940,7 @@ final class HelioSession: WearableSession {
     func stopLiveHeartRate() {
         guard liveHeartRateRunning else { return }
         liveHeartRateRunning = false
+        liveHRStoppedAt = clock()
         liveHRKeepAliveAt = nil
         liveHREndsAt = nil
         send(ZeppEndpoint.heartRate, ZeppHeartRateControl.stop)

@@ -17,6 +17,8 @@ struct HelioDeviceInfoView: View {
     /// appear and whenever the link or session phase moves, not on every render.
     @State private var hasKey = HelioKeyStore.shared.hasKey
     @State private var keyRejected = HelioKeyStore.shared.isRejected
+    @State private var diagnosticsURL: URL?
+    @State private var diagnosticsError: String?
 
     private var session: HelioSession? { connection.session }
 
@@ -102,6 +104,15 @@ struct HelioDeviceInfoView: View {
             }
 
             Section {
+                Button("Export diagnostics") { exportDiagnostics() }
+                if let diagnosticsError { Text(diagnosticsError).font(.caption).foregroundStyle(.secondary) }
+            } header: {
+                Text("Diagnostics")
+            } footer: {
+                Text("A text file of when OpenCircuit synced and connected to the strap, for troubleshooting. It holds no health values.")
+            }
+
+            Section {
                 if connection.state == .connected || connection.state == .connecting {
                     Button("Disconnect", role: .destructive) { confirmDisconnect = true }
                 } else {
@@ -123,6 +134,23 @@ struct HelioDeviceInfoView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("OpenCircuit stops syncing until you connect again.")
+        }
+        .sheet(isPresented: Binding(get: { diagnosticsURL != nil }, set: { if !$0 { diagnosticsURL = nil } })) {
+            if let diagnosticsURL { ShareActivityView(url: diagnosticsURL) }
+        }
+    }
+
+    /// The strap's diagnostics bundle (#233): sync history and the link breadcrumbs, as a text file.
+    private func exportDiagnostics() {
+        diagnosticsError = nil
+        let report = DiagnosticsReport.buildForStrap(firmware: session?.firmwareVersion, hardware: session?.hardwareVersion)
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("opencircuit-strap-diagnostics-\(stamp).txt")
+        do {
+            try report.write(to: url, atomically: true, encoding: .utf8)
+            diagnosticsURL = url
+        } catch {
+            diagnosticsError = "Couldn't write diagnostics: \(error.localizedDescription)"
         }
     }
 

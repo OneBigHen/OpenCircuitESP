@@ -1,0 +1,255 @@
+import Foundation
+import ZeppKit
+
+// Breadcrumbs for the strap's link and wakes (#233). Build 59's first night synced only when the app
+// was opened, and nothing recorded whether the link was up, dropped or restored overnight. These lines
+// go to the metric log under one source tag (`source`), which the Diagnostics export prints in its own
+// section, so the next night can explain itself.
+//
+// Only state and control bytes: never an identifier, never a payload (which can hold health data).
+// Bounded, because the metric log keeps 400 entries for every source and one night must not evict the
+// rest: see `HelioBreadcrumbBudget`.
+
+/// Why a strap sync ran (decision 33's wake sources, plus the BGTask kinds and the app in front).
+enum HelioWake: String, Equatable, Sendable {
+    case appRefresh
+    case processing
+    case sleepFocus
+    /// CoreBluetooth relaunched the app and handed the strap's link back (state restoration).
+    case restoration
+    /// The strap sent its woke-up event (`06 00` on `0x001D`).
+    case strapEvent
+    /// The link came back (out of range, Bluetooth toggled) while the app was in the background.
+    case reconnect
+    /// HealthKit delivered new iPhone steps in the background.
+    case healthDelivery
+    case foreground
+
+    /// The BGTask kinds' wakes; nil for a kind that isn't a BGTask.
+    init?(task kind: TaskRecord.Kind) {
+        switch kind {
+        case .appRefresh: self = .appRefresh
+        case .processing: self = .processing
+        case .sleepFocus: self = .sleepFocus
+        case .foreground, .cbWake, .backgroundSync: return nil
+        }
+    }
+
+    /// For a log line: "the processing run".
+    var runName: String {
+        switch self {
+        case .appRefresh: return "app-refresh"
+        case .processing: return "processing"
+        case .sleepFocus: return "Sleep Focus"
+        case .restoration: return "restoration"
+        case .strapEvent: return "strap-event"
+        case .reconnect: return "reconnect"
+        case .healthDelivery: return "Health-delivery"
+        case .foreground: return "foreground"
+        }
+    }
+}
+
+/// The breadcrumbs' volume rules, pure so they test without UserDefaults. Persisted between calls (and
+/// across relaunches: a restoration relaunch is a new process) by `HelioBreadcrumbs`.
+///
+/// - Lines are counted per 12-hour window (a night is one window) in three categories, each with its
+///   own budget, so no kind of line can starve another: link lines (up, down, Bluetooth, restoration)
+///   20, sync lines (why each sync ran) 16, strap messages 12. One window therefore uses at most 48 of
+///   the metric log's 400 entries. Lines over budget are counted, and the count is reported on the
+///   first line of the next window.
+/// - Keyed lines (each link event, each strap endpoint) are rate-limited: at most one line per key per
+///   10 minutes, carrying how many happened since that key's last line. A flapping link or a chatty
+///   endpoint costs one line per 10 minutes, not one per event. A strap endpoint also gets at most 4
+///   lines per window, so one endpoint can't spend the others' budget.
+struct HelioBreadcrumbBudget: Codable, Equatable {
+    static let window: TimeInterval = 12 * 3600
+    static let keyInterval: TimeInterval = 10 * 60
+    static let messageLinesPerKey = 4
+
+    enum Kind: String, Codable, CaseIterable {
+        case link, sync, message
+
+        var linesPerWindow: Int {
+            switch self {
+            case .link: return 20
+            case .sync: return 16
+            case .message: return 12
+            }
+        }
+    }
+
+    static var linesPerWindow: Int { Kind.allCases.map(\.linesPerWindow).reduce(0, +) }
+
+    var windowStart: Date?
+    var used: [String: Int] = [:]
+    /// Lines dropped in this window, reported on the next window's first line.
+    var suppressed = 0
+    var carriedSuppressed = 0
+    var keyLines: [String: Int] = [:]
+    var lastKeyLine: [String: Date] = [:]
+    var sinceKeyLine: [String: Int] = [:]
+
+    /// The line to record, or nil when this window's budget for `kind` is spent. The line that spends
+    /// the budget says so.
+    mutating func admit(_ text: String, kind: Kind, now: Date) -> String? {
+        roll(now)
+        let used = self.used[kind.rawValue, default: 0]
+        guard used < kind.linesPerWindow else {
+            suppressed += 1
+            return nil
+        }
+        self.used[kind.rawValue] = used + 1
+        var line = text
+        if carriedSuppressed > 0 {
+            line += " [\(carriedSuppressed) line(s) over budget in the previous 12 h]"
+            carriedSuppressed = 0
+        }
+        if used + 1 == kind.linesPerWindow {
+            line += " [\(kind.rawValue) line budget spent; the rest of this 12 h window is counted, not logged]"
+        }
+        return line
+    }
+
+    /// One event on `key`: how many happened since the key's last line when a line is due now, else
+    /// nil (it is counted for the next one). `perWindow` caps the key's lines in a window.
+    mutating func due(key: String, perWindow: Int? = nil, now: Date) -> Int? {
+        roll(now)
+        sinceKeyLine[key, default: 0] += 1
+        if let last = lastKeyLine[key], now >= last, now.timeIntervalSince(last) < Self.keyInterval { return nil }
+        if let perWindow, keyLines[key, default: 0] >= perWindow { return nil }
+        let count = sinceKeyLine[key] ?? 1
+        sinceKeyLine[key] = 0
+        lastKeyLine[key] = now
+        keyLines[key, default: 0] += 1
+        return count
+    }
+
+    private mutating func roll(_ now: Date) {
+        if let start = windowStart, now >= start, now.timeIntervalSince(start) < Self.window { return }
+        carriedSuppressed += suppressed
+        suppressed = 0
+        used = [:]
+        keyLines = [:]
+        windowStart = now
+    }
+}
+
+/// Writes the strap's breadcrumbs to the metric log (`ObservabilityStore`), within `HelioBreadcrumbBudget`.
+@MainActor
+final class HelioBreadcrumbs {
+    /// The metric-log source tag. The Diagnostics export prints it in its own section.
+    nonisolated static let source = "helio-link"
+    nonisolated static let budgetKey = "helio.breadcrumbBudget.v1"
+
+    static let shared = HelioBreadcrumbs()
+
+    private let observability: ObservabilityStore
+    private let defaults: UserDefaults
+    private let clock: () -> Date
+
+    init(observability: ObservabilityStore = ObservabilityStore(), defaults: UserDefaults = .standard,
+         clock: @escaping () -> Date = Date.init) {
+        self.observability = observability
+        self.defaults = defaults
+        self.clock = clock
+    }
+
+    // MARK: Link
+
+    /// The link came up. `how` says why: a first connect, a reconnect, a restored link.
+    func linkUp(_ how: String, appActive: Bool) {
+        keyed("link-up", .link) { "link up (\(how); app \(appActive ? "in front" : "in background"))" }
+    }
+
+    /// The link went down. `errorCode` is CoreBluetooth's (`CBError.Code`) on an unexpected drop; nil
+    /// when we dropped it ourselves.
+    func linkDown(errorCode: Int?, expected: Bool, standingConnectArmed: Bool) {
+        let error = errorCode.map { "CBError \($0)" } ?? "no error"
+        // Separate keys: a drop we made can't hide an unexpected one inside the same 10 minutes.
+        keyed(expected ? "link-down-expected" : "link-down-unexpected", .link) {
+            "link down (\(expected ? "we dropped it" : "unexpected"), \(error)); standing connect \(standingConnectArmed ? "armed" : "NOT armed")"
+        }
+    }
+
+    func bluetoothOff(standingConnectArmed: Bool) {
+        keyed("bluetooth-off", .link) {
+            "Bluetooth off; the link is gone; reconnect \(standingConnectArmed ? "armed for when it is back on" : "NOT armed")"
+        }
+    }
+
+    /// A state-restoration relaunch: what came back, as states only (never an identifier).
+    func restored(peripheralStates: [String], savedStrapState: String?) {
+        let states = peripheralStates.isEmpty ? "none" : peripheralStates.joined(separator: ",")
+        keyed("restored", .link) {
+            "restoration relaunch: \(peripheralStates.count) peripheral(s) [\(states)]; saved strap \(savedStrapState ?? "not among them")"
+        }
+    }
+
+    // MARK: Syncs
+
+    /// A strap sync started, and why.
+    func syncStarted(wake: HelioWake, detail: String? = nil) {
+        record("sync start wake=\(wake.rawValue)" + (detail.map { " (\($0))" } ?? ""), .sync)
+    }
+
+    /// One line for a background wake that decided not to sync, or ran into another run.
+    func wakeNote(_ wake: HelioWake, _ text: String) {
+        record("wake=\(wake.rawValue): \(text)", .sync)
+    }
+
+    // MARK: Strap messages
+
+    /// A message the strap sent on its own, outside a request this app started: the endpoint and the
+    /// opcode bytes only, rate-limited per endpoint.
+    func strapMessage(endpoint: UInt16, opcode: [UInt8]) {
+        let key = String(format: "0x%04x", endpoint)
+        let bytes = opcode.map { String(format: "%02x", $0) }.joined(separator: " ")
+        keyed(key, .message, perWindow: HelioBreadcrumbBudget.messageLinesPerKey, since: "this endpoint's") { "strap sent \(key) \(bytes)" }
+    }
+
+    /// A notification on a standard characteristic nothing asked for (no bytes at all: it can be a
+    /// heart-rate value).
+    func strapNotification(characteristic: String) {
+        let key = "char-\(characteristic.lowercased())"
+        keyed(key, .message, perWindow: HelioBreadcrumbBudget.messageLinesPerKey, since: "this endpoint's") {
+            "strap sent a \(characteristic) notification"
+        }
+    }
+
+    // MARK: Plumbing
+
+    /// A rate-limited line: at most one per `key` per 10 minutes, with the count since the key's last
+    /// line (only shown when it's more than this one).
+    private func keyed(_ key: String, _ kind: HelioBreadcrumbBudget.Kind, perWindow: Int? = nil,
+                       since: String = "the last such line", text: () -> String) {
+        let now = clock()
+        var budget = load()
+        if let count = budget.due(key: key, perWindow: perWindow, now: now) {
+            let suffix = kind == .message || count > 1 ? " (\(count) since \(since) last line)" : ""
+            if let line = budget.admit(text() + suffix, kind: kind, now: now) {
+                observability.recordMetricEvent(source: Self.source, detail: line, at: now)
+            }
+        }
+        save(budget)
+    }
+
+    private func record(_ text: String, _ kind: HelioBreadcrumbBudget.Kind) {
+        let now = clock()
+        var budget = load()
+        if let line = budget.admit(text, kind: kind, now: now) {
+            observability.recordMetricEvent(source: Self.source, detail: line, at: now)
+        }
+        save(budget)
+    }
+
+    private func load() -> HelioBreadcrumbBudget {
+        guard let data = defaults.data(forKey: Self.budgetKey),
+              let budget = try? JSONDecoder().decode(HelioBreadcrumbBudget.self, from: data) else { return HelioBreadcrumbBudget() }
+        return budget
+    }
+
+    private func save(_ budget: HelioBreadcrumbBudget) {
+        if let data = try? JSONEncoder().encode(budget) { defaults.set(data, forKey: Self.budgetKey) }
+    }
+}

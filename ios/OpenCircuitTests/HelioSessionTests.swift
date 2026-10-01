@@ -144,6 +144,11 @@ private final class FakeStrapTransport: HelioTransport {
         for n in notifications { inbox.append((n.characteristic, n.bytes, false)) }
     }
 
+    /// A raw notification on a standard characteristic (e.g. `0x2A37`).
+    func push(_ characteristic: ZeppCharacteristic, _ bytes: [UInt8]) {
+        inbox.append((characteristic, bytes, false))
+    }
+
     /// Deliver only the next `count` queued events.
     func drainSteps(_ count: Int) {
         for _ in 0..<count where !inbox.isEmpty {
@@ -225,12 +230,13 @@ final class HelioSessionTests: XCTestCase {
     /// A connected session over `device`, started and drained until it settles.
     private func connect(_ device: FakeZeppDevice, store: LocalStore?, key: String? = keyHex,
                          keyStore: MemoryKeyStore? = nil, findState: HelioFindState? = nil,
-                         autoSync: Bool = true, finished: @escaping (HelioSyncResult) -> Void = { _ in }) -> Rig {
+                         autoSync: Bool = true, finished: @escaping (HelioSyncResult) -> Void = { _ in },
+                         onEvent: @escaping (HelioSessionEvent) -> Void = { _ in }) -> Rig {
         let transport = FakeStrapTransport(device: device)
         let keys = keyStore ?? MemoryKeyStore(key)
         let session = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys,
                                    sink: store.map { HelioStoreSink(store: $0) }, findState: findState ?? HelioFindState(),
-                                   onSyncFinished: { result, _ in finished(result) },
+                                   onSyncFinished: { result, _ in finished(result) }, onEvent: onEvent,
                                    clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: autoSync)
         transport.session = session
         session.start()
@@ -642,6 +648,55 @@ final class HelioSessionTests: XCTestCase {
         XCTAssertEqual(device.fetchStarts.count, startsBefore, "no start before notify is back on")
         rig.transport.drain()
         XCTAssertGreaterThan(device.fetchStarts.count, startsBefore)
+    }
+    // MARK: #233: what the strap sends on its own
+
+    /// Setup and sync replies are replies; the strap's own messages are reported with their endpoint and
+    /// opcode bytes only, and the sleep events as events.
+    func testTheStrapsOwnMessagesAreReportedWithTheirOpcodeOnlyAndRepliesAreNot() async throws {
+        let store = try makeStore()
+        var events: [HelioSessionEvent] = []
+        let rig = connect(makeStrap(), store: store, onEvent: { events.append($0) })
+        XCTAssertEqual(rig.session.phase, .ready)
+        XCTAssertEqual(events, [.syncStarted], "setup, fetch and battery replies are not the strap talking on its own")
+        events = []
+        clock = clock.addingTimeInterval(60)
+        let device = rig.transport.device
+        rig.transport.push(device.unsolicited(endpoint: 0x001D, [0x06, 0x01]))
+        rig.transport.push(device.unsolicited(endpoint: 0x0015, [0x03]))
+        rig.transport.push(device.unsolicited(endpoint: 0x0016, [0x07, 0x10, 0x27, 0x00, 0x00]))
+        rig.transport.push(device.unsolicited(endpoint: 0x0029, [0x04, 0x00, 0x57]))
+        rig.transport.push(device.unsolicited(endpoint: 0x001D, [0x06, 0x00]))
+        rig.transport.drain()
+        XCTAssertEqual(events, [
+            .strapMessage(endpoint: 0x001D, opcode: [0x06, 0x01]), .fellAsleep,
+            .strapMessage(endpoint: 0x0015, opcode: [0x03]),
+            .strapMessage(endpoint: 0x0016, opcode: [0x07]),
+            .strapMessage(endpoint: 0x0029, opcode: [0x04]),
+            .strapMessage(endpoint: 0x001D, opcode: [0x06, 0x00]), .wokeUp,
+        ], "a minute after the battery request, a battery message is the strap's own; only opcodes, never values")
+        XCTAssertTrue(rig.session.ready, "nothing the strap sent on its own changed the session")
+    }
+
+    /// A reply on an endpoint this session just sent to is not reported; standard heart rate that
+    /// nothing asked for is (without its bytes), and the stream this app starts is not.
+    func testRepliesAndTheAppsOwnHeartRateStreamAreNotReported() async throws {
+        var events: [HelioSessionEvent] = []
+        let rig = connect(makeStrap(), store: nil, autoSync: false, onEvent: { events.append($0) })
+        XCTAssertEqual(rig.session.phase, .ready)
+        let device = rig.transport.device
+        rig.transport.push(device.unsolicited(endpoint: 0x0029, [0x04, 0x00, 0x57]))
+        rig.transport.drain()
+        XCTAssertEqual(events, [], "within the reply window of the setup's battery request")
+        clock = clock.addingTimeInterval(60)
+        rig.transport.push(.heartRateMeasurement, [0x00, 60])
+        rig.transport.drain()
+        XCTAssertEqual(events, [.strapNotification(.heartRateMeasurement)])
+        events = []
+        rig.session.startLiveHeartRate()
+        rig.transport.push(.heartRateMeasurement, [0x00, 61])
+        rig.transport.drain()
+        XCTAssertEqual(events, [], "the stream the app started")
     }
 }
 
