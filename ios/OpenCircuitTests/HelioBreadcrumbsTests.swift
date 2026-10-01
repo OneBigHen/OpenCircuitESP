@@ -71,14 +71,14 @@ final class HelioBreadcrumbsTests: XCTestCase {
         let breadcrumbs = HelioBreadcrumbs(observability: observability, defaults: suite, clock: { now })
         for minute in 0..<(10 * 60) {
             now = t0.addingTimeInterval(TimeInterval(minute * 60))
-            breadcrumbs.strapMessage(endpoint: 0x0015, opcode: [0x03])
+            breadcrumbs.strapMessage(endpoint: 0x0015, opcode: [0x03], length: 1)
             if minute % 30 == 0 {
                 breadcrumbs.linkDown(errorCode: 6, expected: false, standingConnectArmed: true)
                 breadcrumbs.linkUp("connected", appActive: false)
             }
         }
         now = t0.addingTimeInterval(10 * 3600 + 30)
-        breadcrumbs.strapMessage(endpoint: 0x001D, opcode: [0x06, 0x00])
+        breadcrumbs.strapMessage(endpoint: 0x001D, opcode: [0x06, 0x00], length: 2)
         breadcrumbs.syncStarted(wake: .strapEvent, detail: "kind=cbWake")
         let lines = observability.metricRecords().filter { $0.source == HelioBreadcrumbs.source }
         XCTAssertLessThanOrEqual(lines.count, HelioBreadcrumbBudget.linesPerWindow)
@@ -95,16 +95,16 @@ final class HelioBreadcrumbsTests: XCTestCase {
     func testLinesCarryStatesAndCodesNeverIdentifiersOrValues() {
         let observability = ObservabilityStore(suite)
         let breadcrumbs = HelioBreadcrumbs(observability: observability, defaults: suite, clock: { self.t0 })
-        breadcrumbs.linkDown(errorCode: 7, expected: false, standingConnectArmed: true)
+        breadcrumbs.linkDown(errorCode: 7, expected: false, standingConnectArmed: true, upFor: 3 * 3600 + 12 * 60 + 40)
         breadcrumbs.linkDown(errorCode: nil, expected: true, standingConnectArmed: false)
         breadcrumbs.restored(peripheralStates: ["connected", "disconnected"], savedStrapState: "connected")
-        breadcrumbs.strapMessage(endpoint: 0x001D, opcode: [0x06, 0x00])
+        breadcrumbs.strapMessage(endpoint: 0x001D, opcode: [0x06, 0x00], length: 2)
         breadcrumbs.strapNotification(characteristic: "heartRateMeasurement")
         XCTAssertEqual(observability.metricRecords().map(\.detail), [
-            "link down (unexpected, CBError 7); standing connect armed",
+            "link down (unexpected, CBError 7, after 3h12m up); standing connect armed",
             "link down (we dropped it, no error); standing connect NOT armed",
             "restoration relaunch: 2 peripheral(s) [connected,disconnected]; saved strap connected",
-            "strap sent 0x001d 06 00 (1 since this endpoint's last line)",
+            "strap sent 0x001d 06 00 (2 B) (1 since this endpoint's last line)",
             "strap sent a heartRateMeasurement notification (1 since this endpoint's last line)",
         ])
         XCTAssertTrue(observability.metricRecords().allSatisfy { $0.source == "helio-link" })
@@ -114,9 +114,9 @@ final class HelioBreadcrumbsTests: XCTestCase {
     func testTheRateLimitIsPersistedAcrossInstances() {
         let observability = ObservabilityStore(suite)
         HelioBreadcrumbs(observability: observability, defaults: suite, clock: { self.t0 })
-            .strapMessage(endpoint: 0x0015, opcode: [0x03])
+            .strapMessage(endpoint: 0x0015, opcode: [0x03], length: 1)
         HelioBreadcrumbs(observability: observability, defaults: suite, clock: { self.t0.addingTimeInterval(60) })
-            .strapMessage(endpoint: 0x0015, opcode: [0x03])
+            .strapMessage(endpoint: 0x0015, opcode: [0x03], length: 1)
         XCTAssertEqual(observability.metricRecords().count, 1)
     }
 

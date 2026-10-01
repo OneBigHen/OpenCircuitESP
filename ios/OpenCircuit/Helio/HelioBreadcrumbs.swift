@@ -162,20 +162,27 @@ final class HelioBreadcrumbs {
         keyed("link-up", .link) { "link up (\(how); app \(appActive ? "in front" : "in background"))" }
     }
 
-    /// The link went down. `errorCode` is CoreBluetooth's (`CBError.Code`) on an unexpected drop; nil
-    /// when we dropped it ourselves.
-    func linkDown(errorCode: Int?, expected: Bool, standingConnectArmed: Bool) {
+    /// The link went down. `errorCode` is CoreBluetooth's (`CBError.Code`), nil without an error;
+    /// `upFor` is how long the link had been up (does the strap drop a silent link? §16.3).
+    func linkDown(errorCode: Int?, expected: Bool, standingConnectArmed: Bool, upFor: TimeInterval? = nil) {
         let error = errorCode.map { "CBError \($0)" } ?? "no error"
         // Separate keys: a drop we made can't hide an unexpected one inside the same 10 minutes.
         keyed(expected ? "link-down-expected" : "link-down-unexpected", .link) {
-            "link down (\(expected ? "we dropped it" : "unexpected"), \(error)); standing connect \(standingConnectArmed ? "armed" : "NOT armed")"
+            "link down (\(expected ? "we dropped it" : "unexpected"), \(error)\(Self.upFor(upFor))); standing connect \(standingConnectArmed ? "armed" : "NOT armed")"
         }
     }
 
-    func bluetoothOff(standingConnectArmed: Bool) {
+    func bluetoothOff(standingConnectArmed: Bool, upFor: TimeInterval? = nil) {
         keyed("bluetooth-off", .link) {
-            "Bluetooth off; the link is gone; reconnect \(standingConnectArmed ? "armed for when it is back on" : "NOT armed")"
+            "Bluetooth off; the link is gone\(Self.upFor(upFor)); reconnect \(standingConnectArmed ? "armed for when it is back on" : "NOT armed")"
         }
+    }
+
+    /// ", after 3h12m up", or nothing.
+    nonisolated static func upFor(_ interval: TimeInterval?) -> String {
+        guard let interval, interval >= 0 else { return "" }
+        let minutes = Int(interval / 60)
+        return ", after \(minutes / 60)h\(String(format: "%02d", minutes % 60))m up"
     }
 
     /// A state-restoration relaunch: what came back, as states only (never an identifier).
@@ -200,12 +207,14 @@ final class HelioBreadcrumbs {
 
     // MARK: Strap messages
 
-    /// A message the strap sent on its own, outside a request this app started: the endpoint and the
-    /// opcode bytes only, rate-limited per endpoint.
-    func strapMessage(endpoint: UInt16, opcode: [UInt8]) {
+    /// A message the strap sent on its own, outside a request this app started: the endpoint, the
+    /// opcode bytes and the length only (§16.5), rate-limited per endpoint. Its time is when it arrived.
+    func strapMessage(endpoint: UInt16, opcode: [UInt8], length: Int) {
         let key = String(format: "0x%04x", endpoint)
         let bytes = opcode.map { String(format: "%02x", $0) }.joined(separator: " ")
-        keyed(key, .message, perWindow: HelioBreadcrumbBudget.messageLinesPerKey, since: "this endpoint's") { "strap sent \(key) \(bytes)" }
+        keyed(key, .message, perWindow: HelioBreadcrumbBudget.messageLinesPerKey, since: "this endpoint's") {
+            "strap sent \(key) \(bytes) (\(length) B)"
+        }
     }
 
     /// A notification on a standard characteristic nothing asked for (no bytes at all: it can be a

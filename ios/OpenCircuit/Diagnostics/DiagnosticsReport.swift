@@ -247,8 +247,9 @@ enum DiagnosticsReport {
         let rows = records.filter { $0.source == HelioBreadcrumbs.source }.sorted { $0.date > $1.date }
         guard !rows.isEmpty else { return nil }
         var s = ["# Strap link and wakes (latest \(min(rows.count, strapLinkLimit)) of \(rows.count))",
-                 "  link up/down, restoration relaunches, messages the strap sent on its own (endpoint and"
-                 + " opcode only), and why each strap sync ran"]
+                 "  link up/down, restoration relaunches, messages the strap sent on its own (endpoint,"
+                 + " opcode and length only), and why each strap sync ran. A message's time is when it"
+                 + " arrived: the strap may have sent it earlier (ZEPP_PROTOCOL.md §16.2, queuing unknown)"]
         for r in rows.prefix(strapLinkLimit) {
             s.append("  \(format(r.date))  \(r.detail)")
         }

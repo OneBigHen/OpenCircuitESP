@@ -69,12 +69,13 @@ struct HelioSyncResult: Equatable {
 enum HelioSessionEvent: Equatable {
     /// A history sync started on this session.
     case syncStarted
-    /// A message the strap sent on its own, outside any request this session started: its endpoint
-    /// and opcode bytes only (never the payload, which can hold health data).
-    case strapMessage(endpoint: UInt16, opcode: [UInt8])
+    /// A message the strap sent on its own, outside any request this session started: its endpoint,
+    /// opcode bytes and length only (never the payload, which can hold health data; §16.5).
+    case strapMessage(endpoint: UInt16, opcode: [UInt8], length: Int)
     /// A notification on a standard characteristic that nothing on this connection asked for.
     case strapNotification(ZeppCharacteristic)
-    /// The strap's sleep events on `0x001D` (§7.1 🟡): `06 01` fell asleep, `06 00` woke up.
+    /// The strap's sleep events on `0x001D` (§16.2 rows 1–2): `06 01` fell asleep, `06 00` woke up. 🔴
+    /// whether the Helio sends them at all, so they are only ever a hint (§16.4). They carry no time.
     case fellAsleep
     case wokeUp
 }
@@ -150,6 +151,8 @@ final class HelioSession: WearableSession {
     /// How long after this session last sent to an endpoint a message there still counts as a reply
     /// rather than something the strap sent on its own (twice a setup step's timeout).
     static let replyWindow: TimeInterval = 10
+    /// The workout endpoint (§16.2 rows 8–9). The app sends nothing there; what arrives is logged.
+    static let workoutEndpoint: UInt16 = 0x0019
     /// How long auth may take before the strap is reported busy.
     static let authTimeout: TimeInterval = 10
     /// How long a setup step waits for its reply (the same 5 s HelioVerify and ZeppKit use).
@@ -246,6 +249,14 @@ final class HelioSession: WearableSession {
     /// its own (#233).
     @ObservationIgnored private var lastSentAt: [UInt16: Date] = [:]
     @ObservationIgnored private var liveHRStoppedAt: Date?
+    /// Keyless standard heart rate is subscribed (Tier 0, decision 7): only with the app in front.
+    @ObservationIgnored private var tierZeroSubscribed = false
+    /// The app is in the background: nothing is subscribed for display (§16.5), so Tier 0 waits.
+    @ObservationIgnored var appInBackground = false
+    /// §16.5's fail-safes, each sent at most once per connection.
+    @ObservationIgnored private var heartRateFailSafeSent = false
+    @ObservationIgnored private var realtimeStepsOffSent = false
+    @ObservationIgnored private var chunkedWriteSubscribed = false
 
     private enum NotifyPurpose { case auth, fetch }
 
@@ -361,7 +372,10 @@ final class HelioSession: WearableSession {
         phase = .authenticating
         notifyPurpose = .auth
         pendingNotify = [.chunkedRead]
-        if transport.canNotify(.chunkedWrite) { pendingNotify.insert(.chunkedWrite) }
+        if transport.canNotify(.chunkedWrite) {
+            pendingNotify.insert(.chunkedWrite)
+            chunkedWriteSubscribed = true
+        }
         authDeadline = clock().addingTimeInterval(Self.authTimeout)
         for characteristic in pendingNotify { transport.setNotify(characteristic, enabled: true) }
     }
@@ -411,8 +425,11 @@ final class HelioSession: WearableSession {
         case .heartRateMeasurement:
             // With a key, `0x2A37` comes only from the stream this app starts (§7.1). Anything else
             // (a Heart Rate Push setting, say) is the strap talking on its own: noted, never shown.
-            if isAuthenticated, !liveHeartRateRunning, !within(Self.replyWindow, of: liveHRStoppedAt, now: now) {
+            if !(liveHeartRateRunning || (tierZeroSubscribed && !isAuthenticated)),
+               !within(Self.replyWindow, of: liveHRStoppedAt, now: now) {
                 onEvent(.strapNotification(.heartRateMeasurement))
+                heartRateFailSafe()
+                return
             }
             guard let measurement = ZeppHeartRateMeasurement.parse(bytes),
                   LiveHR.validBPM.contains(measurement.beatsPerMinute) else { return }
@@ -474,10 +491,22 @@ final class HelioSession: WearableSession {
         perform(actions)
     }
 
-    /// Decision 18: backgrounding stops a find; the live heart-rate stream stops too.
+    /// Decision 18: backgrounding stops a find; the live heart-rate stream stops too, and so does the
+    /// keyless Tier 0 subscription (§16.5: none for background work).
     func appDidEnterBackground() {
+        appInBackground = true
         stopFind()
         stopLiveHeartRate()
+        stopTierZero()
+    }
+
+    /// Back in front: a keyless session listens for standard heart rate again (decision 7).
+    func appDidBecomeActive() {
+        appInBackground = false
+        switch phase {
+        case .keyless, .keyRejected, .strapBusy: startTierZero()
+        case .starting, .authenticating, .settingUp, .ready, .syncing, .unsupported: break
+        }
     }
 
     // MARK: Time
@@ -555,6 +584,14 @@ final class HelioSession: WearableSession {
             case .authenticated:
                 authDeadline = nil
                 helioLog.notice("helio: authenticated")
+                // §16.1/§16.5: the strap reaches an idle link through `…0017` only. `…0016` was
+                // subscribed for auth (as HelioVerify proved it on a real strap) and carries nothing
+                // but the strap's chunk acks to our own writes, which are not used; it's turned off for
+                // the rest of the connection.
+                if chunkedWriteSubscribed {
+                    chunkedWriteSubscribed = false
+                    transport?.setNotify(.chunkedWrite, enabled: false)
+                }
                 beginSetup()
             case .authenticationFailed(.wrongAuthKey):
                 // Decision 7: "key rejected", never a retry loop. The mark stays until the key changes.
@@ -692,7 +729,7 @@ final class HelioSession: WearableSession {
     private func handleMessage(_ message: ZeppMessage) {
         let payload = message.payload
         if isStrapInitiated(message) {
-            onEvent(.strapMessage(endpoint: message.endpoint, opcode: Self.opcode(of: message)))
+            onEvent(.strapMessage(endpoint: message.endpoint, opcode: Self.opcode(of: message), length: payload.count))
         }
         switch message.endpoint {
         case ZeppEndpoint.servicesList:
@@ -745,17 +782,38 @@ final class HelioSession: WearableSession {
             alarmEditor = editor
             performAlarm(out)
         case ZeppEndpoint.connection:
-            // §3.5: a ping `03` is answered `04` on the same endpoint.
-            if payload == [0x03] { send(ZeppEndpoint.connection, [0x04]) }
+            switch payload.first {
+            case 0x03?:
+                // §3.5, §16.5: a ping `03` is answered `04` on the same endpoint, the one unsolicited
+                // message that needs a reply. An unanswered ping may be what drops an idle link.
+                send(ZeppEndpoint.connection, [0x04])
+            case 0x02? where payload.count >= 3:
+                // §16.2 row 13, §16.5: an MTU announce (u16 LE = MTU − 3). Chunk at the smaller of it
+                // and what CoreBluetooth allows; nothing is sent back.
+                let announced = Int(payload[1]) | Int(payload[2]) << 8
+                if announced >= 20, var link {
+                    link.setMaxWriteLength(min(announced, transport?.maxWriteLength ?? announced))
+                    self.link = link
+                }
+            default:
+                break
+            }
         case ZeppEndpoint.heartRate:
-            // SPEC-GAP: §7.1 says the strap pushes its sleep events on this endpoint, not whether it
-            // does so without the realtime heart-rate stream running. The app never starts that stream
-            // (or any other persistent strap setting) to get them (decision 33: no manufactured
-            // wakes); if the events never come, this costs nothing.
+            // §16.2 rows 1–2, §16.4: the sleep events arrive on the `…0017` subscription every session
+            // has; nothing is written to the strap to get them (decision 33). 🔴 whether the Helio
+            // sends them, so they are an opportunistic hint and nothing depends on them. They carry
+            // no time: the connection fetches history, and only the night selection writes sleep.
             switch ZeppHeartRateControl.parse(payload) {
             case .fellAsleep?: onEvent(.fellAsleep)
             case .wokeUp?: onEvent(.wokeUp)
             case .controlReply?, nil: break
+            }
+        case ZeppEndpoint.realtimeSteps where payload.first == 0x07:
+            // §16.2 row 5, §16.5: realtime steps flowing unasked means someone else turned the
+            // persistent stream on. `05 00` once undoes that and records nothing. Never `05 01`.
+            if !realtimeStepsOffSent {
+                realtimeStepsOffSent = true
+                send(ZeppEndpoint.realtimeSteps, [0x05, 0x00])
             }
         case ZeppEndpoint.activityFetch:
             // Path B replies (§6.1). The app drives Path A, so this only arrives if the strap answers there.
@@ -893,13 +951,16 @@ final class HelioSession: WearableSession {
 
     // MARK: What the strap sends on its own (#233)
 
-    /// A message this session didn't ask for: one of the strap-to-phone messages the spec lists, or
-    /// anything on an endpoint this session hasn't sent to in the last `replyWindow`.
+    /// A message this session didn't ask for: one of the strap-to-phone messages the spec lists (§16.2),
+    /// or anything on an endpoint this session hasn't sent to in the last `replyWindow`. Its time is its
+    /// arrival, which is "at or before now" for the strap: whether it queues messages is unknown.
     private func isStrapInitiated(_ message: ZeppMessage) -> Bool {
         let first = message.payload.first
         switch message.endpoint {
-        case ZeppEndpoint.heartRate where first == 0x06: return true                     // sleep events, §7.1
-        case ZeppEndpoint.connection where first == 0x03: return true                    // ping, §3.5
+        case ZeppEndpoint.heartRate where first == 0x06: return true                     // sleep events, §16.2
+        case ZeppEndpoint.connection where first == 0x03 || first == 0x02: return true   // ping, MTU, §16.2
+        case ZeppEndpoint.realtimeSteps where first == 0x07: return true                 // steps, §16.2 row 5
+        case Self.workoutEndpoint where first == 0x20 || first == 0x11: return true      // workout, §16.2 rows 8–9
         case ZeppEndpoint.alarms where first == 0x0f: return true                        // edited on the strap, §12.5
         case ZeppEndpoint.findDevice where [0x07, 0x11, 0x13].contains(first): return true  // §11.3, §11.5
         default: return !within(Self.replyWindow, of: lastSentAt[message.endpoint], now: clock())
@@ -913,6 +974,20 @@ final class HelioSession: WearableSession {
         return Array(message.payload.prefix(isSleepEvent ? 2 : 1))
     }
 
+    /// §16.5: standard heart rate that nothing on this connection asked for. Do what Gadgetbridge does,
+    /// once: `04 00` on `0x001D` (with a key) and unsubscribe. It only stops a stream.
+    private func heartRateFailSafe() {
+        guard !heartRateFailSafeSent else { return }
+        heartRateFailSafeSent = true
+        if isAuthenticated, services?.contains(ZeppEndpoint.heartRate) == true {
+            send(ZeppEndpoint.heartRate, ZeppHeartRateControl.stop)
+        }
+        transport?.setNotify(.heartRateMeasurement, enabled: false)
+    }
+
+    /// The chunk size this connection's link uses (for tests of the MTU announce).
+    var chunkWriteLength: Int? { link?.transport.maxWriteLength }
+
     private func within(_ window: TimeInterval, of time: Date?, now: Date) -> Bool {
         guard let time else { return false }
         return now >= time && now.timeIntervalSince(time) <= window
@@ -922,8 +997,17 @@ final class HelioSession: WearableSession {
 
     /// Tier 0 (decision 7): listen to standard heart rate without auth. Shown only if it arrives.
     private func startTierZero() {
-        guard let transport, transport.has(.heartRateMeasurement), transport.canNotify(.heartRateMeasurement) else { return }
+        // §16.5: nothing is subscribed for display while the app is in the background.
+        guard !appInBackground, !tierZeroSubscribed, let transport, transport.has(.heartRateMeasurement),
+              transport.canNotify(.heartRateMeasurement) else { return }
+        tierZeroSubscribed = true
         transport.setNotify(.heartRateMeasurement, enabled: true)
+    }
+
+    private func stopTierZero() {
+        guard tierZeroSubscribed else { return }
+        tierZeroSubscribed = false
+        transport?.setNotify(.heartRateMeasurement, enabled: false)
     }
 
     /// The authenticated stream: start, then `04 02` every second, stop after `duration`.

@@ -669,12 +669,12 @@ final class HelioSessionTests: XCTestCase {
         rig.transport.push(device.unsolicited(endpoint: 0x001D, [0x06, 0x00]))
         rig.transport.drain()
         XCTAssertEqual(events, [
-            .strapMessage(endpoint: 0x001D, opcode: [0x06, 0x01]), .fellAsleep,
-            .strapMessage(endpoint: 0x0015, opcode: [0x03]),
-            .strapMessage(endpoint: 0x0016, opcode: [0x07]),
-            .strapMessage(endpoint: 0x0029, opcode: [0x04]),
-            .strapMessage(endpoint: 0x001D, opcode: [0x06, 0x00]), .wokeUp,
-        ], "a minute after the battery request, a battery message is the strap's own; only opcodes, never values")
+            .strapMessage(endpoint: 0x001D, opcode: [0x06, 0x01], length: 2), .fellAsleep,
+            .strapMessage(endpoint: 0x0015, opcode: [0x03], length: 1),
+            .strapMessage(endpoint: 0x0016, opcode: [0x07], length: 5),
+            .strapMessage(endpoint: 0x0029, opcode: [0x04], length: 3),
+            .strapMessage(endpoint: 0x001D, opcode: [0x06, 0x00], length: 2), .wokeUp,
+        ], "a minute after the battery request, a battery message is the strap's own; only opcodes and lengths, never values")
         XCTAssertTrue(rig.session.ready, "nothing the strap sent on its own changed the session")
     }
 
@@ -689,14 +689,106 @@ final class HelioSessionTests: XCTestCase {
         rig.transport.drain()
         XCTAssertEqual(events, [], "within the reply window of the setup's battery request")
         clock = clock.addingTimeInterval(60)
+        var sent: [ZeppWrite] { rig.transport.writes.filter { $0.characteristic == .chunkedWrite } }
+        let writesBefore = sent.count
+        rig.transport.push(.heartRateMeasurement, [0x00, 60])
         rig.transport.push(.heartRateMeasurement, [0x00, 60])
         rig.transport.drain()
-        XCTAssertEqual(events, [.strapNotification(.heartRateMeasurement)])
+        XCTAssertEqual(events, [.strapNotification(.heartRateMeasurement), .strapNotification(.heartRateMeasurement)])
+        // §16.5's fail-safe, once: `04 00` on 0x001D and unsubscribe; nothing shown.
+        XCTAssertEqual(sent.count, writesBefore + 1)
+        XCTAssertEqual(device.receivedEndpoints.last, 0x001D)
+        XCTAssertEqual(Array(sent.last?.bytes.suffix(2) ?? []), [0x04, 0x00])
+        XCTAssertEqual(rig.transport.notifyChanges.last?.0, .heartRateMeasurement)
+        XCTAssertEqual(rig.transport.notifyChanges.last?.1, false)
+        XCTAssertNil(rig.session.liveHR, "an unasked frame isn't shown")
         events = []
         rig.session.startLiveHeartRate()
         rig.transport.push(.heartRateMeasurement, [0x00, 61])
         rig.transport.drain()
         XCTAssertEqual(events, [], "the stream the app started")
+        XCTAssertEqual(rig.session.liveHR, 61)
+    }
+
+    /// §16.5's dispatch: the ping is answered `04`; an MTU announce sets the chunk size (the smaller of
+    /// it and CoreBluetooth's); realtime steps flowing unasked get `05 00` once (never `05 01`); an
+    /// unknown endpoint or opcode gets no reply at all.
+    func testTheStrapsOwnMessagesGetOnlyTheRepliesSection16Allows() async throws {
+        let strap = makeStrap()
+        strap.services.append((0x0015, 0))   // the real strap lists the connection endpoint plaintext (§3.5)
+        let rig = connect(strap, store: nil, autoSync: false)
+        XCTAssertEqual(rig.session.phase, .ready)
+        let device = rig.transport.device
+        // Messages to the strap (on `…0016`); chunk acks on `…0017` are the transport's and allowed.
+        var sent: [ZeppWrite] { rig.transport.writes.filter { $0.characteristic == .chunkedWrite } }
+        clock = clock.addingTimeInterval(60)
+
+        var writes = sent.count
+        rig.transport.push(device.unsolicited(endpoint: 0x0015, [0x03]))
+        rig.transport.drain()
+        XCTAssertEqual(sent.count, writes + 1)
+        XCTAssertEqual(device.receivedEndpoints.last, 0x0015)
+        XCTAssertEqual(sent.last?.bytes.last, 0x04, "the ping's answer")
+
+        XCTAssertEqual(rig.session.chunkWriteLength, 244)
+        writes = sent.count
+        rig.transport.push(device.unsolicited(endpoint: 0x0015, [0x02, 0x64, 0x00]))   // MTU − 3 = 100
+        rig.transport.drain()
+        XCTAssertEqual(rig.session.chunkWriteLength, 100)
+        rig.transport.push(device.unsolicited(endpoint: 0x0015, [0x02, 0xf4, 0x01]))   // 500: CoreBluetooth's 244 wins
+        rig.transport.drain()
+        XCTAssertEqual(rig.session.chunkWriteLength, 244)
+        XCTAssertEqual(sent.count, writes, "an MTU announce gets no reply")
+
+        rig.transport.push(device.unsolicited(endpoint: 0x0016, [0x07, 0x10, 0x27, 0x00, 0x00]))
+        rig.transport.push(device.unsolicited(endpoint: 0x0016, [0x07, 0x11, 0x27, 0x00, 0x00]))
+        rig.transport.drain()
+        XCTAssertEqual(sent.count, writes + 1, "05 00 once")
+        XCTAssertEqual(device.receivedEndpoints.last, 0x0016)
+        XCTAssertEqual(Array(sent.last?.bytes.suffix(2) ?? []), [0x05, 0x00])
+        XCTAssertFalse(sent.contains { Array($0.bytes.suffix(2)) == [0x05, 0x01] }, "never 05 01")
+
+        writes = sent.count
+        rig.transport.push(device.unsolicited(endpoint: 0x0031, [0x07, 1, 2, 3]))
+        rig.transport.push(device.unsolicited(endpoint: 0x001D, [0x06, 0x07]))
+        rig.transport.push(device.unsolicited(endpoint: 0x0019, [0x11, 0x01]))
+        rig.transport.drain()
+        XCTAssertEqual(sent.count, writes, "nothing is sent back for an unknown or workout message")
+        XCTAssertTrue(rig.session.ready)
+    }
+
+    /// §16.1/§16.5: `…0017` is subscribed before auth and stays on; `…0016`, subscribed for auth, is
+    /// turned off once auth is done. A fresh connection re-runs auth with a fresh session.
+    func testOnlyTheChunkedReadSubscriptionOutlivesAuth() async throws {
+        let rig = connect(makeStrap(), store: nil, autoSync: false)
+        XCTAssertEqual(rig.session.phase, .ready)
+        let changes = rig.transport.notifyChanges.filter { $0.0 == .chunkedRead || $0.0 == .chunkedWrite }
+        let lines = changes.map { "\($0.0.rawValue) \($0.1)" }
+        XCTAssertEqual(Set(lines.prefix(2)), ["chunkedRead true", "chunkedWrite true"], "both subscribed for auth")
+        XCTAssertEqual(Array(lines.dropFirst(2)), ["chunkedWrite false"], "only …0016 is turned off; …0017 stays on")
+        let again = connect(makeStrap(), store: nil, autoSync: false)
+        XCTAssertEqual(again.session.phase, .ready)
+        XCTAssertTrue(again.transport.device.authenticated, "auth re-run on the new connection")
+    }
+
+    /// §16.5: nothing is subscribed for display in the background. A keyless session started in the
+    /// background doesn't listen for standard heart rate until the app is in front.
+    func testAKeylessSessionListensForHeartRateOnlyInFront() async throws {
+        let transport = FakeStrapTransport(device: makeStrap())
+        let session = HelioSession(transport: transport, identityID: strapID, key: nil, keyStore: MemoryKeyStore(nil),
+                                   sink: nil, findState: HelioFindState(), clock: { [unowned self] in self.clock },
+                                   autoTick: false)
+        transport.session = session
+        session.appInBackground = true
+        session.start()
+        transport.drain()
+        XCTAssertEqual(session.phase, .keyless)
+        XCTAssertFalse(transport.notifyChanges.contains { $0.0 == .heartRateMeasurement })
+        session.appDidBecomeActive()
+        XCTAssertEqual(transport.notifyChanges.last?.0, .heartRateMeasurement)
+        XCTAssertEqual(transport.notifyChanges.last?.1, true)
+        session.appDidEnterBackground()
+        XCTAssertEqual(transport.notifyChanges.last?.1, false)
     }
 }
 

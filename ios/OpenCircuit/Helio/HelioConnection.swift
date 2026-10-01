@@ -60,6 +60,9 @@ final class HelioConnection: NSObject {
     @ObservationIgnored private var scanTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var rssiTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundObserver: NSObjectProtocol?
+    @ObservationIgnored private var activeObserver: NSObjectProtocol?
+    /// When the current link came up, for the link-down breadcrumb (does the strap drop a silent link?).
+    @ObservationIgnored private var linkUpAt: Date?
     /// Background runs in progress (`HelioBackgroundLink`, review-225 S2): only serialises runs.
     @ObservationIgnored var activeBackgroundRuns = 0
     /// True only while a background run's watch loop runs (review-225b S-A). `makeSession` reads it:
@@ -98,6 +101,11 @@ final class HelioConnection: NSObject {
                 self?.session?.appDidEnterBackground()
                 self?.stopRSSIUpdates()
             }
+        }
+        activeObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.session?.appDidBecomeActive() }
         }
     }
 
@@ -296,6 +304,7 @@ final class HelioConnection: NSObject {
             onEvent: { [weak self] event in self?.handle(event) },
             autoSyncOnConnect: syncOnConnect)
         session.backgroundRunOwnsSyncs = backgroundRunAdoptsNewSessions
+        session.appInBackground = !Self.appIsActive
         self.session = session
         session.start()
     }
@@ -384,13 +393,15 @@ extension HelioConnection {
             // A background run logs its own sync's wake; this is every other sync.
             guard session?.backgroundRunOwnsSyncs != true else { return }
             breadcrumbs.syncStarted(wake: Self.appIsActive ? .foreground : (restoredThisLaunch ? .restoration : .reconnect))
-        case .strapMessage(let endpoint, let opcode):
-            breadcrumbs.strapMessage(endpoint: endpoint, opcode: opcode)
+        case .strapMessage(let endpoint, let opcode, let length):
+            breadcrumbs.strapMessage(endpoint: endpoint, opcode: opcode, length: length)
         case .strapNotification(let characteristic):
             breadcrumbs.strapNotification(characteristic: characteristic.rawValue)
         case .wokeUp:
-            // Decision 33: the strap's own "the night is over". Not a finalization: the night still
-            // waits for its settle margin (decision 31 is about Sleep Focus only).
+            // Decision 33, §16.4: an opportunistic hint (🔴 whether the Helio sends it). It carries no
+            // time, so nothing is written from it: the catch-up fetches history and the night selection
+            // decides. Not a finalization either: the night still waits for its settle margin (decision
+            // 31 is about Sleep Focus only).
             Self.wakeHandler(.strapEvent)
         case .fellAsleep:
             break   // a breadcrumb only (the strap-message line above)
@@ -522,7 +533,9 @@ extension HelioConnection: CBCentralManagerDelegate {
                     characteristics = [:]
                     writeQueue = []
                     if wantConnection { pendingAction = .reconnect }
-                    breadcrumbs.bluetoothOff(standingConnectArmed: wantConnection)
+                    breadcrumbs.bluetoothOff(standingConnectArmed: wantConnection,
+                                             upFor: linkUpAt.map { Date().timeIntervalSince($0) })
+                    linkUpAt = nil
                 }
                 state = .bluetoothOff
             case .unauthorized:
@@ -560,6 +573,7 @@ extension HelioConnection: CBCentralManagerDelegate {
         guard let peripheral, wantConnection, central?.state == .poweredOn else { return }
         if peripheral.state == .connected {
             state = .connected
+            linkUpAt = Date()
             breadcrumbs.linkUp("restored, already connected", appActive: Self.appIsActive)
             if session == nil { characteristics = [:]; peripheral.discoverServices(nil) }
             linkCameBackInBackground()
@@ -589,6 +603,7 @@ extension HelioConnection: CBCentralManagerDelegate {
         MainActor.assumeIsolated {
             guard peripheral === self.peripheral else { return }
             state = .connected
+            linkUpAt = Date()
             breadcrumbs.linkUp(restoredThisLaunch ? "connected after a restoration relaunch" : "connected",
                                appActive: Self.appIsActive)
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
@@ -642,8 +657,10 @@ extension HelioConnection: CBCentralManagerDelegate {
             } else {
                 state = .idle
             }
-            breadcrumbs.linkDown(errorCode: expected ? nil : Self.errorCode(error), expected: expected,
-                                 standingConnectArmed: state == .connecting)
+            breadcrumbs.linkDown(errorCode: Self.errorCode(error), expected: expected,
+                                 standingConnectArmed: state == .connecting,
+                                 upFor: linkUpAt.map { Date().timeIntervalSince($0) })
+            linkUpAt = nil
         }
     }
 }

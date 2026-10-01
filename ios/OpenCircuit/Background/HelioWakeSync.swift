@@ -5,14 +5,19 @@ import UIKit
 // Decision 33 (#233): the strap wakes the app; BGTasks are the backstop. Build 59's first night showed
 // why: iOS granted the BGTasks only when it predicted the app would be opened, which is when they stop
 // mattering. With the authenticated link kept up in the background (B.5) and a standing connect armed
-// whenever it drops, three things can wake a suspended app, and each runs one bounded catch-up sync:
-//   • the strap's woke-up event (`06 00` on `0x001D`), delivered as a CoreBluetooth notification;
-//   • the link coming back (a reconnect, or a state-restoration relaunch), after `reconnectCatchUpAfter`
-//     without a completed sync;
-//   • HealthKit delivering new iPhone steps (`HelioHealthWake`), for strap users who turned it on.
+// whenever it drops, these can wake a suspended app, and each runs at most one bounded catch-up sync:
+//   • the link coming back (a pending connect completing, or a state-restoration relaunch), after
+//     `reconnectCatchUpAfter` without a completed sync. This is the main strap-side wake
+//     (ZEPP_PROTOCOL.md §16.3–§16.4: no strap message is a dependable wake source);
+//   • HealthKit delivering new iPhone steps (`HelioHealthWake`), for strap users who turned it on: the
+//     only wake that doesn't depend on the strap;
+//   • the strap's woke-up event (`06 00` on `0x001D`), an opportunistic hint only (§16.4: 🔴 whether
+//     the Helio sends it). Nothing depends on it, and it carries no time: the catch-up fetches history
+//     and only the night selection writes sleep.
 // A catch-up is a `HelioBackgroundSyncService` run (the BGTask's budget, `03 09` acks and teardown, and
-// the Health flush) under a `beginBackgroundTask` assertion. Nothing here makes the strap talk: no
-// realtime stream, no strap setting, no keep-alive traffic.
+// the Health flush) under a `beginBackgroundTask` assertion. Every reconnect re-runs auth and setup
+// with a fresh session (§4–§5, §9). Nothing here makes the strap talk: no realtime stream, no strap
+// setting, no keep-alive traffic.
 
 /// Decision 33's rules for when a wake syncs, pure so they test without CoreBluetooth or UIKit.
 enum HelioWakePolicy {
