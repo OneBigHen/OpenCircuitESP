@@ -960,6 +960,8 @@ private final class FakeBackgroundLink: HelioBackgroundLink {
     var activeBackgroundRuns = 0
     var backgroundRunAdoptsNewSessions = false
     var pendingNightsFinalization: Date?
+    var activeRun: HelioActiveRun?
+    var handOver: HelioHandOver?
     private(set) var session: HelioSession?
     private(set) var transport: FakeStrapTransport?
     private(set) var connects = 0
@@ -1686,7 +1688,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
                             nightsFinalized: self.focusEnded(at: focusEnd))
         }.value
         let first = await a.value
-        XCTAssertEqual(focusRun.ending, .anotherRunActive)
+        XCTAssertEqual(focusRun.ending, .coalesced(into: .processing), "#233: it leaves its request at once")
         XCTAssertEqual(first.ending, .handedToApp)
         let session = try XCTUnwrap(link.session)
         XCTAssertTrue(session.syncing)
@@ -1814,8 +1816,9 @@ final class HelioBackgroundSyncTests: XCTestCase {
             grace: base.grace, appIsActive: base.appIsActive)
     }
 
-    /// Leak path (a): the Focus run gives up, then iOS expires the run it was waiting for (no flush, so
-    /// the request is never taken). An unrelated app-refresh run hours later must flush normally.
+    /// Leak path (a): the Focus run coalesces into the processing run (#233; it used to wait and give
+    /// up), then iOS expires that run (no flush, so the request is never taken). An unrelated
+    /// app-refresh run hours later must flush normally.
     func testAFinalizationLeftForARunThatExpiresDoesNotReachALaterRun() async throws {
         let store = try makeStore()
         let device = makeStrap()
@@ -1829,7 +1832,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
         let focusRun = await Task { @MainActor in
             await focus.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: self.clock)
         }.value
-        XCTAssertEqual(focusRun.ending, .anotherRunActive)
+        XCTAssertEqual(focusRun.ending, .coalesced(into: .processing))
         a.cancel()   // iOS expires the processing task
         let first = await a.value
         XCTAssertEqual(first.ending, .expired)
@@ -1865,7 +1868,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
             await focus.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: self.clock)
         }.value
         let first = await a.value
-        XCTAssertEqual(focusRun.ending, .anotherRunActive)
+        XCTAssertEqual(focusRun.ending, .coalesced(into: .processing))
         XCTAssertEqual(first.ending, .strapBusy)
         XCTAssertNil(link.pendingNightsFinalization, "cleared when the run it was left for returned")
         // Hours later, a new launch: the strap answers again.
@@ -1878,33 +1881,30 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(flushes.map(\.finalized), [false], "an app-refresh run hours later keeps the quiet margin")
     }
 
-    /// Leak path (c): the Focus run gives up while the run holding the link is already inside its
-    /// Health flush (it took the link's request when it built the flush call, before the save).
-    /// Deterministic: the save advances the fake clock past the waiter's deadline, and only it does.
+    /// Leak path (c): the Focus run arrives while the run holding the link is already inside its
+    /// Health flush (it took the link's request when it built the flush call, before the save). Since
+    /// #233 it coalesces into that run at once; its request must still not reach a later run.
     func testAFinalizationLeftDuringTheActiveRunsFlushDoesNotReachALaterRun() async throws {
         let store = try makeStore()
         let device = makeStrap()
         let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
         var flushes: [FlushCall] = []
-        var slowed = false
+        let focus = waitingService(link, store: store, flushes: { flushes.append($0) })
+        var focusRun: HelioBackgroundRun?
+        var started = false
         let processing = leakService(link, store: store, flushes: { flushes.append($0) }, appActive: { false },
                                      pause: { link.transport?.drain() },
                                      duringFlush: { [unowned self] in
-                                         guard !slowed else { return }
-                                         slowed = true
-                                         // A slow Health save: 40 s pass while the Focus run waits.
-                                         for _ in 0..<40 { self.clock = self.clock.addingTimeInterval(1); await Task.yield() }
+                                         guard !started else { return }
+                                         started = true
+                                         // A slow Health save, and the Focus wake arrives during it.
+                                         self.clock = self.clock.addingTimeInterval(5)
+                                         focusRun = await focus.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout,
+                                                                    nightsFinalized: self.clock)
                                      })
-        let focus = waitingService(link, store: store, flushes: { flushes.append($0) })
-        let a = Task { @MainActor in await processing.run(kind: .processing, timeout: RingBackgroundSyncService.processingTimeout) }
-        for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
-        let b = Task { @MainActor in
-            await focus.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: self.clock)
-        }
-        let first = await a.value
-        let focusRun = await b.value
+        let first = await processing.run(kind: .processing, timeout: RingBackgroundSyncService.processingTimeout)
         XCTAssertEqual(first.ending, .synced)
-        XCTAssertEqual(focusRun.ending, .anotherRunActive)
+        XCTAssertEqual(focusRun?.ending, .coalesced(into: .processing), "its sync finished: its flush is the one flush")
         XCTAssertEqual(flushes.map(\.finalized), [false], "the request came after the active run's flush call")
         XCTAssertNil(link.pendingNightsFinalization, "cleared when the run it was left for returned")
         clock = clock.addingTimeInterval(6 * 3600)
@@ -1925,8 +1925,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
         let a = Task { @MainActor in await processing.run(kind: .processing, timeout: 3600) }
         for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
         let b = Task { @MainActor in await focus.run(kind: .sleepFocus, timeout: 3600, nightsFinalized: self.clock) }
-        for _ in 0..<20 { await Task.yield() }
-        b.cancel()   // iOS expires the Focus intent while it waits
+        b.cancel()   // iOS expires the Focus intent before it gets its first look at the link
         let focusRun = await b.value
         XCTAssertEqual(focusRun.ending, .expired)
         XCTAssertNil(link.pendingNightsFinalization, "an expired waiter leaves nothing behind")
@@ -1935,13 +1934,14 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(flushes.map(\.finalized), [false], "the active run's flush isn't finalized by it")
     }
 
-    // MARK: review-225 S2: overlapping runs take turns
+    // MARK: review-225 S2: overlapping runs take turns; #233 item 3: they coalesce
 
-    /// The reviewer's probe (`testReview225TwoConcurrentRunsOnOneLinkBothFlushTheSameSync`), turned
-    /// into a regression test: the Sleep Focus wake and a BGTask run the strap's drain at once. They
-    /// used to adopt the same sync and both flush it; now the later one waits, then runs its own
-    /// cheap sync, so every sync is flushed exactly once.
-    func testTwoOverlappingRunsOnOneLinkFlushEachSyncOnce() async throws {
+    /// The reviewer's probe (`testReview225TwoConcurrentRunsOnOneLinkBothFlushTheSameSync`), as a
+    /// regression test: the Sleep Focus wake and a BGTask run the strap's drain at once. They used to
+    /// adopt the same sync and both flush it (review-225 S2); then the later one waited and ran a second
+    /// sync; since #233, with budgets alike, the later one coalesces at once. One sync, flushed once,
+    /// with the Focus run's finalization whichever run holds the strap, and neither task fails.
+    func testTwoOverlappingRunsOnOneLinkSyncAndFlushOnce() async throws {
         let store = try makeStore()
         let device = makeStrap()
         let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
@@ -1953,19 +1953,27 @@ final class HelioBackgroundSyncTests: XCTestCase {
         async let a = focus.run(kind: .sleepFocus, timeout: 3600, nightsFinalized: self.clock)
         async let b = refresh.run(kind: .processing, timeout: 3600)
         let (first, second) = await (a, b)
-        XCTAssertEqual(first.ending, .synced)
-        XCTAssertEqual(second.ending, .synced)
+        let endings = [first.ending, second.ending]
+        XCTAssertEqual(endings.filter { $0 == .synced }.count, 1)
+        XCTAssertEqual(endings.filter(\.isCoalesced).count, 1)
+        XCTAssertTrue(first.success && second.success, "nothing is recorded as a failure")
         XCTAssertEqual(link.connects, 1, "one link")
         XCTAssertEqual(Set(device.fetchAcks), [0x09])
-        let syncs = try XCTUnwrap(link.session?.syncsFinished)
-        XCTAssertEqual(syncs, 2, "the second run waited, then ran its own sync")
-        XCTAssertEqual(flushes.map(\.syncAtFlush), [1, 2], "one sync, one flush of that sync")
+        XCTAssertEqual(link.session?.syncsFinished, 1, "one sync")
+        XCTAssertEqual(flushes.map(\.syncAtFlush), [1], "one flush of that sync")
+        XCTAssertEqual(flushes.first?.finalized, true, "the Focus run's finalization reached the one flush")
+        XCTAssertEqual(flushes.first?.nights, 1)
         XCTAssertEqual(link.activeBackgroundRuns, 0, "neither run's exit cleared the other's mark early")
-        XCTAssertEqual(ObservabilityStore(defaults).records().filter { $0.detail?.hasPrefix("helio strap: synced") == true }.count, 2)
+        XCTAssertNil(link.activeRun)
+        XCTAssertNil(link.pendingNightsFinalization)
+        let records = ObservabilityStore(defaults).records()
+        XCTAssertEqual(records.filter { $0.detail?.hasPrefix("helio strap: synced") == true }.count, 1)
+        XCTAssertEqual(records.filter { $0.detail?.hasPrefix("helio strap: coalesced into the") == true }.count, 1)
+        XCTAssertTrue(records.allSatisfy(\.success))
     }
 
-    /// Review-225 S2's side effect: when the Sleep Focus run overlaps a BGTask run, its
-    /// `nightsFinalized: self.clock` still reaches Health with a night, whichever run goes first.
+    /// Review-225 S2's side effect, kept under #233: when the Sleep Focus run overlaps a BGTask run, its
+    /// "the night is over" still reaches Health with the night, whichever run goes first.
     func testTheSleepFocusRunStillFinalizesItsNightWhenItOverlapsABGTaskRun() async throws {
         let store = try makeStore()
         let device = makeStrap()
@@ -1976,13 +1984,145 @@ final class HelioBackgroundSyncTests: XCTestCase {
         async let a = refresh.run(kind: .appRefresh, timeout: 3600)
         async let b = focus.run(kind: .sleepFocus, timeout: 3600, nightsFinalized: self.clock)
         let (bgTask, sleepFocus) = await (a, b)
-        XCTAssertEqual(bgTask.ending, .synced)
-        XCTAssertEqual(sleepFocus.ending, .synced)
-        XCTAssertEqual(flushes.count, 2)
-        XCTAssertEqual(Set(flushes.map(\.finalized)), [true, false], "each run flushes with its own setting")
-        let finalized = try XCTUnwrap(flushes.first { $0.finalized })
-        XCTAssertEqual(finalized.nights, 1, "the re-delivered night is in the Focus run's finalized flush")
-        XCTAssertNotEqual(flushes[0].syncAtFlush, flushes[1].syncAtFlush, "the two flushes never share a sync")
+        XCTAssertEqual([bgTask.ending, sleepFocus.ending].filter { $0 == .synced }.count, 1)
+        XCTAssertEqual(flushes.count, 1)
+        XCTAssertEqual(flushes.first?.finalized, true)
+        XCTAssertEqual(flushes.first?.nights, 1, "the night is in the finalized flush")
+    }
+
+    /// The run under `kind` started now, with its start and return on the shared fake clock.
+    private func timedRun(_ service: HelioBackgroundSyncService, kind: TaskRecord.Kind, timeout: TimeInterval)
+        -> Task<(run: HelioBackgroundRun, seconds: TimeInterval), Never> {
+        Task { @MainActor [unowned self] in
+            let start = self.clock
+            let run = await service.run(kind: kind, timeout: timeout)
+            return (run, self.clock.timeIntervalSince(start))
+        }
+    }
+
+    /// #233 item 3, build 59's morning: iOS grants the processing and app-refresh tasks in the same
+    /// second. Processing first: the refresh task coalesces into it and completes at once; one sync,
+    /// and nothing is recorded as a failure.
+    func testBothTasksGrantedTogetherProcessingFirstGiveOneSync() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let processing = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        let refresh = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        let a = timedRun(processing, kind: .processing, timeout: RingBackgroundSyncService.processingTimeout)
+        for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
+        let b = timedRun(refresh, kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        let second = await b.value
+        let first = await a.value
+        XCTAssertEqual(second.run.ending, .coalesced(into: .processing))
+        XCTAssertLessThanOrEqual(second.seconds, 5, "the second task completes within 5 s")
+        XCTAssertEqual(second.run.detail, "helio strap: coalesced into the processing run")
+        XCTAssertEqual(first.run.ending, .synced)
+        XCTAssertEqual(link.session?.syncsFinished, 1, "one sync")
+        XCTAssertEqual(flushes.count, 1)
+        XCTAssertTrue(ObservabilityStore(defaults).records().allSatisfy(\.success), "nothing recorded as a failure")
+        XCTAssertTrue(ObservabilityStore(defaults).metricRecords().contains {
+            $0.source == "bgphase" && $0.detail.hasPrefix("device=helio kind=appRefresh ending=coalesced(processing)")
+        })
+    }
+
+    /// Refresh first: the processing task's larger budget takes the sync over. The refresh task hands
+    /// it over at its next turn (nothing torn down, nothing sent) and completes within 5 s; the
+    /// processing run finishes that one sync and flushes it once.
+    func testBothTasksGrantedTogetherRefreshFirstHandTheSyncToTheLargerBudget() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let refresh = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        let processing = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        let a = timedRun(refresh, kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
+        let b = timedRun(processing, kind: .processing, timeout: RingBackgroundSyncService.processingTimeout)
+        let first = await a.value
+        let second = await b.value
+        XCTAssertEqual(first.run.ending, .handedOver(to: .processing))
+        XCTAssertLessThanOrEqual(first.seconds, 5, "the refresh task completes within 5 s")
+        XCTAssertEqual(first.run.detail, "helio strap: handed its sync to the processing run (larger budget)")
+        XCTAssertFalse(first.run.disconnected)
+        XCTAssertEqual(second.run.ending, .synced)
+        XCTAssertEqual(link.connects, 1, "the processing run adopted the refresh run's link")
+        XCTAssertEqual(link.disconnects, 0)
+        XCTAssertEqual(link.session?.syncsFinished, 1, "one sync")
+        XCTAssertEqual(flushes.map(\.syncAtFlush), [1], "flushed once, by the processing run")
+        XCTAssertEqual(link.hookFlushes, 0, "the handed-over sync stayed a run's")
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+        XCTAssertTrue(ObservabilityStore(defaults).records().allSatisfy(\.success), "nothing recorded as a failure")
+        XCTAssertNil(link.handOver)
+        XCTAssertNil(link.activeRun)
+    }
+
+    /// The take-over mid-sync: the refresh run is already fetching when the processing run arrives. The
+    /// sync in flight is handed over, not restarted: the processing run flushes exactly that sync, and
+    /// a Sleep Focus finalization the refresh run held goes with it.
+    func testATakeOverMidSyncFlushesTheSyncInFlightOnce() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        let focus = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        let processing = service(link, store: store, flushes: { flushes.append($0) }, pause: { link.transport?.drainSteps(1) })
+        let focusEnd = clock
+        let a = Task { @MainActor in
+            await focus.run(kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: focusEnd)
+        }
+        for _ in 0..<5000 where link.session?.syncing != true { await Task.yield() }
+        XCTAssertEqual(link.session?.syncing, true)
+        let b = Task { @MainActor in await processing.run(kind: .processing, timeout: RingBackgroundSyncService.processingTimeout) }
+        let first = await a.value
+        let second = await b.value
+        XCTAssertEqual(first.ending, .handedOver(to: .processing))
+        XCTAssertEqual(second.ending, .synced)
+        XCTAssertEqual(link.session?.syncsFinished, 1, "the sync in flight, not a new one")
+        XCTAssertEqual(flushes.count, 1)
+        XCTAssertEqual(flushes.first?.syncAtFlush, 1)
+        XCTAssertEqual(flushes.first?.focusEndedAt, focusEnd, "the Focus run's finalization went with its sync")
+        XCTAssertEqual(link.hookFlushes, 0)
+        XCTAssertNil(link.pendingNightsFinalization, "cleared when the run that took it over returned")
+    }
+
+    /// A take-over asked for by a run that iOS then expires, before the active run's next turn, is
+    /// withdrawn: the active run carries on and syncs. (The active run is held in its pause while the
+    /// waiter asks and expires, so the order is fixed.)
+    func testATakeOverAskedForByAnExpiredRunIsWithdrawn() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        var flushes: [FlushCall] = []
+        var held = false
+        let refresh = service(link, store: store, flushes: { flushes.append($0) }, pause: {
+            link.transport?.drainSteps(1)
+        })
+        let gated = HelioBackgroundSyncService(
+            link: refresh.link, keyStore: refresh.keyStore, observability: refresh.observability, flush: refresh.flush,
+            now: refresh.now,
+            pause: {
+                for _ in 0..<100_000 where held { await Task.yield() }
+                await refresh.pause()
+            },
+            grace: refresh.grace, appIsActive: refresh.appIsActive)
+        let processing = waitingService(link, store: store, flushes: { flushes.append($0) })
+        let a = Task { @MainActor in await gated.run(kind: .appRefresh, timeout: 3600) }
+        for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
+        held = true
+        let b = Task { @MainActor in await processing.run(kind: .processing, timeout: 7200) }
+        for _ in 0..<2000 where link.activeRun?.handOverTo == nil { await Task.yield() }
+        XCTAssertEqual(link.activeRun?.handOverTo, .processing)
+        b.cancel()
+        let waited = await b.value
+        XCTAssertEqual(waited.ending, .expired)
+        XCTAssertNil(link.activeRun?.handOverTo, "withdrawn")
+        held = false
+        let first = await a.value
+        XCTAssertEqual(first.ending, .synced, "nobody to hand it to: the active run kept its sync")
+        XCTAssertEqual(flushes.count, 1)
+        XCTAssertEqual(link.hookFlushes, 0)
     }
 
     func testAnExpiryDuringTheTeardownGraceSkipsTheFlush() async throws {
@@ -2007,9 +2147,9 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(Set(device.fetchAcks), [0x09])
     }
 
-    /// Review-225b N-a, from the reviewer's real-budget probe: the Sleep Focus run (28 s) waits behind
-    /// a processing run whose sync holds the strap past the Focus run's 20 s window. The Focus run
-    /// gives up, but leaves its finalization for the processing run's flush, which uses it once.
+    /// Review-225b N-a, from the reviewer's real-budget probe: the Sleep Focus run (28 s) arrives while a
+    /// processing run (150 s) holds the strap. Since #233 it coalesces at once (it used to wait out its
+    /// window) and leaves its finalization for the processing run's flush, which uses it once.
     func testAFocusRunThatNeverGetsATurnStillFinalizesTheNightWithRealBudgets() async throws {
         let store = try makeStore()
         let device = makeStrap()
@@ -2026,7 +2166,8 @@ final class HelioBackgroundSyncTests: XCTestCase {
         let bgTask = await a.value
         let sleepFocus = await b.value
         XCTAssertEqual(bgTask.ending, .synced)
-        XCTAssertEqual(sleepFocus.ending, .anotherRunActive)
+        XCTAssertEqual(sleepFocus.ending, .coalesced(into: .processing))
+        XCTAssertTrue(sleepFocus.success, "a coalesced task is not a failure")
         XCTAssertEqual(flushes.count, 1, "only the processing run flushed")
         XCTAssertEqual(flushes.first?.finalized, true, "with the Focus run's finalization")
         XCTAssertEqual(flushes.first?.nights, 1)
@@ -2051,8 +2192,7 @@ final class HelioBackgroundSyncTests: XCTestCase {
         let a = Task { @MainActor in await active.run(kind: .processing, timeout: 3600) }
         for _ in 0..<2000 where link.activeBackgroundRuns == 0 { await Task.yield() }
         let b = Task { @MainActor in await waiting.run(kind: .appRefresh, timeout: 3600) }
-        for _ in 0..<20 { await Task.yield() }
-        b.cancel()
+        b.cancel()   // since #233 a waiter decides at its first look, so iOS expires it before that
         let waited = await b.value
         XCTAssertEqual(waited.ending, .expired)
         XCTAssertFalse(waited.disconnected)

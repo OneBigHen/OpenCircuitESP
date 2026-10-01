@@ -53,6 +53,30 @@ enum SleepFocusFinalization {
     }
 }
 
+/// The run holding the link, as a later run sees it (#233 item 3: coalescing).
+struct HelioActiveRun: Equatable {
+    enum Stage: Equatable {
+        /// In its watch loop: its sync can still be handed over.
+        case watching
+        /// Past it: tearing down or flushing. `synced`: its sync ran to its end.
+        case finishing(synced: Bool)
+    }
+
+    let wake: HelioWake
+    /// When its sync work must stop (its budget minus the flush reserve).
+    let deadline: Date
+    var stage: Stage = .watching
+    /// A later run with a larger budget asked for the sync; the run hands it over at its next turn.
+    var handOverTo: HelioWake?
+}
+
+/// A sync handed from one run to a later one (#233 item 3): the session it runs on and the count of
+/// syncs that session had finished before it, so the run taking over flushes exactly that sync.
+struct HelioHandOver {
+    weak var session: HelioSession?
+    let baseline: Int
+}
+
 /// What the background run needs from the strap's connection: `HelioConnection` in the app, a
 /// simulated strap in the tests.
 @MainActor
@@ -87,6 +111,10 @@ protocol HelioBackgroundLink: AnyObject {
     /// Decision 31 bounds both: whichever flush receives T finalizes only if it starts within 30
     /// minutes of it (`SleepFocusFinalization`). A waiter that iOS expires leaves nothing.
     var pendingNightsFinalization: Date? { get set }
+    /// The run holding the link, while `activeBackgroundRuns` is 1 (#233 item 3).
+    var activeRun: HelioActiveRun? { get set }
+    /// A sync a run handed to a later one, until that run adopts it (#233 item 3).
+    var handOver: HelioHandOver? { get set }
     /// Arm a connect to the saved strap by identifier (no scan). false when there is none.
     func connectForBackground() -> Bool
     /// End the link cleanly and don't reconnect by itself: stop a running find, ack an open round
@@ -120,8 +148,31 @@ struct HelioBackgroundRun: Equatable {
         /// app, whose own post-sync hook flushes and logs it (review-225 S1). Nothing torn down.
         case handedToApp
         /// Another background run held the strap for this run's whole window (review-225 S2). This
-        /// run touched nothing; the other one syncs and flushes.
+        /// run touched nothing; the other one syncs and flushes. Since coalescing (#233) only a run
+        /// waiting behind another one's teardown can end this way.
         case anotherRunActive
+        /// Coalesced (#233 item 3): another run already holds the strap with at least this run's
+        /// budget, so this one's task completed at once and the other syncs and flushes.
+        case coalesced(into: HelioWake)
+        /// Coalesced the other way: a later run with a larger budget took this run's sync over.
+        case handedOver(to: HelioWake)
+
+        /// For the breadcrumb: the case name, with the other run's wake when there is one.
+        var label: String {
+            switch self {
+            case .coalesced(let into): return "coalesced(\(into.rawValue))"
+            case .handedOver(let to): return "handedOver(\(to.rawValue))"
+            default: return "\(self)"
+            }
+        }
+
+        /// One sync for two tasks: the other run does the work, alert passes included.
+        var isCoalesced: Bool {
+            switch self {
+            case .coalesced, .handedOver: return true
+            default: return false
+            }
+        }
     }
 
     var ending: Ending
@@ -138,14 +189,16 @@ struct HelioBackgroundRun: Equatable {
     /// A quiet ending: nothing was fetched and nothing may be written (decision 7).
     var endedQuietly: Bool {
         switch ending {
-        case .noSavedStrap, .keyNeeded, .keyRejected, .strapBusy, .unsupported, .anotherRunActive: return true
+        case .noSavedStrap, .keyNeeded, .keyRejected, .strapBusy, .unsupported, .anotherRunActive,
+             .coalesced, .handedOver: return true
         case .synced, .outOfTime, .expired, .handedToApp: return false
         }
     }
 
-    /// The BGTask success flag: an uninterrupted sync, or anything written to Apple Health.
+    /// The BGTask success flag: an uninterrupted sync, anything written to Apple Health, or one sync
+    /// done for two tasks (#233: a coalesced task is not a failure).
     var success: Bool {
-        (ending == .synced && result?.interrupted == false) || flush?.wroteAnything == true
+        (ending == .synced && result?.interrupted == false) || flush?.wroteAnything == true || ending.isCoalesced
     }
 
     /// What an out-of-time or expired run did to the link, for its log line.
@@ -165,6 +218,8 @@ struct HelioBackgroundRun: Equatable {
         case .expired: head = "iOS ended the task" + teardown
         case .handedToApp: head = "handed to the app"
         case .anotherRunActive: head = "another background run held the strap for this run's whole window; nothing done"
+        case .coalesced(let into): head = "coalesced into the \(into.runName) run"
+        case .handedOver(let to): head = "handed its sync to the \(to.runName) run (larger budget)"
         }
         var parts = ["helio strap: \(head)"]
         if let result {
@@ -177,7 +232,7 @@ struct HelioBackgroundRun: Equatable {
     /// The `bgphase` breadcrumb (B.4), in the ring's shape plus `device=helio`.
     func breadcrumb(kind: TaskRecord.Kind) -> String {
         func ms(_ value: Int?) -> String { value.map { "\($0)ms" } ?? "n/a" }
-        return "device=helio kind=\(kind.rawValue) ending=\(ending) connect=\(ms(connectMS)) sync=\(ms(syncMS))"
+        return "device=helio kind=\(kind.rawValue) ending=\(ending.label) connect=\(ms(connectMS)) sync=\(ms(syncMS))"
             + " flush=\(ms(flushMS)) rounds=\(result?.roundsStored ?? 0) failed=\(result?.roundsFailed ?? 0)"
             + " mirrored=\(flush?.wroteAnything ?? false)"
     }
@@ -192,6 +247,9 @@ struct HelioBackgroundSyncService {
     /// How long the teardown waits for the `03 09` and a find `06` to leave the radio before the
     /// flush (`HelioConnection.disconnect` cancels the link after 0.5 s).
     static let teardownGrace: TimeInterval = 0.6
+    /// A later run takes the active run's sync over only when its deadline is this much later (#233):
+    /// a few seconds aren't worth a hand-over.
+    static let handOverMargin: TimeInterval = 5
 
     let link: any HelioBackgroundLink
     let keyStore: any HelioKeyStoring
@@ -226,16 +284,55 @@ struct HelioBackgroundSyncService {
 
         // Review-225 S2: one run at a time on a link. The Sleep Focus wake and the scheduler's morning
         // refresh can overlap; two runs would adopt the same sync and both flush it (and a
-        // non-finalized flush could win over the Focus run's finalized one). A later run waits, inside
-        // its own budget, then runs normally: a cheap second sync with its own `nightsFinalized`.
+        // non-finalized flush could win over the Focus run's finalized one).
+        //
+        // #233 item 3, decision 33: and no run sits out its window waiting. iOS tends to grant the
+        // refresh and processing tasks together; build 59's refresh run waited out its whole window
+        // while the processing run fought for the strap. A later run decides at once:
+        //   • the active run's deadline is at least as late (within `handOverMargin`): COALESCE. This
+        //     run's task completes now, successfully ("coalesced into the processing run"); the active
+        //     run's sync is the one sync, and a Sleep Focus run leaves its finalization for it (N-a,
+        //     decision 31 bounds it).
+        //   • this run's deadline is later: TAKE IT OVER. The active run hands its sync to this one at
+        //     its next turn (no teardown, nothing sent to the strap) and its task completes; this run
+        //     adopts the session and the sync in progress, with its larger budget.
+        //   • the active run is past its watch loop: if its sync finished, its flush is the one flush,
+        //     so coalesce; if it is tearing down an unfinished sync, wait for it (seconds) and run.
+        // Coalescing rather than waiting is the choice for the smaller budget because nothing is lost:
+        // the strap's data stays on it (acks `03 09`) for the run that holds the link.
         while link.activeBackgroundRuns > 0 {
-            if Task.isCancelled || now() >= syncDeadline {
+            if Task.isCancelled {
+                // Review-225b N-c: an expiry while waiting is an expiry (no alert pass follows), and
+                // review-225c SF-1: a waiter that iOS expired leaves nothing. A take-over it asked for
+                // is withdrawn; one already made goes back to the session, whose own hook flushes it.
+                if link.activeRun?.handOverTo == wake { link.activeRun?.handOverTo = nil }
+                if let handOver = link.handOver {
+                    handOver.session?.backgroundRunOwnsSyncs = false
+                    link.handOver = nil
+                }
+                run.ending = .expired
+                return record(run, kind: kind)
+            }
+            if let active = link.activeRun {
+                switch active.stage {
+                case .watching where syncDeadline > active.deadline.addingTimeInterval(Self.handOverMargin):
+                    if link.activeRun?.handOverTo == nil { link.activeRun?.handOverTo = wake }
+                case .watching, .finishing(synced: true):
+                    if let focusEnd = nightsFinalized {
+                        link.pendingNightsFinalization = SleepFocusFinalization.latest(link.pendingNightsFinalization, focusEnd)
+                    }
+                    run.ending = .coalesced(into: active.wake)
+                    return record(run, kind: kind)
+                case .finishing(synced: false):
+                    break
+                }
+            }
+            if now() >= syncDeadline {
                 // Review-225c SF-1: only a waiter that gave up (not one iOS expired) leaves its request.
-                if let focusEnd = nightsFinalized, !Task.isCancelled {
+                if let focusEnd = nightsFinalized {
                     link.pendingNightsFinalization = SleepFocusFinalization.latest(link.pendingNightsFinalization, focusEnd)
                 }
-                // Review-225b N-c: an expiry while waiting is an expiry (no alert pass follows).
-                run.ending = Task.isCancelled ? .expired : .anotherRunActive
+                run.ending = .anotherRunActive
                 return record(run, kind: kind)
             }
             await pause()
@@ -254,13 +351,18 @@ struct HelioBackgroundSyncService {
         if run.endedQuietly { return record(run, kind: kind) }
 
         link.activeBackgroundRuns += 1
+        link.activeRun = HelioActiveRun(wake: wake, deadline: syncDeadline)
         link.noteBackgroundRunStarted(at: start)
+        var handedOver = false
         defer {
             link.activeBackgroundRuns -= 1
+            link.activeRun = nil
+            if !handedOver { link.handOver = nil }
             // Review-225c SF-1: a waiter's request lives only as long as this run. Unused (this run
             // expired, ended quietly, or was already in its flush), it goes with it, so it can never
-            // finalize an unrelated flush hours later.
-            link.pendingNightsFinalization = nil
+            // finalize an unrelated flush hours later. A run that hands its sync over leaves it (and
+            // its own) for the run taking it over, whose return clears it in turn.
+            if !handedOver { link.pendingNightsFinalization = nil }
         }
         // Review-225b S-A: sessions made from here to the end of the watch loop are this run's. The
         // mark is dropped before anything after the loop awaits (teardown grace, Health flush), so a
@@ -277,12 +379,19 @@ struct HelioBackgroundSyncService {
 
         loop: while true {
             if Task.isCancelled { run.ending = .expired; break }
+            if let to = link.activeRun?.handOverTo { run.ending = .handedOver(to: to); break }
             if let session = link.session, session.isLinkConnected {
                 if session !== watched {
                     // A connection made during this run (its link marked it) counts every sync it
-                    // ran; one that was already up counts only syncs from now on.
+                    // ran; one that was already up counts only syncs from now on; one handed over by
+                    // an earlier run (#233) counts from where that run counted.
                     watched = session
-                    baseline = session.backgroundRunOwnsSyncs ? 0 : session.syncsFinished
+                    if let handOver = link.handOver, handOver.session === session {
+                        baseline = handOver.baseline
+                    } else {
+                        baseline = session.backgroundRunOwnsSyncs ? 0 : session.syncsFinished
+                    }
+                    link.handOver = nil
                     session.backgroundRunOwnsSyncs = true
                     requested = session.syncing || baseline < session.syncsFinished
                     if session.syncing, syncStartedAt == nil { syncStartedAt = now() }
@@ -322,6 +431,7 @@ struct HelioBackgroundSyncService {
             await pause()
         }
         link.backgroundRunAdoptsNewSessions = false
+        link.activeRun?.stage = .finishing(synced: run.ending == .synced)
         if let syncStartedAt, run.ending == .synced { run.syncMS = Self.ms(from: syncStartedAt, to: now()) }
 
         switch run.ending {
@@ -362,8 +472,22 @@ struct HelioBackgroundSyncService {
             // Review-225 N4: iOS may expire the task during that grace; then no flush follows.
             if Task.isCancelled { run.ending = .expired }
             if let watched, watched.syncsFinished > baseline, let result = watched.lastSyncResult { run.result = result }
-        case .handedToApp, .anotherRunActive:
-            // Both return above; neither may touch a link another party is using.
+        case .handedOver:
+            // #233: the later run adopts the session and the sync in flight, which stays a run's
+            // (no hook flush): `handOver` tells it where this run counted from. Nothing is sent to
+            // the strap here.
+            if let watched {
+                link.handOver = HelioHandOver(session: watched, baseline: baseline)
+            } else if let made = link.session {
+                link.handOver = HelioHandOver(session: made, baseline: 0)   // made during this run's loop
+            }
+            if let focusEnd = nightsFinalized {
+                link.pendingNightsFinalization = SleepFocusFinalization.latest(link.pendingNightsFinalization, focusEnd)
+            }
+            handedOver = true
+            return record(run, kind: kind)
+        case .handedToApp, .anotherRunActive, .coalesced:
+            // These return above; none may touch a link another party is using.
             return record(run, kind: kind)
         case .keyNeeded, .keyRejected, .strapBusy, .unsupported, .noSavedStrap:
             // Decision 7: end here, drop the link and leave it down; the next explicit connect retries.

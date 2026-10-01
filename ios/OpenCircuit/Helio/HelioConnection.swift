@@ -73,6 +73,9 @@ final class HelioConnection: NSObject {
     /// A Sleep Focus run's finalization, left when it gave up waiting for the run holding the link
     /// (`HelioBackgroundLink`, review-225b N-a); cleared when that run returns (review-225c SF-1).
     @ObservationIgnored var pendingNightsFinalization: Date?
+    /// The run holding the link and a sync handed between runs (`HelioBackgroundLink`, #233 item 3).
+    @ObservationIgnored var activeRun: HelioActiveRun?
+    @ObservationIgnored var handOver: HelioHandOver?
     /// The link and wake breadcrumbs (#233).
     @ObservationIgnored let breadcrumbs: HelioBreadcrumbs
     /// This process was launched (or relaunched) by CoreBluetooth state restoration.

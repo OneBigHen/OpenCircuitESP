@@ -63,7 +63,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // nothing, so a ring user's launch is unchanged.
         MainActor.assumeIsolated {
             HelioWakeCoordinator.afterRun = { run in
-                guard run.ending != .expired else { return }
+                // A coalesced run's alert passes are the other run's (#233 item 3).
+                guard run.ending != .expired, !run.ending.isCoalesced else { return }
                 await Self.evaluateAlerts()
                 if run.ending == .synced, let store = try? OpenCircuitApp.backgroundStore() {
                     await Self.evaluateBodyAlerts(store: store)
@@ -291,7 +292,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 // container alive, and the container is published for the next site.
                 let store = try OpenCircuitApp.backgroundStore()
                 let run = await HelioBackgroundSyncService.live(store: store).run(kind: kind, timeout: timeout)
-                if run.ending != .expired {
+                // A coalesced task's alert passes are the run holding the strap's (#233 item 3).
+                if run.ending != .expired, !run.ending.isCoalesced {
                     await Self.evaluateAlerts()
                     if run.ending == .synced { await Self.evaluateBodyAlerts(store: store) }
                 }
