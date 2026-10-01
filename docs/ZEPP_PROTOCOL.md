@@ -999,6 +999,11 @@ to connect (phone Bluetooth off) so that every message seen is the strap's.
     arg changed (an empty `40` list, or an arg not in §19.1)? Record the group version, the args
     present with their type codes, and the allowed lists of `40` and `42`. Restore Zepp's original
     setting. Promotes §19.1 and §19.2.
+28. **Strap alerts** (§20). During the idle-link sessions of items 22–23, note the time of every
+    buzz the wearer feels (an alarm, an HR, SpO₂ or relax alert) and check the log for any message
+    within a minute of it. The one alert that needs no setting change and can be provoked: hold an
+    idle link while the strap's battery drains past 20 %; it buzzes there (§13.4). Does anything
+    arrive on `…0017`, `0x2A19` or `…0010`? Promotes §20.1.
 
 ### 10.1 Results from a real strap (2026-09-30)
 
@@ -2232,6 +2237,49 @@ The values and allowed lists are invented. The group version echoed is the one r
 
 ---
 
+## 20. Strap alert events (#230)
+
+The strap evaluates these alerts **on its own** and vibrates without the phone (§13.4):
+
+| Alert | Fires when (Amazfit) | Configured by | Tag / source |
+|---|---|---|---|
+| high / low HR | HR above / below the limit for 10 consecutive minutes **at rest**, not during sleep | HEALTH `02` / `03` (§13.4, §17) | 🟡 `AMZ-M p.10` |
+| low SpO₂ | SpO₂ below the value for 10 minutes in a row, not during sleep; needs all-day SpO₂ | HEALTH `32` (needs `31`) | 🟡 `AMZ-M p.10` |
+| relax reminder | stress above the limit for 10 minutes in a quiet state, not during sleep; needs stress monitoring | HEALTH `14` (needs `13`) | 🟡 `AMZ-M p.11` |
+| inactivity, goal reached | not in Amazfit's Helio documents | HEALTH `41`–`46`, `51` | 🔴 (§13.4) |
+| workout high HR, pace, speed | during a workout only (§18.7) | per workout, unknown path | 🟡 `AMZ-M p.4-5` |
+| low battery (20 %, 10 %, 5 %) | always | none | 🟡 `AMZ-M p.2` |
+
+### 20.1 Does the strap tell the phone?
+
+**No message is known for any of them.** 🔴 (§10 item 28)
+
+| Evidence | Tag / source |
+|---|---|
+| No Zepp OS service in Gadgetbridge handles anything that could be an alert event. The only unsolicited messages it knows are those of §16.2. None of them names an alert, and none carries a threshold, a value or a time. | 🟡 `SVC/HeartRate:67-92`, `SVC/Config:124-146`, the rest of §16.2's sources |
+| Asked by a Helio user whether it could send a phone notification when the strap's sedentary reminder fires, Gadgetbridge's maintainer answered "Unfortunately no, Gadgetbridge is currently not able to do this." | 🟡 `GB#5799` (comment of 2026-02-17) |
+| The pre-Zepp OS device-event list (`…0010`) has no HR, SpO₂ or stress alert event either. Its events are fell asleep, woke up, goal reached `03`, non-wear, buttons, calls, alarms, find phone, silent mode, a 30-minute tick, MTU, workout and music control. | 🟡 `GB/service/devices/huami/HuamiDeviceEvent.java:20-37` |
+| Amazfit describes every one of these alerts as "the device will alert/remind you" and mentions no phone notification. | 🟡 `AMZ-M p.10-11` |
+| HelioCore has no alert code. | 🟡 `HC` (no match) |
+
+The message format therefore can't be given. If the strap does send something, it would arrive as
+a chunked message on `…0017` (§16.1), so the logging rule of §16.5 (endpoint, first byte and
+length of anything unknown) is how it would be found.
+
+### 20.2 What OpenCircuit can do instead (🔴 recommendation)
+
+- **Don't promise "the strap told us".** The phone doesn't know when the strap buzzed.
+- To show the user "your strap probably alerted you", **re-derive the condition from fetched
+  history** with the strap's rule and the threshold read from config. For example: high-HR alert
+  `02` = 120 and ten consecutive activity minutes (§6.5) with HR > 120, no sleep stage and low
+  intensity. Label it as inferred. The same works for low SpO₂ (`0x25` samples) and stress
+  (`0x13` minutes) with the thresholds above. Sleep exclusion uses §6.6 and §21.
+- **Phone-side alerts** need no strap alert at all. While the link is up and live HR runs (§7.1),
+  OpenCircuit can evaluate its own rule and buzz with the find-device pulse (§13.2). That's
+  transient and persistent-setting-free, but only works while the app is running.
+
+---
+
 ## Changelog
 
 - 2026-09-30: first version (zepp-spec agent, #215 Phase 0). All claims 🟡/🔴.
@@ -2263,3 +2311,6 @@ The values and allowed lists are invented. The group version echoed is the one r
 - 2026-10-01: parity addendum, part 4 (zepp-parity-spec agent, #229): §19, workout detection:
   the WORKOUT group args (`40` categories, `41` detection alert, `42` sensitivity), what
   Gadgetbridge exposes for the Helio, the missing on/off arg; worked example M; capture item 27.
+- 2026-10-01: parity addendum, part 5 (zepp-parity-spec agent, #230): §20, strap alert events:
+  no message is known for any strap-side alert; how to infer them from history instead; capture
+  item 28.
