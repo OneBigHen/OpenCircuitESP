@@ -13,7 +13,7 @@
 //      ⇒  VO₂max = 3.5 + (VO₂ − 3.5) × (HRmax − HRrest) / (HR − HRrest)
 //   3. HRmax = the higher of Tanaka's age formula (208 − 0.7 × age; Tanaka H, Monahan KD, Seals DR.
 //      "Age-predicted maximal heart rate revisited." J Am Coll Cardiol 2001;37(1):153–156) and the
-//      highest 1-minute mean heart rate seen in this run. HRrest = the app's nightly resting HR.
+//      highest 1-minute mean heart rate seen in this run. HRrest = the app's daily resting HR.
 //
 // Every refusal is a `SkipReason` the UI states in words. No input is ever defaulted: an unset age
 // or a missing resting HR skips the estimate instead of borrowing a placeholder.
@@ -81,7 +81,7 @@ public enum VO2MaxEstimate {
         public let route: [RoutePoint]
         /// The user's age, nil when they never set it (the app's 35 placeholder is NOT an input).
         public let age: Int?
-        /// The nightly resting HR (bpm), nil when there isn't enough history.
+        /// The daily resting HR (bpm), nil when there isn't enough history.
         public let restingHR: Double?
 
         public init(sport: WorkoutSportType, start: Date, end: Date, heartRate: [HRSample],
@@ -147,7 +147,7 @@ public enum VO2MaxEstimate {
             case .noGPS: return "there was no GPS route for this run."
             case .noHeartRate: return "too few heart-rate readings during the run."
             case .noAge: return "set your age in Profile so a maximum heart rate can be estimated."
-            case .noRestingHR: return "there isn't enough overnight heart rate yet for a resting heart rate (3 nights needed)."
+            case .noRestingHR: return "there isn't enough heart-rate history yet for a resting heart rate (3 days needed)."
             case .noSteadySegment: return "the run had no steady 5-minute stretch (even pace, heart rate and GPS, level or uphill)."
             case .intensityTooLow: return "the steady stretch was too easy (under half your heart-rate reserve) to extrapolate from."
             case .implausible: return "the result fell outside a plausible range, so it was discarded."
@@ -238,12 +238,12 @@ public enum VO2MaxEstimate {
 
     // MARK: Resting HR input
 
-    /// Nights of resting HR needed before the estimate trusts a resting value.
+    /// Days of resting HR needed before the estimate trusts a resting value.
     public static let minRestingDays = 3
 
     /// The resting HR input: the median of the most recent 7 daily resting-HR values on or before
     /// the run's day (`RestingHR.dailyValues`, the series the app already shows). nil below
-    /// `minRestingDays` values. The median keeps one short or disturbed night from moving it.
+    /// `minRestingDays` values. The median keeps one short or disturbed day from moving it.
     public static func restingHR(daily: [RestingHR.DailyValue], runStart: Date,
                                  calendar: Calendar = .current) -> Double? {
         let runDay = calendar.startOfDay(for: runStart)

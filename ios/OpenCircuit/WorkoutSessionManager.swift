@@ -672,7 +672,7 @@ final class WorkoutSessionManager: NSObject {
 
     /// The inputs `VO2MaxEstimate` needs, gathered from this session: the GPS fixes as cumulative
     /// distance (the same running sum as `distanceMeters`), the age only if the user set one (the
-    /// profile's 35 placeholder is not an age), and the nightly resting HR from the stored history
+    /// profile's 35 placeholder is not an age), and the daily resting HR from the stored history
     /// outside this workout's own window.
     private func vo2MaxEstimate(summary: WorkoutSummary, hrSamples: [HRSample],
                                 route: [CLLocation]) -> VO2MaxEstimate.Outcome {

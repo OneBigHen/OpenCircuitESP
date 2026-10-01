@@ -8,7 +8,7 @@ here is computed on the phone from the workout the app recorded:
 
 - the workout's heart-rate series (and its 5-zone breakdown, #75);
 - for outdoor runs, the phone's GPS route (distance, time and, when reliable, altitude);
-- the user's profile (age) and the app's nightly resting heart rate.
+- the user's profile (age) and the app's daily resting heart rate.
 
 Every number is labelled an estimate. When an input is missing the app says what is missing instead
 of filling it in.
@@ -75,6 +75,8 @@ missing value.
 - **No earlier workouts:** if no scored workout ended in the previous 4 weeks, the line says "no
   earlier workouts to compare". The app can't tell four weeks of rest from four weeks before it was
   installed, so it shows no 0 average.
+- **Nothing in the last 35 days:** the line is hidden, so it never reads "0" above a list of older
+  workouts.
 - **Workouts without heart rate** in the last 7 days are counted and named ("1 workout without heart
   rate not counted"), not scored as 0.
 - **No injury-risk claim.** The line compares two numbers. It applies no acute:chronic thresholds
@@ -166,7 +168,7 @@ one person's trend on similar routes. It is not a lab value.
 | no GPS | "there was no GPS route for this run." |
 | no heart rate | "too few heart-rate readings during the run." |
 | no age | "set your age in Profile so a maximum heart rate can be estimated." |
-| no resting HR | "there isn't enough overnight heart rate yet for a resting heart rate (3 nights needed)." |
+| no resting HR | "there isn't enough heart-rate history yet for a resting heart rate (3 days needed)." |
 | no steady segment | "the run had no steady 5-minute stretch (even pace, heart rate and GPS, level or uphill)." |
 | too easy | "the steady stretch was too easy (under half your heart-rate reserve) to extrapolate from." |
 | implausible | "the result fell outside a plausible range, so it was discarded." |

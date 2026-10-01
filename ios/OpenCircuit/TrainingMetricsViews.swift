@@ -168,7 +168,10 @@ struct WeeklyTrainingLoadLine: View {
             let now = Date()
             let age = HealthKitWriter.storedUserProfile().age
             let loads = await WorkoutLoadReader().recentLoads(now: now, age: age)
-            trend = TrainingLoad.weeklyTrend(loads, now: now)
+            // No workout in the last 35 days → no line, rather than "0 · no earlier workouts" above
+            // a list of older workouts (review-237 N1). `content` still renders the clear
+            // placeholder, so this task keeps a view to run on.
+            trend = loads.isEmpty ? nil : TrainingLoad.weeklyTrend(loads, now: now)
         }
     }
 
