@@ -975,6 +975,16 @@ to connect (phone Bluetooth off) so that every message seen is the strap's.
 24. **GATT extras and battery**: does `…0010` exist, and with which properties; does `0x2A19`
     support notify? With the link idle, put the strap on its charger and take it off: does
     anything arrive (on `…0017`, `0x2A19` or `…0010`)? Promotes §16.2 rows 6–7.
+25. **Config writes** (§17). First write down every HEALTH and WORKOUT setting as the Zepp app
+    shows it, and restore them all at the end. Read every listed group with constraints and arg
+    count `00` (`03 01 <group> 00`): record each group's version and the arg codes and type codes
+    present, not their values. Then one ordinary write (e.g. relax reminder `14` on, with stress
+    monitoring `13` already on): record the `06` reply bytes, then re-read. Then three rejection
+    probes, each followed by a re-read: (a) a high-HR alert value (`02`) outside the allowed
+    list; (b) relax reminder on while stress monitoring is off; (c) a write whose version byte is
+    one more than the version read. Record exactly what came back (an ack status, nothing, or a
+    value silently kept). Also record whether HEALTH arg `01` is present and its allowed values.
+    Promotes §17.1, §17.3, §17.4, §17.7 and §17.9.
 
 ### 10.1 Results from a real strap (2026-09-30)
 
@@ -1724,6 +1734,259 @@ them.
 
 ---
 
+## 17. Config writes (#228, #229, #230)
+
+§5.5 gives the config transport and §15.3 a one-line write recommendation. This section makes the
+write path complete: the message, the version echo, the ack, what a rejection may look like, the
+re-read, validation against the strap's constraints, and the dependencies between settings.
+Every write here is **persistent** (§15.1), and some change what the strap records (§5.5).
+
+### 17.1 Channel and groups
+
+| Fact | Tag / source |
+|---|---|
+| Endpoint `0x000A`, **encrypted** on the Helio (and by default). | 🟢 `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `SVC/Config:104,116` |
+| The Helio's config capabilities list groups `00` AGPS, `0b` BLUETOOTH, `08` HEALTH, `09` WORKOUT and `0a` SYSTEM. There is no SOUND & VIBRATION group `03`. | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` |
+| Gadgetbridge sends the capabilities request at session setup, then **reads every listed group it knows**, with constraints, asking for the args it knows in that group. | 🟡 `SVC/Config:148-151,283-307,363-371` |
+| A read with **arg count `00`** asks for every arg in the group. Gadgetbridge sends it only behind a debug switch, because the reply may contain types it can't parse. | 🟡 `SVC/Config:364-367` (this settles the 🔴 on "arg count `00`" in §5.5's read row) |
+| Gadgetbridge offers a setting only if its arg came back in a read reply **with the expected type code**. So a strap that lacks an arg is expected to leave it out of the reply. 🔴 whether the strap omits it silently or answers with an error status. | 🟡 `SVC/Config:1147-1148`, `GB/devices/huami/zeppos/ZeppOsSettingsCustomizer.java:198-205` |
+
+### 17.2 The write message
+
+```
+ +------+-------+---------+------+-------+--------------------------------------+
+ | 0x05 | group | version | 0x00 | count | count × entry (arg, type, value) ... |
+ +------+-------+---------+------+-------+--------------------------------------+
+   [0]    [1]      [2]       [3]    [4]     [5..]
+```
+
+| Field | Meaning | Tag / source |
+|---|---|---|
+| `[0]` = `05` | write ("set") | 🟡 `SVC/Config:110,944` |
+| `[1]` group | one group per message. To change args in two groups, send two messages. | 🟡 `SVC/Config:938-967` |
+| `[2]` version | the group's version. Gadgetbridge puts its own constant here; OpenCircuit echoes the read reply (§17.3) | 🟡 `SVC/Config:946` |
+| `[3]` = `00` | unexplained; always `00` | 🟡 `SVC/Config:947` |
+| `[4]` count | number of entries that follow | 🟡 `SVC/Config:948` |
+| entry | u8 arg code, u8 type code (§5.5), then the **value only**. A write never carries constraint bytes. | 🟡 `SVC/Config:949-954` |
+
+**Value encodings in a write** (little-endian), as Gadgetbridge's setter builds them. 🟡
+`SVC/Config:856-924`
+
+| Type | Code | Bytes written |
+|---|---|---|
+| bool | `0b` | `00` or `01` |
+| byte | `10` | 1 byte |
+| byte list | `11` | u8 n, then n bytes |
+| short | `01` | i16 |
+| int | `03` | i32 |
+| string | `20` | UTF-8, then `00` |
+| string list | `21` | **one** UTF-8 string (the chosen value), then `00` |
+| hh:mm | `30` | u8 hour, u8 minute |
+| short list `02`, timestamp `40`, unbounded int `50` | — | Gadgetbridge has no setter for these: **never write them** |
+
+Gadgetbridge sometimes puts several args of one group in one message (its fitness goals write
+six HEALTH args at once, `SVC/Config:233-263`). OpenCircuit writes **one arg per message**: one
+user action, one arg, one ack (§17.8).
+
+### 17.3 Group-version echo
+
+| Fact | Tag / source |
+|---|---|
+| Gadgetbridge always writes **its own constant** for the group (HEALTH `03`, WORKOUT `01`, SYSTEM `01`, BLUETOOTH `01`, AGPS `01`), never the version the strap reported. | 🟡 `SVC/Config:390-402,946` |
+| Gadgetbridge drops a read reply whose version differs from its constant, except HEALTH, where any version ≤ 3 is accepted and remembered. Since it only offers settings it parsed, it writes a non-HEALTH group only when the strap's version equals its constant. For a HEALTH v1 or v2 strap it writes `03`. 🔴 whether such a strap accepts that. | 🟡 `SVC/Config:318-327`, §9 |
+| Some **type codes depend on the group version**: the HEALTH steps goal (`52`) is a short at version 1 and an int from 2; the weight goal (`54`) is a short below 3 and an int from 3. | 🟡 `SVC/Config:595-625` |
+| The Helio's HEALTH group is version **3**, so for HEALTH the echo and Gadgetbridge's constant agree. The Helio's WORKOUT, SYSTEM, BLUETOOTH and AGPS versions were not recorded. | 🟢 HEALTH `HW:2026-09-30 (hw 0.132.27.2)`; 🔴 the others (§10 item 25) |
+
+**OpenCircuit rule** (🔴 recommendation, stricter than Gadgetbridge):
+- Write byte `[2]` = the version from **the latest read reply for that group in this connection**.
+  No read in this connection → read first.
+- Write each entry's type code **as the read reply reported it for that arg**, never a hard-coded
+  one. If it differs from the type this spec gives for the arg, the setting is unsupported.
+- Write only to group versions whose args this spec describes: HEALTH 1–3, WORKOUT 1, SYSTEM 1.
+  For any other version, show the value read-only.
+
+### 17.4 The ack, and what a rejected write looks like
+
+| Fact | Tag / source |
+|---|---|
+| The strap answers a write with `06 <status>`. Gadgetbridge **only logs** the status; it never checks it and never re-reads. | 🟡 `SVC/Config:111,131-133` |
+| The ack carries no group and no arg, so it can only be matched to a write by order. | 🟡 (layout) |
+| Status `01` = success. | 🔴 by analogy with every other Zepp OS ack in this document; never observed for config on the Helio (§10.1: nothing was written) |
+| **A rejected write is not described by either reference.** Three outcomes are possible: (a) `06` with a status other than `01`; (b) no `06` at all; (c) `06 01`, but the re-read shows the old value. | 🔴 (§10 item 25) |
+| A read reply with a status other than `01` is dropped by Gadgetbridge. | 🟡 `SVC/Config:135-139` |
+
+**OpenCircuit rule** (🔴): allow **one config write in flight** on `0x000A`, and don't interleave
+reads of other groups with it. Wait up to 5 s for `06`. Treat (a), (b) and (c) alike as
+**"the strap did not take the change"**: show the strap's re-read value and an error, and never
+retry by itself. A late `06` that arrives after the timeout is ignored.
+
+### 17.5 Re-read
+
+After the ack (or the timeout), read the same arg again with constraints:
+`03 01 <group> 01 <arg>`. 🔴 recommendation; the read itself is 🟡 (§5.5).
+
+- The entry is present, with the expected type, and holds the written value → success. Refresh
+  the allowed values from the reply's constraints.
+- It holds the old value → rejected (§17.4 c).
+- It is missing, or its type changed → treat the setting as **unsupported for this connection**
+  and hide it (§14).
+- The reply's version differs from the version just written → stop writing to that group for this
+  connection, and re-read the whole group.
+
+### 17.6 Constraint validation
+
+Read with constraints on (`03 01 …`). The constraint layouts are those of §5.5's type table, and
+they sit after the value (§13.4). 🟡 `GB/service/devices/huami/zeppos/services/config/*.java`.
+Gadgetbridge does **not** check a value against them when it writes. It only uses them to build
+its pick lists and min/max fields (`SVC/Config:1246-1282,1302-1440`), so validation is
+OpenCircuit's own rule (🔴):
+
+| Type | Valid write | Notes |
+|---|---|---|
+| bool | `00` or `01` | no constraints are sent |
+| byte | a member of the allowed list | an **empty** allowed list (n = 0) gives no basis for a value: don't write |
+| byte list | every element a member of the allowed list; no duplicates | no count limit is sent; 🔴 whether the strap has one |
+| short / int | min ≤ value ≤ max | |
+| string | UTF-8 length ≤ max length, no `00` inside | 🔴 whether the max length counts the terminator: stay one byte under it |
+| string list | one of the possible values (when the list is non-empty), length ≤ max | |
+| hh:mm | hour 0–23, minute 0–59 | no constraints are sent |
+| short list, timestamp, unbounded int | — | never written (§17.2) |
+
+A value that fails these checks is refused on the phone and never sent (as in §13.4).
+
+### 17.7 Dependencies between settings
+
+| Child setting | Needs | Evidence | Tag |
+|---|---|---|---|
+| relax reminder HEALTH `14` | stress monitoring HEALTH `13` on | Amazfit: the relax reminder can be enabled only after automatic stress monitoring is on (`AMZ-M p.11`). Gadgetbridge greys out the relax switch while stress monitoring is off (`GB-res/xml/devicesettings_heartrate_sleep_alert_activity_stress_spo2.xml:94-108`) | 🟡 |
+| low-SpO₂ alert HEALTH `32` | all-day SpO₂ HEALTH `31` on | Amazfit: the low-SpO₂ alert can be enabled only after automatic SpO₂ is on (`AMZ-M p.10`). Gadgetbridge greys out the threshold while all-day SpO₂ is off (same XML, `:116-132`) | 🟡 |
+| high / low HR alerts HEALTH `02` / `03` | all-day HR at **1 minute or "smart"**, on Zepp OS devices with a display. Gadgetbridge treats a device **without** a display (the Helio) as measuring HR continuously and never greys the alerts out there | `GB/capabilities/HeartRateCapability.java:97-114,144-151`. Amazfit says the Helio measures HR continuously all day (`AMZ-M p.10`) | 🟡 |
+| "activity monitoring" HEALTH `04` and the HR-alert switch | all-day HR not `00` (off) | `HeartRateCapability.java:136-143,161-168` | 🟡 |
+| stress monitoring HEALTH `13` | on these newer devices, **not** on the HR interval | `HeartRateCapability.java:152-155,169-172` | 🟡 |
+| sleep SpO₂ (fetch type `0x26`) | sleep breathing quality HEALTH `12` on | §5.5 | 🟡 |
+| inactivity window and quiet window HEALTH `42`–`46` | inactivity alert HEALTH `41` on | grouped on one screen by Gadgetbridge, with no explicit dependency (`ZeppOsSettingsCustomizer.java:152-158`) | 🔴 |
+| workout detection args WORKOUT `40` / `42` | workout detection on | §19 | 🔴 |
+
+**What the strap does** when a child is set while its parent is off, or when a parent is turned
+off under an enabled child, is in neither reference. Gadgetbridge's dependencies are UI-only: it
+never writes the child when the parent changes, so the child keeps its stored value. 🔴 (§10 item
+25 tests one case.)
+
+**OpenCircuit rule** (🔴):
+- Offer to enable a child only when the parent read **on** in this connection. Otherwise show it
+  as unavailable, with the reason ("turn on stress monitoring first").
+- Never write the parent as a side effect of a child edit. One user action, one arg.
+- When the user turns a parent off, write only the parent. Show the child as inactive while
+  keeping its stored value visible.
+
+### 17.8 Write sequence (🔴 recommendation; replaces §15.3's one-liner)
+
+1. **Preconditions**: authenticated; `0x000A` in the services list; the group listed in this
+   connection's config capabilities; no other config traffic in flight. Don't write during a
+   history fetch: there is no evidence of a conflict, but serialising costs little.
+2. **Read** the arg, and every parent from §17.7, with constraints: `03 01 <group> <n> <args…>`.
+3. **Validate**: the arg is present with the expected type code; the group version is known
+   (§17.3); the new value passes §17.6; the dependencies of §17.7 hold. Any failure → don't send;
+   say why.
+4. **Write** one entry: `05 <group> <version as read> 00 01 <arg> <type as read> <value>`.
+5. **Wait** for `06` (§17.4).
+6. **Re-read** (§17.5) and show the strap's value as the truth.
+7. **Log** the group, arg, old value, new value and the ack status. These are settings, not health
+   data, but they are still personal: keep them on the device.
+
+### 17.9 HEALTH arg `01`: the all-day HR interval byte
+
+| Value | Meaning | Tag / source |
+|---|---|---|
+| `00` | off | 🟡 `SVC/Config:1508-1523`, `GB/capabilities/HeartRateCapability.java:42-53` |
+| `ff` (−1) | "smart" (automatic) | same |
+| `fe` (−2) | continuous | same (Gadgetbridge's interval list has it; written as the signed byte) |
+| `01`–`78` | every N minutes, N = 1–120. Gadgetbridge offers 1, 5, 10, 15, 20, 30, 45 and 60 | same; `SUP:370-386` caps at 120 |
+
+The strap's allowed list (constraints, §17.6) decides what is valid on a given strap. Gadgetbridge
+**hides this setting for display-less devices**, the Helio included, because their HR is always on
+(`ZeppOsSettingsCustomizer.java:266-280`, `GB#5796`, `GB#5804`). 🔴 whether the Helio reports arg
+`01` at all and which values it allows (§10 item 25).
+
+**Gadgetbridge pitfall (don't copy):** its interval-change handler converts seconds to minutes
+with integer division and clamps at 0. "Continuous" (−2 s) therefore becomes `00`, which turns HR
+monitoring **off**. 🟡 `SUP:370-386` with `HeartRateCapability.java:45,134`. Encode `fe`.
+
+### 17.10 Worked example I: all-day HR every 10 minutes (constructed)
+
+The strap's reply and its allowed list are invented for this example. `OC-vec` for the framing.
+
+```
+→ 03 01 08 01 01                              read, constraints on, HEALTH, 1 arg: 01
+← 04 01 08 03 01 01                           ok, HEALTH v3, constraints included, 1 entry
+     01 10 ff 09 00 ff fe 01 05 0a 0f 1e 3c   HR interval: byte, value ff (smart);
+                                              9 allowed: off, smart, continuous, 1, 5, 10, 15, 30, 60 min
+   check: 0x0a (10) is in the allowed list ✓; no dependency
+→ 05 08 03 00 01 01 10 0a                     write HEALTH v3 (echoed), 1 entry: arg 01, byte, 10 min
+← 06 01                                       ack, success
+→ 03 01 08 01 01                              re-read
+← 04 01 08 03 01 01 01 10 0a 09 00 ff fe 01 05 0a 0f 1e 3c     value 0a ✓
+```
+
+The write is encrypted on `0x000A`. Using the session of worked example C, with the connection's
+7th message (handle `0x07`) and sequence number `0x2933d235`: `OC-vec`
+
+| Step | Bytes |
+|---|---|
+| message key = session key XOR `0x07` | `8b 42 69 01 24 95 28 ac 74 c9 06 a7 ca da e9 f8` |
+| `P ‖ S` | `05 08 03 00 01 01 10 0a` `35 d2 33 29` |
+| CRC-32 over those 12 bytes | `0x6e18eeb8` → `b8 ee 18 6e` |
+| padded plaintext (8 + 4 + 4 = 16: no padding) | `05 08 03 00 01 01 10 0a 35 d2 33 29 b8 ee 18 6e` |
+| AES-128-ECB(message key) | `4f 4a df 2a 4a 15 fd 33 64 35 03 94 64 75 56 75` |
+| next sequence number | `0x2933d236` |
+
+```
+MTU 247 (27 B): 03 0f 00 07 00 | 08 00 00 00 | 0a 00 | 4f 4a df 2a 4a 15 fd 33 64 35 03 94 64 75 56 75
+
+MTU 23:  chunk 0 (20 B): 03 09 00 07 00 | 08 00 00 00 | 0a 00 | 4f 4a df 2a 4a 15 fd 33 64
+         chunk 1 (12 B): 03 0e 00 07 01 | 35 03 94 64 75 56 75
+```
+
+### 17.11 Worked example J: all-day SpO₂ on, then the low-SpO₂ alert (constructed)
+
+```
+→ 03 01 08 02 31 32                     read HEALTH args 31 and 32 with constraints
+← 04 01 08 03 01 02
+     31 0b 00                           all-day SpO₂: bool, off
+     32 10 00 04 00 50 55 5a            low-SpO₂ alert: byte, 00 (off); 4 allowed: off, 80, 85, 90 %
+   the user asks for a 90 % alert → refused: needs arg 31 on (§17.7)
+   the user turns all-day SpO₂ on:
+→ 05 08 03 00 01 31 0b 01               write HEALTH v3, arg 31, bool, on
+← 06 01
+→ 03 01 08 02 31 32                     re-read the arg and its child
+← 04 01 08 03 01 02 31 0b 01 32 10 00 04 00 50 55 5a
+   now the 90 % alert may be offered, as a separate user action:
+→ 05 08 03 00 01 32 10 5a               arg 32, byte, 0x5a = 90 (in the allowed list ✓)
+← 06 01
+```
+
+### 17.12 Worked example K: the high-HR alert threshold (constructed)
+
+This complements worked example H (§13.4), which set 120 bpm.
+
+```
+→ 03 01 08 01 02
+← 04 01 08 03 01 01 02 10 78 07 00 64 6e 78 82 8c 96     high HR: 0x78 = 120; allowed off, 100–150 step 10
+   the user picks 125 → refused on the phone: 0x7d is not in the allowed list; nothing is sent
+   the user picks 130:
+→ 05 08 03 00 01 02 10 82               arg 02, byte, 0x82 = 130 ✓
+← 06 02                                 (a constructed non-01 status: §17.4 (a))
+   → treated as rejected: re-read
+→ 03 01 08 01 02
+← 04 01 08 03 01 01 02 10 78 07 00 64 6e 78 82 8c 96     still 120 → show "the strap kept 120 bpm"
+   to turn the alert off: 05 08 03 00 01 02 10 00
+```
+
+No dependency applies on the Helio (§17.7: display-less, HR always on). On a Zepp OS device with
+a display, first check that HEALTH arg `01` reads `01` or `ff`.
+
+---
+
 ## Changelog
 
 - 2026-09-30: first version (zepp-spec agent, #215 Phase 0). All claims 🟡/🔴.
@@ -1744,3 +2007,6 @@ them.
   on its own, the subscriptions Gadgetbridge holds, idle links and iOS wake sources; endpoint
   `0x0019` added to §3.5; capture items 22–24 in §10. Existing sections are unchanged. All new
   claims are 🟡/🔴 except those already confirmed in §10.1.
+- 2026-10-01: parity addendum, part 2 (zepp-parity-spec agent, #228 #229 #230): §17, config
+  writes: message, version echo, ack, rejected writes, re-read, constraint validation, setting
+  dependencies; worked examples I–K; capture item 25.
