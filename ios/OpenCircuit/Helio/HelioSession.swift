@@ -208,6 +208,9 @@ final class HelioSession: WearableSession {
     /// Syncs that ended on this connection, finished or interrupted (`lastSyncResult` is the latest).
     /// The background run waits on it (#215 phase 4).
     private(set) var syncsFinished = 0
+    /// The sync whose body-alert pass was claimed (`StrapSyncAlertPass`, review-236 S1). On the session,
+    /// so a new session (a reconnect) starts unclaimed (review-225f SF-1).
+    @ObservationIgnored var alertPassClaimedSync: Int?
     /// Set by a background run while it owns this connection's syncs (`HelioSyncResult.endedInBackgroundRun`).
     @ObservationIgnored var backgroundRunOwnsSyncs = false
     /// Set by a Sleep Focus run that hands its sync to the app (review-225b S-B): the time T that Focus
