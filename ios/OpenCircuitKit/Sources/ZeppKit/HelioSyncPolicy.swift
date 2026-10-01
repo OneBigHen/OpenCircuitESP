@@ -61,6 +61,7 @@ extension ZeppMetricMapping {
     /// Samples for the LOCAL store from one parsed round: `samples(from:)` (the Apple-Health-clean
     /// mapping) plus the strap's HRV as `.hrvSDNN`, which is stored and shown in the app but kept out
     /// of Apple Health by `HelioHealthPolicy.writesHRV` (decision 14). An HRV of 0 ms is no reading.
+    /// The strap's all-day stress becomes `.stress` (`stressSamples`), which has no Health type at all.
     ///
     /// Steps and skin temperature are NOT here: steps go to the step ledger as additive per-minute
     /// deltas (decision 16) and temperature only through `HelioSkinTemperatureGate` (decision 12).
@@ -72,7 +73,21 @@ extension ZeppMetricMapping {
                     : nil
             }
         }
+        if case .autoStress = parsed.records { return stressSamples(from: parsed) }
         return samples(from: parsed).filter { $0.kind != .steps && $0.kind != .temperature }
+    }
+
+    /// The all-day stress minutes of an `.autoStress` round as `.stress` samples (0–100), one per
+    /// minute at the minute's own time (#239). A byte above 100 is the strap's "no reading" (`ff`,
+    /// ZEPP_PROTOCOL.md §6.5 `0x13`) and is skipped, never stored as a value. Empty for any other type.
+    ///
+    /// In the app only (decision 15): `.stress` is in no Health-mirrored kind list and
+    /// `HealthKitWriter.quantityType(for: .stress)` is nil.
+    public static func stressSamples(from parsed: ZeppParsedRecords) -> [QuantitySample] {
+        guard case .autoStress(let minutes) = parsed.records else { return [] }
+        return minutes.compactMap { minute in
+            minute.rawLevel <= 100 ? QuantitySample(kind: .stress, start: minute.time, value: Double(minute.rawLevel)) : nil
+        }
     }
 
     /// The per-minute step counts of an activity round, each spanning its own minute (decision 16:
@@ -397,6 +412,37 @@ public enum HelioFetchPlan {
         let clamped = min(next, floorToMinute(now))
         guard let previous else { return clamped }
         return max(previous, clamped)
+    }
+
+    // MARK: One-time stress backfill (#239)
+
+    /// How far back the one-time stress backfill reaches. Build 59 fetched the all-day stress
+    /// (`0x13`) on every sync but kept only its latest value, while the type's watermark advanced, so
+    /// no stress history was stored. Moving that watermark back once refetches the last week, so the
+    /// day chart starts with it instead of empty.
+    ///
+    /// SPEC-GAP: how much stress history the strap itself still holds is not documented (§6.4 says
+    /// nothing about retention). The app always acked `03 09` (keep on strap, decision 8), so nothing
+    /// was released; if the strap has rotated older minutes out, those rounds just come back short.
+    public static let stressBackfillLookback: TimeInterval = 7 * 86_400
+
+    /// The stress watermark the one-time backfill moves to, or nil when it must not move.
+    ///
+    /// - `done` (the backfill already ran for this strap): nil, ever after.
+    /// - No watermark: nil. The type's first fetch already reaches `firstSyncLookback` back.
+    /// - Otherwise the floored minute of `now − stressBackfillLookback`, but never before `notBefore`
+    ///   (decision 28: the strap's current ownership start, rounded up to its minute) and never later
+    ///   than the watermark it replaces: the watermark only ever moves BACK. nil when that leaves
+    ///   nothing to move.
+    ///
+    /// `plan(cursors:now:notBefore:)` bounds every start by `notBefore` again, so even a watermark
+    /// stored before this rule existed cannot reach time the ring owned.
+    public static func stressBackfillCursor(current: Date?, done: Bool, now: Date, notBefore: Date?) -> Date? {
+        guard !done, let current else { return nil }
+        var target = floorToMinute(now.addingTimeInterval(-stressBackfillLookback))
+        // Rounded UP to the minute, so the target never lies even seconds before the ownership start.
+        if let notBefore { target = max(target, Date(timeIntervalSince1970: (notBefore.timeIntervalSince1970 / 60).rounded(.up) * 60)) }
+        return target < current ? target : nil
     }
 
     /// How far back a temperature minute may still be waiting for its night: a night's session is
