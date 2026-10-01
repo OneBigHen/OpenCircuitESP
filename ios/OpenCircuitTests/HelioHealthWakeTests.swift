@@ -15,7 +15,7 @@ private final class FakeStepDelivery: StepDeliveryControlling {
     var enableSucceeds = true
     var onUpdate: (@MainActor (_ completion: @escaping @Sendable () -> Void) -> Void)?
 
-    func requestStepReadAccess() async -> Bool { requests += 1; return true }
+    func requestHealthAccess() async -> Bool { requests += 1; return true }
     func startObserving(_ onUpdate: @escaping @MainActor (_ completion: @escaping @Sendable () -> Void) -> Void) {
         starts += 1
         self.onUpdate = onUpdate
@@ -83,7 +83,8 @@ final class HelioHealthWakeTests: XCTestCase {
         XCTAssertTrue(defaults.bool(forKey: HelioHealthWake.deliveryOnKey))
     }
 
-    /// The explicit action asks once, then observes; turning it off stops the query and the delivery.
+    /// The explicit action runs the app's one Health request once (it already reads step count), then
+    /// observes; turning it off stops the query and the delivery.
     func testTheToggleAsksOnceThenObservesAndTurningItOffStopsEverything() async {
         let fake = FakeStepDelivery()
         let wake = make(fake)

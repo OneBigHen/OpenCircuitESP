@@ -9,16 +9,23 @@ import HealthKit
 // path (HealthKit backs off, then stops delivering, to an app that doesn't).
 //
 // An entitlement (`com.apple.developer.healthkit.background-delivery`), not a background mode, so
-// decision 26 holds. Strap only: ring-only users never construct this or touch HealthKit for it. The
-// read permission is asked for only from an explicit action on the strap's device screen.
+// decision 26 holds. Strap only: ring-only users never construct this or touch HealthKit for it.
+//
+// Permission: reading step count is ALREADY in the app's one HealthKit authorization request
+// (`HealthKitWriter.authorizationReadTypes` is `allTypes`, and the app writes steps). So this never
+// makes a request of its own: a second request naming a type the app shares, with a different
+// `toShare`, is the build-50 permission-loop defect (`HealthKitAuthorizationSurfaceTests`). The
+// toggle on the strap's device screen, an explicit action, runs that one request (it completes
+// silently when it was answered before). Never at launch.
 
 /// What the Health delivery wake needs from HealthKit; `HealthKitStepDelivery` in the app, a fake in
 /// the tests.
 @MainActor
 protocol StepDeliveryControlling: AnyObject {
-    /// Ask to read the iPhone's step count (the system sheet). true when the request completed;
-    /// HealthKit never says whether read access was granted.
-    func requestStepReadAccess() async -> Bool
+    /// The app's one authorization request (`HealthKitWriter.requestAuthorization`), whose read set
+    /// already holds step count. true when it completed; HealthKit never says whether read access was
+    /// granted.
+    func requestHealthAccess() async -> Bool
     /// Start the observer query. `onUpdate` gets HealthKit's completion handler, which must be called.
     func startObserving(_ onUpdate: @escaping @MainActor (_ completion: @escaping @Sendable () -> Void) -> Void)
     func stopObserving()
@@ -70,11 +77,11 @@ final class HelioHealthWake {
         return Task { await self.stop() }
     }
 
-    /// The explicit action: ask to read steps, then observe. The answer isn't knowable (HealthKit hides
-    /// read access); without it the query simply never fires.
+    /// The explicit action: the app's one Health request (it holds step-count read), then observe. The
+    /// answer isn't knowable (HealthKit hides read access); without it the query simply never fires.
     func enable() async {
         defaults.set(true, forKey: Self.enabledKey)
-        _ = await control.requestStepReadAccess()
+        _ = await control.requestHealthAccess()
         guard Self.shouldObserve(strapChosen: strapChosen(), enabled: isEnabled) else { return }
         startQuery()
         await enableDelivery()
@@ -142,10 +149,10 @@ final class HealthKitStepDelivery: StepDeliveryControlling {
     private let steps = HKQuantityType(.stepCount)
     private var query: HKObserverQuery?
 
-    func requestStepReadAccess() async -> Bool {
-        guard HKHealthStore.isHealthDataAvailable() else { return false }
+    func requestHealthAccess() async -> Bool {
+        guard HealthKitWriter.isAvailable else { return false }
         do {
-            try await store.requestAuthorization(toShare: [], read: [steps])
+            try await HealthKitWriter().requestAuthorization()
             return true
         } catch {
             return false
@@ -154,7 +161,10 @@ final class HealthKitStepDelivery: StepDeliveryControlling {
 
     func startObserving(_ onUpdate: @escaping @MainActor (_ completion: @escaping @Sendable () -> Void) -> Void) {
         guard HKHealthStore.isHealthDataAvailable(), query == nil else { return }
-        let query = HKObserverQuery(sampleType: steps, predicate: nil) { _, completion, error in
+        // The iPhone's own steps only: the strap's step rows that this app writes to Health must not
+        // wake it for another sync (a loop of its own making).
+        let iPhoneOnly = HKQuery.predicateForObjects(withDeviceProperty: HKDevicePropertyKeyModel, allowedValues: ["iPhone"])
+        let query = HKObserverQuery(sampleType: steps, predicate: iPhoneOnly) { _, completion, error in
             // HealthKit's queue. An error still gets its completion call, and nothing runs.
             guard error == nil else { return completion() }
             // HealthKit's completion handler may be called from any thread.
