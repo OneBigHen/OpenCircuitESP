@@ -173,9 +173,10 @@ final class HelioStoreSink: HelioHistorySink {
     private var activity: [ZeppActivityMinute] = []
     private var sessions: [ZeppSleepSession] = []
     private var storedNights: [HelioSleepSelection.Night] = []
-    /// Decision 50a (#253): stored nights this sync's re-delivery was kept out of as thinner, handed
-    /// to this sync's flush as stored (`heldForHealth`). Never re-saved.
-    private var nightsHeldForHealth: [HelioSleepSelection.Night] = []
+    /// Decision 50a (#253): the re-delivered nights the merge kept a stored night over this sync. Only
+    /// remembered here; what reaches the flush is derived from the stored rows at the end of the sync
+    /// (`heldNightsForHealth`), because a later night of the same sync can replace that row (review-snh).
+    private var keptFullerNights: [HelioSleepSelection.Night] = []
     /// Daytime sessions already logged this sync (decision 28c), so a re-run logs each once.
     private var notOvernightLogged: Set<DateInterval> = []
     /// Sleeps kept out of a night already written to Apple Health (28f), logged once per sync.
@@ -212,7 +213,7 @@ final class HelioStoreSink: HelioHistorySink {
         activity = []
         sessions = []
         storedNights = []
-        nightsHeldForHealth = []
+        keptFullerNights = []
         notOvernightLogged = []
         keptApartLogged = []
         latestStress = nil
@@ -332,13 +333,12 @@ final class HelioStoreSink: HelioHistorySink {
             if outcome == .inserted || outcome == .updated { storedNights.append(night) }
             // Decision 50a (#253): the merge kept the stored night over this re-delivery, so without
             // this nothing offers the night to Health again: its first store can land inside the
-            // settle margin, and every later sync re-delivers it a little thinner. Hand the STORED
-            // night (what the card shows, and what the mirror compares against) to this sync's flush.
-            if outcome == .keptFullerStoredNight,
-               let held = heldForHealth(night, family: family, now: now),
-               !nightsHeldForHealth.contains(where: { $0.window == held.window }),
-               !storedNights.contains(where: { $0.window == held.window }) {
-                nightsHeldForHealth.append(held)
+            // settle margin, and every later sync re-delivers it a little thinner. Only remember it
+            // here. Only the CURRENT stored row's night is handed to the flush, re-read when the sync
+            // ends (`heldNightsForHealth`): a later sleep of this same round can still replace the row
+            // (review-snh B-1), and then the copy kept here is no longer the night.
+            if outcome == .keptFullerStoredNight, !keptFullerNights.contains(where: { $0.window == night.window }) {
+                keptFullerNights.append(night)
             }
             // Review-224e S-2: a sleep more than 60 min from the night's other part is not stitched
             // (28f), and its key already holds the longer part, so it is stored nowhere until strap naps
@@ -350,8 +350,31 @@ final class HelioStoreSink: HelioHistorySink {
         }
     }
 
-    /// Decision 50a (#253): the stored night `incoming` was kept out of as thinner, rebuilt from its
-    /// stored hypnogram for this sync's flush, or nil when it must not be offered:
+    /// Decision 50a (#253), at the end of the sync: the stored nights the sync's re-deliveries were kept
+    /// out of, each the CURRENT stored row's night, for this sync's flush (review-snh B-1). A stored
+    /// night is never handed over beside a different night for its key:
+    /// - a kept night whose row no longer overlaps its re-delivery (a later sleep of this sync replaced
+    ///   the row in place) resolves to no row and is dropped. Handed over, the writer would find no row
+    ///   to judge it against (its thinner-than-card bail needs one), write it over the night the card
+    ///   shows, and 28f would then keep that night out for good;
+    /// - one whose row is a night this sync stored (`.inserted`/`.updated`, already in `result.nights`)
+    ///   is dropped, and two that resolve to one row are handed over once. Deduplicated by the row's key.
+    private func heldNightsForHealth(timeline: SyncDeviceID, now: Date) -> [HelioSleepSelection.Night] {
+        let family = DeviceOwnershipLog.Family(timeline: timeline)
+        var keys = Set(storedNights.compactMap {
+            (try? store.sleepSummaryOverlapping(start: $0.window.start, end: $0.window.end))?.night
+        })
+        var held: [HelioSleepSelection.Night] = []
+        for incoming in keptFullerNights {
+            guard let pick = heldForHealth(incoming, family: family, now: now), keys.insert(pick.key).inserted else { continue }
+            held.append(pick.night)
+        }
+        return held
+    }
+
+    /// Decision 50a (#253): the stored row `incoming` overlaps now, rebuilt from its stored hypnogram
+    /// with the row's key, or nil when it must not be offered:
+    /// - a row still overlaps `incoming` (re-read as the sync leaves the store);
     /// - the stored row is the strap's too (the loop's ownership check, on the row's own window);
     /// - it isn't manually edited (the edit reconcile owns it) and has a hypnogram;
     /// - Health has no mirror record for its key (a written night is the mirror's to keep current);
@@ -360,7 +383,7 @@ final class HelioStoreSink: HelioHistorySink {
     /// The strap's score and recorded zone come from the incoming night; the window is the stored
     /// segments' span.
     private func heldForHealth(_ incoming: HelioSleepSelection.Night, family: DeviceOwnershipLog.Family,
-                               now: Date) -> HelioSleepSelection.Night? {
+                               now: Date) -> (night: HelioSleepSelection.Night, key: Date)? {
         guard let row = try? store.sleepSummaryOverlapping(start: incoming.window.start, end: incoming.window.end),
               !row.isManuallyEdited,
               LocalStore.ownershipLog().owner(ofNightFrom: row.inBedStart, to: row.inBedEnd) == family,
@@ -369,8 +392,9 @@ final class HelioStoreSink: HelioHistorySink {
         guard let start = segments.map(\.start).min(), let end = segments.map(\.end).max(), end > start,
               SleepHealthGate.isSettled(latestSegmentEnd: max(incoming.segments.map(\.end).max() ?? incoming.window.end, end),
                                         now: now) else { return nil }
-        return HelioSleepSelection.Night(segments: segments, window: DateInterval(start: start, end: end),
-                                         strapScore: incoming.strapScore, recordedTimeZone: incoming.recordedTimeZone)
+        return (HelioSleepSelection.Night(segments: segments, window: DateInterval(start: start, end: end),
+                                          strapScore: incoming.strapScore, recordedTimeZone: incoming.recordedTimeZone),
+                row.night)
     }
 
     /// `HH:mm–HH:mm` in the recorded zone, for the 28c log line: when a session ran, no health value.
@@ -389,7 +413,7 @@ final class HelioStoreSink: HelioHistorySink {
         }
         var result = HelioSyncResult()
         result.nights = storedNights
-        result.nights += nightsHeldForHealth   // decision 50a (#253): stored nights a re-delivery was kept out of
+        result.nights += heldNightsForHealth(timeline: timeline, now: now)   // decision 50a (#253), review-snh B-1
         result.todaySteps = try? store.todaySteps(day: now)
         result.latestStress = latestStress
         result.latestPAI = latestPAI
