@@ -459,3 +459,123 @@ final class StrapNightHealthTests: XCTestCase {
         XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: hour(33)), [stored])
     }
 }
+
+// MARK: - Review-snh: a held night must still be the stored row when the sync ends
+
+/// Sleep A, 23:00–02:00 (180 min asleep), stored by a sync shortly after a mid-night wake.
+private let sleepA: [(Double, Double, UInt8)] = [(-1, 0.5, light), (0.5, 1, deep), (1, 2, light)]
+/// A re-delivered: five minutes wider each side and 15 asleep minutes fewer, so the merge keeps A.
+private let sleepAAgain: [(Double, Double, UInt8)] = [
+    (-1 - 5.0 / 60, -1, awake), (-1, 0.5, light), (0.5, 0.75, awake), (0.75, 1, deep), (1, 2, light), (2, 2 + 5.0 / 60, awake),
+]
+/// Sleep B, 03:30–07:00 (210 min asleep): 85 minutes after A, so 28f keeps it apart; it ends in the
+/// same key's wake window and is fuller, so it replaces A's row in place.
+private let sleepB: [(Double, Double, UInt8)] = [(3.5, 5, light), (5, 6, rem), (6, 7, light)]
+
+extension StrapNightHealthTests {
+    /// One strap sync at `now` delivering each of `sessions` as its own session record.
+    private func syncSessions(_ sessions: [[(Double, Double, UInt8)]], at now: Date, store: LocalStore) throws -> HelioSyncResult {
+        clock = now
+        let device = makeStrap(sessions[0])
+        device.fetchData[.sleepSession] = (stamp(hour(0).timeIntervalSince1970 - 86_400), sessions.flatMap(session))
+        let transport = Transport(device: device)
+        let keys = Keys()
+        let helio = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys,
+                                 sink: HelioStoreSink(store: store), findState: HelioFindState(),
+                                 clock: { [unowned self] in self.clock }, autoTick: false, autoSyncOnConnect: true)
+        transport.session = helio
+        helio.start()
+        transport.drain()
+        let result = try XCTUnwrap(helio.lastSyncResult)
+        XCTAssertEqual(result.interrupted, false)
+        return result
+    }
+
+    /// Runs `body` with local times in a fixed zone (New York), and clears the mirror records it may leave.
+    private func inFixedZone(_ body: () async throws -> Void) async rethrows {
+        let saved = NSTimeZone.default
+        NSTimeZone.default = TimeZone(identifier: "America/New_York")!
+        let nights = (-2...2).map { hour(Double($0) * 24) }
+        nights.forEach(clearMirror)
+        defer {
+            nights.forEach(clearMirror)
+            NSTimeZone.default = saved
+        }
+        try await body()
+    }
+
+    private func window(_ segments: [SleepSegment]) -> DateInterval? {
+        guard let start = segments.map(\.start).min(), let end = segments.map(\.end).max() else { return nil }
+        return DateInterval(start: start, end: end)
+    }
+
+    /// A was stored at 02:15, inside the margin. The morning sync carries A again (kept as thinner) and B.
+    private func storeAThenSyncAAgainAndB(at now: Date, store: LocalStore) throws -> HelioSyncResult {
+        let first = try syncSessions([sleepA], at: hour(2.25), store: store)
+        XCTAssertEqual(first.nights.map(\.window), [DateInterval(start: hour(-1), end: hour(2))], "A stored, held by the margin")
+        let morning = try syncSessions([sleepAAgain, sleepB], at: now, store: store)
+        let rows = try rows(store)
+        XCTAssertEqual(rows.count, 1, "one row for the key")
+        XCTAssertEqual(rows.first?.inBedStart, hour(3.5), "B replaced A's row in place")
+        XCTAssertEqual(rows.first?.inBedEnd, hour(7))
+        return morning
+    }
+
+    /// Review-snh test 1: the sync carrying A again and B hands the flush B, and no night that isn't a
+    /// current stored row's (the stale A, which B replaced in this same sync). This also pins the
+    /// re-flush churn: `ContentView.flushHealth` re-flushes `lastSyncResult.nights` until the next sync,
+    /// and `[B, staleA]` there would write B, delete A, write A and delete B on every such flush.
+    func testASyncWhoseLaterSleepReplacedTheKeptNightHandsOverOnlyTheStoredRow() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let morning = try storeAThenSyncAAgainAndB(at: hour(7.5), store: store)
+            let current = try rows(store).map { DateInterval(start: $0.inBedStart, end: $0.inBedEnd) }
+            XCTAssertTrue(morning.nights.contains { $0.window == DateInterval(start: hour(3.5), end: hour(7)) }, "B is handed over")
+            XCTAssertEqual(morning.nights.filter { !current.contains($0.window) }.map(\.window), [], "no stale A")
+        }
+    }
+
+    /// Review-snh test 2: at 07:10 B hasn't settled. Nothing for the key is ready to write, so nothing
+    /// reaches the writer's write step and no mirror record is left. A flush at 07:30 (ContentView's,
+    /// over the last sync's result) offers exactly B, ready.
+    func testBeforeTheReplacingSleepSettlesNothingIsWrittenForTheKey() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let morning = try storeAThenSyncAAgainAndB(at: hour(7 + 10.0 / 60), store: store)
+            let key = try XCTUnwrap(try rows(store).first).night
+
+            let input = HelioConnection.strapNights(morning.nights.map(\.segments), store: store, timeline: timeline, now: clock)
+            let ready = input.filter { SleepHealthGate.isReadyToWrite(latestSegmentEnd: $0.map(\.end).max(), now: clock, finalized: false) }
+            XCTAssertEqual(ready.compactMap(window), [], "no night for the key is ready at 07:10")
+            for night in ready {
+                let outcome = await HealthKitWriter().mirrorSettledNight(local: store, segments: night)
+                XCTAssertTrue(isUnchanged(outcome), "nothing reaches the write step")
+            }
+            let flush = await HelioConnection.flushStrap(HealthKitWriter(), store: store, timeline: timeline,
+                                                         nights: morning.nights.map(\.segments), now: clock)
+            XCTAssertEqual(flush.sleepSegments, 0)
+            XCTAssertNil(store.mirroredNight(night: key), "no mirror record")
+
+            let later = hour(7.5)
+            let laterInput = HelioConnection.strapNights(morning.nights.map(\.segments), store: store, timeline: timeline, now: later)
+            XCTAssertEqual(laterInput, [try storedHypnogram(store)], "exactly B, as stored")
+            XCTAssertTrue(SleepHealthGate.isReadyToWrite(latestSegmentEnd: hour(7), now: later, finalized: false))
+        }
+    }
+
+    /// Review-snh test 3: both settled at 07:30. The flush input is exactly B's stored hypnogram: one
+    /// night for the key.
+    func testWhenBothHaveSettledTheFlushInputIsTheReplacingSleepAlone() async throws {
+        try await inFixedZone {
+            ownership.install(.strapOwnsAllTime)
+            let store = try makeStore()
+            let morning = try storeAThenSyncAAgainAndB(at: hour(7.5), store: store)
+            let input = HelioConnection.strapNights(morning.nights.map(\.segments), store: store, timeline: timeline, now: clock)
+            let stored = try storedHypnogram(store)
+            XCTAssertEqual(window(stored), DateInterval(start: hour(3.5), end: hour(7)))
+            XCTAssertEqual(input, [stored])
+        }
+    }
+}
