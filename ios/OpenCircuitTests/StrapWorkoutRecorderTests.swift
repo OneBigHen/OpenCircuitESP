@@ -803,15 +803,21 @@ final class StrapWorkoutStoreTests: XCTestCase {
         XCTAssertEqual(try store.context.fetch(FetchDescriptor<StoredSample>()).count, 120)
     }
 
-    func testTheRingsPendingSamplesAreUntouched() throws {
+    /// Spans are keyed per timeline, so a strap workout can never withhold one of the ring's rows.
+    ///
+    /// This used to assert the stronger "the exclusion never applies to the ring's timeline", which
+    /// #241 / decision 46 deliberately ended: the ring's workout now lands the same way the strap's
+    /// does, so it gets spans of its own. What that does to the ring's flush is
+    /// `RingWorkoutHeartRateTests`; what must not change is this — the strap's spans stay the
+    /// strap's.
+    func testAStrapsSpansNeverTouchTheRingsPendingSamples() throws {
         let store = try makeStore()
-        StrapWorkoutHealthExclusions().add(DateInterval(start: at(0), end: at(120)), device: .ringConn)
-        defer { StrapWorkoutHealthExclusions().clear(device: .ringConn) }
+        StrapWorkoutHealthExclusions().add(DateInterval(start: at(0), end: at(120)), device: timeline)
         ownership.install(DeviceOwnershipLog())   // a ring-only install
         let ring = (1...5).map { QuantitySample(kind: .heartRate, start: at(Double($0 * 10)), end: at(Double($0 * 10 + 2)), value: 90) }
         _ = try store.ingest(ring, device: .ringConn)
         XCTAssertEqual(try store.pendingHealthSamples(device: .ringConn, kinds: [.heartRate]), ring,
-                       "the exclusion never applies to the ring's timeline")
+                       "a span recorded for the strap's timeline is not read for the ring's")
     }
 }
 
