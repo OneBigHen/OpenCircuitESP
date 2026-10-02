@@ -1,5 +1,5 @@
 // The Amazfit Helio Strap's app-side rules (#215 phase 3; the decisions of record are
-// briefs/helio-decisions.md 4, 8–17): what a pasted key is, where each history type's next fetch
+// briefs/helio-decisions.md 4, 8–17, 44): what a pasted key is, where each history type's next fetch
 // starts, and which parts of a fetched round may be stored and written to Apple Health.
 //
 // Pure: no CoreBluetooth, HealthKit or SwiftData, so every rule is covered by `swift test`. The app
@@ -31,19 +31,26 @@ public enum HelioKeyText {
     }
 }
 
-// MARK: - Apple Health policy (decisions 12, 14, 15, 17)
+// MARK: - Apple Health policy (decisions 12, 15, 17, 44)
 
 public enum HelioHealthPolicy {
 
-    /// Decision 14: Apple Health's only HRV type is SDNN, and the strap's HRV statistic is unverified
-    /// (RMSSD vs SDNN, ZEPP_PROTOCOL.md §6.5 🔴). The strap's HRV is stored and shown in the app and
-    /// NOT written to Apple Health in v1. This constant is the whole switch.
-    public static let writesHRV = false
+    /// Decision 44 (supersedes 14): the strap's HRV is taken as RMSSD, 🟡. Amazfit documents that
+    /// "Amazfit devices measure HRV using the RMSSD method"
+    /// (https://us.amazfit.com/pages/amazfit-technology-page-health-technology), a product-line
+    /// statement that doesn't name the Helio Strap; a third-party Helio review says the same. Not
+    /// compared with Zepp's display on our strap (ZEPP_PROTOCOL.md §6.5, §10 item 9). Juan chose to ship
+    /// on it, labelled. It is written exactly like the ring's: the RMSSD
+    /// value in Apple Health's only HRV type, SDNN, tagged `OpenCircuitHRVStatistic = "RMSSD"`
+    /// (`HealthKitWriter.metadata(for:)`, HEALTHKIT_MAPPING.md, #37). Rows stored while this was off
+    /// backfill on the next flush: the strap's `hk:hrvSDNN` watermark was never advanced.
+    public static let writesHRV = true
 
     /// The stored kinds a strap's timeline mirrors to Apple Health through the ring's store → Health
-    /// path: heart rate, SpO₂ and respiratory rate (decision 17) and the gated skin temperature
-    /// (decision 12). Resting HR, steps and energy go through the ring's own daily and cumulative
-    /// writers (decisions 16–17); stress and PAI have no Health type and stay in the app (decision 15).
+    /// path: heart rate, SpO₂ and respiratory rate (decision 17), the gated skin temperature
+    /// (decision 12) and HRV (decision 44). Resting HR, steps and energy go through the ring's own daily
+    /// and cumulative writers (decisions 16–17); stress and PAI have no Health type and stay in the app
+    /// (decision 15).
     public static func healthMirroredKinds(writesHRV: Bool = writesHRV) -> [MetricKind] {
         var kinds: [MetricKind] = [.heartRate, .spo2, .respiratoryRate, .temperature]
         if writesHRV { kinds.append(.hrvSDNN) }
@@ -59,8 +66,8 @@ public enum HelioHealthPolicy {
 extension ZeppMetricMapping {
 
     /// Samples for the LOCAL store from one parsed round: `samples(from:)` (the Apple-Health-clean
-    /// mapping) plus the strap's HRV as `.hrvSDNN`, which is stored and shown in the app but kept out
-    /// of Apple Health by `HelioHealthPolicy.writesHRV` (decision 14). An HRV of 0 ms is no reading.
+    /// mapping) plus the strap's HRV (RMSSD) as `.hrvSDNN`, which reaches Apple Health through the
+    /// store → Health path when `HelioHealthPolicy.writesHRV` (decision 44). An HRV of 0 ms is no reading.
     /// The strap's all-day stress becomes `.stress` (`stressSamples`) and its PAI `.pai`
     /// (`paiSamples`), neither of which has a Health type at all.
     ///

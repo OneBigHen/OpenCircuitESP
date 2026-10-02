@@ -74,18 +74,24 @@ struct HelioDeviceInfoView: View {
                     if session.capabilities.contains(.alarm) {
                         NavigationLink("Alarms") { HelioAlarmsView(connection: connection) }
                     }
-                    if session.hapticAlerts?.settings.isEmpty == false {
-                        NavigationLink("Health alerts") { HelioAlertsView(connection: connection) }
-                    }
                 } header: {
                     Text("On the strap")
                 }
             }
 
-            if let warnings = session?.recordingWarnings, !warnings.isEmpty {
-                Section("Recording") {
-                    ForEach(warnings, id: \.self) { Text($0).font(.caption) }
+            // #228, #229, #230: the strap's own settings. Always listed: a strap that can't be changed right
+            // now shows its controls disabled, with the reason.
+            Section {
+                NavigationLink("Measurement") { HelioMeasurementSettingsView(connection: connection) }
+                if let warnings = session?.recordingWarnings, !warnings.isEmpty {
+                    ForEach(warnings, id: \.self) { Text($0).font(.caption).foregroundStyle(.orange) }
                 }
+                NavigationLink("Health alerts") { HelioAlertsView(connection: connection) }
+                NavigationLink("Workout detection") { HelioWorkoutDetectionView(connection: connection) }
+            } header: {
+                Text("Strap settings")
+            } footer: {
+                Text(HelioSettingsCopy.savedOnStrap)
             }
 
             if ringAlarm.isEnabled {
@@ -192,7 +198,6 @@ struct HelioDeviceInfoView: View {
         if session.capabilities.contains(.findMyDevice) { out.append("find") }
         if session.capabilities.contains(.vibration) { out.append("buzz") }
         if session.capabilities.contains(.alarm) { out.append("alarms") }
-        if session.hapticAlerts?.settings.isEmpty == false { out.append("alerts") }
         return out
     }
 }

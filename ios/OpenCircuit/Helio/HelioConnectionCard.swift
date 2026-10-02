@@ -58,7 +58,10 @@ struct HelioConnectionCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("The strap isn't recording everything").font(.caption.weight(.semibold))
                     ForEach(warnings, id: \.self) { Text($0).font(.caption2).foregroundStyle(.secondary) }
-                    Text("Turn these on in the Zepp app's health monitoring settings.").font(.caption2).foregroundStyle(.secondary)
+                    // Point at Measurement only when it can change them now (review-240 N3).
+                    Text(session?.canFixRecordingWarningsHere == true
+                         ? "Turn these on in Helio Strap ▸ Measurement."
+                         : "Turn these on in the Zepp app's health monitoring settings.").font(.caption2).foregroundStyle(.secondary)
                 }
             }
         }

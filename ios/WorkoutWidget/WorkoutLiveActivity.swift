@@ -55,7 +55,7 @@ struct WorkoutLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     HStack(alignment: .firstTextBaseline) {
-                        ElapsedText(startDate: context.attributes.startDate)
+                        ElapsedText(startDate: context.attributes.startDate, state: context.state)
                             .font(.system(.title2, design: .rounded).weight(.bold))
                             .monospacedDigit()
                         Spacer()
@@ -70,7 +70,7 @@ struct WorkoutLiveActivity: Widget {
                 HStack(spacing: 3) {
                     Image(systemName: context.attributes.sportSymbolName)
                         .foregroundStyle(.blue)
-                    ElapsedText(startDate: context.attributes.startDate)
+                    ElapsedText(startDate: context.attributes.startDate, state: context.state)
                         .monospacedDigit()
                 }
             } compactTrailing: {
@@ -112,7 +112,7 @@ private struct LockScreenLiveActivityView: View {
             // Three metrics: time, calories, BPM.
             HStack(alignment: .top) {
                 metric(title: "TIME") {
-                    ElapsedText(startDate: context.attributes.startDate)
+                    ElapsedText(startDate: context.attributes.startDate, state: context.state)
                         .font(.system(.title, design: .rounded).weight(.bold))
                         .monospacedDigit()
                 }
@@ -155,16 +155,32 @@ private struct LockScreenLiveActivityView: View {
 @available(iOS 16.1, *)
 private struct ElapsedText: View {
     let startDate: Date
+    /// The strap's workout can pause (#227): `clockStart`/`pausedElapsed` are nil for the ring's, so
+    /// its clock is exactly the `startDate` timer it always was.
+    var state: WorkoutActivityAttributes.ContentState? = nil
 
     var body: some View {
-        // countsDown:false ⇒ counts UP from startDate; the OS advances it every second with no update.
-        // multilineTextAlignment(.center): Text(timerInterval:) reserves a wider frame (room for the
-        // widest H:MM:SS) and LEFT-aligns the digits inside it by default, so "0:22" drifted to the
-        // left of the centered "TIME" label. Centering the digits within that reserved frame lines the
-        // value up under its label, matching the calories/heart columns.
-        Text(timerInterval: startDate...Date.distantFuture, countsDown: false)
-            .lineLimit(1)
-            .multilineTextAlignment(.center)
+        if let paused = state?.pausedElapsed {
+            // Paused: the clock stands still at the running time, in the timer's own H:MM:SS / M:SS shape.
+            Text(Self.clockText(paused))
+                .lineLimit(1)
+                .multilineTextAlignment(.center)
+        } else {
+            // countsDown:false ⇒ counts UP from startDate; the OS advances it every second with no update.
+            // multilineTextAlignment(.center): Text(timerInterval:) reserves a wider frame (room for the
+            // widest H:MM:SS) and LEFT-aligns the digits inside it by default, so "0:22" drifted to the
+            // left of the centered "TIME" label. Centering the digits within that reserved frame lines the
+            // value up under its label, matching the calories/heart columns.
+            Text(timerInterval: (state?.clockStart ?? startDate)...Date.distantFuture, countsDown: false)
+                .lineLimit(1)
+                .multilineTextAlignment(.center)
+        }
+    }
+
+    static func clockText(_ seconds: TimeInterval) -> String {
+        let t = max(Int(seconds), 0)
+        let h = t / 3600, m = (t % 3600) / 60, s = t % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 }
 

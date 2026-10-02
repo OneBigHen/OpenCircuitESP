@@ -302,7 +302,7 @@ final class HelioSessionTests: XCTestCase {
         let samples = try store.context.fetch(FetchDescriptor<StoredSample>())
         XCTAssertTrue(samples.allSatisfy { $0.deviceID == timeline.rawValue })
         XCTAssertEqual(samples.filter { $0.kindRaw == "heartRate" }.count, 50, "60 minutes minus 10 unworn/charging without HR")
-        XCTAssertEqual(samples.filter { $0.kindRaw == "hrvSDNN" }.map(\.value).sorted(), [41, 47], "HRV stored locally (decision 14)")
+        XCTAssertEqual(samples.filter { $0.kindRaw == "hrvSDNN" }.map(\.value).sorted(), [41, 47], "HRV stored locally")
         XCTAssertEqual(samples.filter { $0.kindRaw == "spo2" }.map(\.value), [0.96])
         // Temperature: worn, in the strap's sleep window, 30–42 °C: 60 − 5 unworn − 5 charging − 1 at 29 °C.
         XCTAssertEqual(samples.filter { $0.kindRaw == "temperature" }.count, 49)
@@ -321,12 +321,13 @@ final class HelioSessionTests: XCTestCase {
         XCTAssertNotNil(cursors[.temperature])
         XCTAssertNotNil(cursors[.sleepSession])
 
-        // The Health pass hands over the night and the timeline; HRV is not a Health kind for it.
+        // The Health pass hands over the night and the timeline; HRV is a Health kind for it (decision 44).
         for _ in 0..<200 where results.isEmpty { await Task.yield() }
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results.first?.nights.count, 1)
         let pending = try store.pendingHealthSamples(device: timeline, kinds: HelioHealthPolicy.healthMirroredKinds())
-        XCTAssertFalse(pending.contains { $0.kind == .hrvSDNN }, "decision 14: never written to Apple Health")
+        XCTAssertEqual(pending.filter { $0.kind == .hrvSDNN }.map(\.value).sorted(), [41, 47],
+                       "decision 44: the strap's HRV (RMSSD) goes to Apple Health")
         XCTAssertTrue(pending.contains { $0.kind == .heartRate })
         XCTAssertTrue(pending.contains { $0.kind == .temperature })
         XCTAssertTrue(try store.pendingHealthSamples().isEmpty, "the ring's timeline is untouched")
@@ -1458,6 +1459,36 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertEqual(link.session?.syncsFinished, 2, "a fresh sync on the open link")
         XCTAssertGreaterThan(device.fetchStarts.count, startsBefore)
         XCTAssertEqual(Set(device.fetchAcks), [0x09])
+    }
+
+    /// Review-240 S1: a background run (#225) that adopts the live session while a settings change's
+    /// pre-read is in flight. The run syncs as usual; the write never goes out during its fetch.
+    func testABackgroundRunThatStartsMidChangeRefusesTheWriteAndSyncsNormally() async throws {
+        let store = try makeStore()
+        let device = makeStrap()
+        // HEALTH v3 with constraints: stress monitoring on (made up).
+        device.configReadHandler = { request in
+            guard request.count >= 4, request[0] == 0x03, request[1] == 0x01, request[2] == 0x08 else { return nil }
+            return [0x04, 0x01, 0x08, 0x03, 0x01, 0x01, 0x13, 0x0b, 0x01]
+        }
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        _ = link.connectForBackground()
+        link.transport?.drain()
+        let session = try XCTUnwrap(link.session)
+        XCTAssertEqual(session.phase, .ready)
+        session.readStrapSettings(groups: [ZeppConfig.healthGroup])
+        link.transport?.drain()
+        // The tap: allowed now. Its pre-read reply is still queued when the run starts.
+        XCTAssertNil(session.changeStrapSetting(.stressMonitoring, from: .bool(true), to: .bool(false)))
+
+        let run = await service(link, store: store).run(kind: .processing, timeout: RingBackgroundSyncService.processingTimeout)
+        XCTAssertEqual(run.ending, .synced, "the run itself syncs normally")
+        XCTAssertEqual(session.syncsFinished, 2)
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+        XCTAssertEqual(device.configWrites, [], "no config write during the run's fetch")
+        XCTAssertEqual(session.settingsNotice?.text, "Not saved: a sync started. Try again when it finishes.")
+        XCTAssertEqual(session.settingsEditor?.isBusy, false)
+        XCTAssertEqual(session.settingsEditor?.snapshot.value(.stressMonitoring), .bool(true), "the strap's value stays shown")
     }
 
     // MARK: decision 28: the background run fetches and keeps only the strap's own time

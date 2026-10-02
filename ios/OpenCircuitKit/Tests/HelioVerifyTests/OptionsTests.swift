@@ -4,6 +4,7 @@
 
 import XCTest
 @testable import HelioVerify
+import ZeppKit
 
 final class OptionsTests: XCTestCase {
 
@@ -67,7 +68,7 @@ final class OptionsTests: XCTestCase {
 
     func testAllowWriteAloneNamesEveryWriteItApplies() {
         XCTAssertThrowsError(try parseOptions(key + ["--allow-write"])) {
-            XCTAssertEqual($0 as? OptionsError, .invalid("--allow-write only applies to --set-time / --set-alarm / --delete-alarm"))
+            XCTAssertEqual($0 as? OptionsError, .invalid("--allow-write only applies to --set-time / --set-alarm / --delete-alarm / --set-config / --config-probe"))
         }
     }
 
@@ -116,5 +117,46 @@ final class OptionsTests: XCTestCase {
         XCTAssertTrue(block("--find").contains("SIGTERM or SIGHUP"))
         XCTAssertTrue(flat.contains("143 terminated (SIGTERM)"))
         XCTAssertTrue(flat.contains("129 hung up (SIGHUP)"))
+    }
+
+    // MARK: Strap settings (#228, #229, #230)
+
+    func testSettingsReadIsReadOnly() {
+        let o = accepted(key + ["--settings"])
+        XCTAssertEqual(o?.settings, true)
+        XCTAssertEqual(o?.allowWrite, false)
+        XCTAssertEqual(o?.writesConfig, false)
+        XCTAssertEqual(o?.hasControls, true)
+        assertRejected(["--settings"])
+    }
+
+    func testConfigWritesNeedAllowWriteOnePerRun() {
+        assertRejected(key + ["--set-config", "stressMonitoring=off"])
+        assertRejected(key + ["--config-probe", "a"])
+        assertRejected(["--set-config", "stressMonitoring=off", "--allow-write"])
+        let o = accepted(key + ["--set-config", "stressMonitoring=off", "--allow-write"])
+        XCTAssertEqual(o?.setConfig?.setting, .stressMonitoring)
+        XCTAssertEqual(o?.setConfig?.value, .bool(false))
+        XCTAssertEqual(o?.setTime, false, "a config write doesn't set the clock")
+        XCTAssertEqual(accepted(key + ["--config-probe", "b", "--allow-write"])?.configProbe, .childWhileParentOff)
+        assertRejected(key + ["--config-probe", "d", "--allow-write"])
+        assertRejected(key + ["--set-config", "stressMonitoring=off", "--config-probe", "a", "--allow-write"])
+        assertRejected(key + ["--set-config", "stressMonitoring=off", "--set-alarm", "07:00", "--allow-write"])
+    }
+
+    func testSettingSpecs() {
+        func spec(_ text: String) -> ZeppConfigValue? { parseSettingSpec(text)?.value }
+        XCTAssertEqual(spec("heartRateMonitoring=continuous"), .byte(0xfe), "§17.9: fe, never 00")
+        XCTAssertEqual(spec("heartRateMonitoring=smart"), .byte(0xff))
+        XCTAssertEqual(spec("heartRateMonitoring=10"), .byte(10))
+        XCTAssertEqual(spec("highHeartRateAlert=120"), .byte(120))
+        XCTAssertEqual(spec("lowSpO2Alert=off"), .byte(0))
+        XCTAssertEqual(spec("workoutDetectionSensitivity=standard"), .byte(1))
+        XCTAssertEqual(spec("relaxReminder=on"), .bool(true))
+        XCTAssertNil(spec("relaxReminder=120"))
+        XCTAssertNil(spec("highHeartRateAlert=smart"))
+        XCTAssertNil(spec("heartRatePush=on"), "not offered")
+        XCTAssertNil(spec("workoutCategories=1"), "WORKOUT 40 is never written")
+        XCTAssertNil(spec("highHeartRateAlert=300"))
     }
 }
