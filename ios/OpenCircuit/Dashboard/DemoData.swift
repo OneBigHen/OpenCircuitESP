@@ -37,6 +37,16 @@ enum DemoData {
         calendar.startOfDay(for: now).addingTimeInterval(10.5 * 3600)
     }
 
+    /// A SYNTHETIC Measure-card state for `-OCDemoScreen metric-restingHR | metric-spo2` (#245): a
+    /// simulator has no ring, so `VitalMeasureState.resolve` would always answer `.none` and the
+    /// control could not be reviewed by screenshot. A ring that is ready and idle — the enabled
+    /// start control, no measurement running. Simulator + DEBUG only, like everything in this file.
+    @MainActor
+    static func measureSource(for metric: TodayTile.Metric) -> VitalMeasureSource? {
+        guard metric.measuredVital != nil else { return nil }
+        return VitalMeasureSource(demoState: VitalMeasureState(control: .ring(active: false, enabled: true)))
+    }
+
     @MainActor
     static func seedIfRequested(_ context: ModelContext, now: Date = Date()) {
         guard isRequested else { return }
@@ -240,8 +250,9 @@ struct DemoScreenModifier: ViewModifier {
     @ViewBuilder
     private func destination(_ id: String) -> some View {
         if id.hasPrefix("metric-"), let m = TodayTile.Metric(rawValue: String(id.dropFirst(7))) {
-            // As from a Today tile: on today's Day chart (#239).
-            MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw, startsOnDay: true)
+            // As from a Today tile: on today's Day chart (#239), with the Measure card (#245).
+            MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw, startsOnDay: true,
+                             measure: DemoData.measureSource(for: m))
         } else if id.hasPrefix("trend-"), let m = TodayTile.Metric(rawValue: String(id.dropFirst(6))) {
             MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw)
         } else if id == "timeline" {

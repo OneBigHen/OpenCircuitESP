@@ -166,6 +166,12 @@ struct ContentView: View {
     private var helioSession: HelioSession? { ringActive ? nil : helio.session }
     /// The strap's Measure (decision 30); nil with the ring chosen.
     private var strapLive: StrapLiveHeartRate? { helioSession.map { StrapLiveHeartRate(session: $0) } }
+    /// What a metric detail's Measure card needs (#245, decision 47): the live devices, plus THIS
+    /// view's live buffer and session range. Handing the detail the same two values is what keeps
+    /// one live feed — the number under the chart and the number on Today cannot disagree.
+    private var measureSource: VitalMeasureSource {
+        VitalMeasureSource(session: session, strapLive: strapLive, buffer: liveBuffer, range: liveRange)
+    }
     private var connected: Bool {
         guard ringActive else { return false }
         if case .connected = scanner.state { return true } else { return false }
@@ -788,30 +794,9 @@ struct ContentView: View {
 
     // MARK: Dashboard section ordering (long-press to reorder)
 
-    /// The full canonical-or-saved order of reorderable sections. Decodes `sectionOrderRaw`,
-    /// dropping unknown/duplicate ids, then appends any sections not yet present (new features) in
-    /// their canonical `allCases` order — so a saved order keeps working across app updates that
-    /// add cards.
-    private var sectionOrder: [DashboardSection] {
-        var result: [DashboardSection] = []
-        var seen = Set<DashboardSection>()
-        for raw in sectionOrderRaw.split(separator: ",") {
-            if let s = DashboardSection(rawValue: String(raw)), !seen.contains(s) {
-                result.append(s); seen.insert(s)
-            }
-        }
-        for s in DashboardSection.allCases where !seen.contains(s) {
-            // The metric tiles (#216) are new since most saved orders: put them straight under
-            // readiness, where they belong, rather than at the bottom of an existing layout.
-            if s == .metrics, let i = result.firstIndex(of: .readiness) {
-                result.insert(s, at: i + 1)
-            } else {
-                result.append(s)
-            }
-            seen.insert(s)
-        }
-        return result
-    }
+    /// The full canonical-or-saved order of reorderable sections. The decode (which drops ids this
+    /// build no longer has, `vitals` among them) lives in `DashboardSectionOrder` so a test can pin it.
+    private var sectionOrder: [DashboardSection] { DashboardSectionOrder.decode(sectionOrderRaw) }
 
     /// The Today metric tiles (#216), built from the shared trends load.
     private var todayTiles: [TodayTile] {
@@ -838,18 +823,12 @@ struct ContentView: View {
         }
     }
 
-    /// Apply a long-press-drag reorder. The move arrives in `visibleSections` index space; we apply
-    /// it there, then merge any hidden sections back at their prior absolute positions (so turning a
-    /// feature on later restores its card roughly where it was) and persist the result.
+    /// Apply a long-press-drag reorder and persist the result. The merge rule is
+    /// `DashboardSectionOrder.reordered`, so what is written back is pinned by a test.
     private func moveSection(from source: IndexSet, to destination: Int) {
-        var visible = visibleSections
-        visible.move(fromOffsets: source, toOffset: destination)
-        var merged = visible
-        for section in sectionOrder where !visible.contains(section) {
-            let idx = min(sectionOrder.firstIndex(of: section) ?? merged.count, merged.count)
-            merged.insert(section, at: idx)
-        }
-        sectionOrderRaw = merged.map(\.rawValue).joined(separator: ",")
+        sectionOrderRaw = DashboardSectionOrder.encode(
+            DashboardSectionOrder.reordered(full: sectionOrder, visible: visibleSections,
+                                            from: source, to: destination))
     }
 
     /// Map a Today-tab section id to its card view (the reorderable middle). Sleep, workout, and
@@ -865,7 +844,6 @@ struct ContentView: View {
                                                onStress: { path.append(.strapStress) },
                                                strapPAI: strapPAI,
                                                onPAI: { showPAIInfo = true })
-        case .vitals:       vitalsCard
         case .vitalsStatus: vitalsStatusCard
         case .calories:     caloriesCard
         case .goals:        card { GoalsCardView() }
@@ -883,7 +861,8 @@ struct ContentView: View {
         case .cycle:       CycleCalendarView()
         case .headache:    HeadacheSignalsView()
         case .activityLog: ActivityLogView(session: session)
-        case .metric(let m): MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw, startsOnDay: true)
+        case .metric(let m): MetricDetailView(metric: m, tempUnitRaw: tempUnitRaw, startsOnDay: true,
+                                             measure: measureSource)
         case .timeline:      DayDetailView(day: Date())
         case .dayMetric(let m): MetricDayView(metric: m, tempUnitRaw: tempUnitRaw)
         }
@@ -1421,6 +1400,9 @@ struct ContentView: View {
             // User-initiated measure timed out without locking a reading. Persists until the
             // user taps Measure again (which clears it naturally). (#55)
             if session?.userMeasureFailed == true { measureFailedHint }
+            // The ring has stopped recording (#245 moved this here from the Vitals card, logic
+            // unchanged). It belongs with the connection: it is about the ring, not about a reading.
+            recorderStallNotice
             if !connected {
                 switch scanner.state {
                 case .scanning:
@@ -1726,7 +1708,7 @@ struct ContentView: View {
         }
     }
 
-    // MARK: Vitals dashboard (persisted — always visible)
+    // MARK: Recorder stall (shown in the ring's connection card)
 
     /// Says so when the RING has stopped recording — the failure a tester had to infer by reading
     /// timestamps, because skin temperature is LIVE-only and kept updating while every
@@ -1760,20 +1742,6 @@ struct ContentView: View {
         return RecorderStall.verdict(newestEpochAt: evidence.headAt,
                                      completedDrainsSinceHeadMoved: evidence.unmovedDrains,
                                      isCharging: session.charging || session.inferredCharging)
-    }
-
-    private var vitalsCard: some View {
-        card {
-            Text("VITALS").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            recorderStallNotice
-            VitalsTableView(session: session, strapLive: strapLive)
-            Text(ringActive
-                 ? "Home shows the latest recorded readings and when they were recorded. Heart-rate and SpO₂ also support on-demand reads while the ring link is ready."
-                 : "Home shows the latest readings synced from the strap and when they were recorded. Heart rate also supports a live measurement while the strap is connected.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .padding(.top, 8)
-        }
     }
 
     /// Vitals Status (#72): compares the latest day's resting HR / overnight SpO₂ / overnight HRV /
@@ -2616,15 +2584,6 @@ private struct HelioDashboardHooks: ViewModifier {
             .onChange(of: liveRunning) { _, _ in onLiveRunningChanged() }
             .sheet(isPresented: $showSetup) { NavigationStack { HelioSetupView() } }
     }
-}
-
-/// The reorderable Today-tab sections. `rawValue` is the persistence key written to
-/// `dashboard.sectionOrder`, so keep these stable across releases; `allCases` order is the default
-/// (first-run) layout. (Sleep / workout / trends moved to their own tabs and are no longer sections;
-/// the order decoder ignores those now-unknown saved ids, so existing saved orders still load.)
-private enum DashboardSection: String, CaseIterable, Identifiable, Hashable {
-    case readiness, metrics, vitals, vitalsStatus, calories, goals, cycle, headache, sync
-    var id: String { rawValue }
 }
 
 /// Programmatic navigation targets pushed onto the Today tab's `NavigationStack` path. Using a typed
