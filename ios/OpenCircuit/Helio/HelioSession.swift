@@ -83,8 +83,10 @@ enum HelioSessionEvent: Equatable {
 /// Where fetched rounds go. `HelioStoreSink` is the `LocalStore` implementation.
 @MainActor
 protocol HelioHistorySink: AnyObject {
-    /// Each type's persisted watermark on `timeline`.
-    func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date]
+    /// Each type's persisted watermark on `timeline`, at the sync's own `now`. `now` is the session
+    /// clock, not `Date()`: the one-time backfills the store runs here bound their rewind by it
+    /// (review-248 SF-1), so every time in a sync comes from one source.
+    func fetchCursors(timeline: SyncDeviceID, now: Date) -> [ZeppFetchType: Date]
     /// No fetch starts before this (decision 28: the strap's current ownership start).
     func notBefore(timeline: SyncDeviceID, now: Date) -> Date?
     func beginSync(timeline: SyncDeviceID, now: Date)
@@ -927,7 +929,7 @@ final class HelioSession: WearableSession {
     private func startFetch() {
         guard let sink else { return finishFetch(interrupted: true) }
         let now = clock()
-        let plan = HelioFetchPlan.plan(cursors: sink.fetchCursors(timeline: timeline), now: now,
+        let plan = HelioFetchPlan.plan(cursors: sink.fetchCursors(timeline: timeline, now: now), now: now,
                                        notBefore: sink.notBefore(timeline: timeline, now: now))
         sink.beginSync(timeline: timeline, now: now)
         syncCounts = (0, 0, 0)

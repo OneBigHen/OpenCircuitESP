@@ -66,7 +66,7 @@ public enum ZeppMetricMapping {
         case .manualStress:
             return "no Apple Health type for stress; not fetched (only ever empty on the Helio)"
         case .pai:
-            return "no metric kind for PAI"
+            return "no Apple Health type for PAI; stored in the app only as .pai (storedSamples)"
         case .sleepSpO2:
             return "overlaps 0x25 SpO2 (Gadgetbridge does not store it); needs a Phase 3 decision"
         case .sleepSession:

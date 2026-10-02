@@ -13,6 +13,11 @@ struct HelioConnectionCard: View {
     var latestStress: HelioReading?
     /// Opens today's stress chart (#239). The stress reading is a button only when this is set.
     var onStress: (() -> Void)?
+    /// The strap's newest STORED PAI reading, under 48 h old (`StrapPAIReading.currentReading`), or
+    /// nil. Read from the store by ContentView for exactly the reason stress is: `0x0d` arrives about
+    /// once a day, so `lastSyncResult.latestPAI` was blank after almost every sync and after every
+    /// relaunch (decision 45).
+    var latestPAI: HelioReading?
 
     /// Cached like `HelioSetupView`'s (review-224 N8): `hasKey` is a Keychain query, so it is read on
     /// appear and whenever the link or session phase moves, not on every render.
@@ -112,14 +117,12 @@ struct HelioConnectionCard: View {
         }
     }
 
-    /// Stress and PAI (decision 15): shown here, never written to Apple Health.
-    ///
-    /// PAI still comes from `lastSyncResult` and so still disappears after a sync without a PAI record
-    /// or a relaunch: PAI has no stored series to read instead (steer 3 leaves it; see the report).
+    /// Stress and PAI (decision 15): shown here, never written to Apple Health. Both numbers come
+    /// from the store, with their own day-qualified time, so neither depends on what this particular
+    /// sync happened to bring.
     @ViewBuilder
     private var appOnlyReadings: some View {
-        let result = session?.lastSyncResult
-        if latestStress != nil || result?.latestPAI != nil {
+        if latestStress != nil || latestPAI != nil {
             HStack(spacing: 16) {
                 if let stress = latestStress {
                     if let onStress {
@@ -138,8 +141,9 @@ struct HelioConnectionCard: View {
                                 timeLabel: StrapStressTile.timeLabel(stress.at, now: Date()))
                     }
                 }
-                if let pai = result?.latestPAI {
-                    reading("PAI", value: "\(Int(pai.value.rounded()))", at: pai.at)
+                if let pai = latestPAI {
+                    reading("PAI", value: "\(Int(pai.value.rounded()))", at: pai.at,
+                            timeLabel: StrapStressTile.timeLabel(pai.at, now: Date()))
                 }
                 Spacer()
             }
@@ -148,8 +152,9 @@ struct HelioConnectionCard: View {
         }
     }
 
-    /// `timeLabel` overrides the bare clock time: stress passes the day-qualified label it shares with
-    /// the Stress tile (`StrapStressTile.timeLabel`); PAI keeps the clock time (steer 3 leaves PAI alone).
+    /// `timeLabel` overrides the bare clock time. Stress and PAI both pass the day-qualified label
+    /// they share with the Stress tile (`StrapStressTile.timeLabel`), so last night's reading reads
+    /// "Yesterday 11:59 PM" instead of a bare clock time under today's date.
     private func reading(_ title: String, value: String, at: Date, timeLabel: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.caption2).foregroundStyle(.secondary)

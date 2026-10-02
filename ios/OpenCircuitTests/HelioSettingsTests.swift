@@ -109,7 +109,7 @@ private final class Keys: HelioKeyStoring {
 /// A sink that stores nothing: these tests only need a sync to be running.
 @MainActor
 private final class NullSink: HelioHistorySink {
-    func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date] { [:] }
+    func fetchCursors(timeline: SyncDeviceID, now: Date) -> [ZeppFetchType: Date] { [:] }
     func notBefore(timeline: SyncDeviceID, now: Date) -> Date? { nil }
     func beginSync(timeline: SyncDeviceID, now: Date) {}
     func persist(_ round: ZeppFetchRound, timeline: SyncDeviceID, now: Date) -> Bool { true }

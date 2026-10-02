@@ -50,15 +50,13 @@ extension LocalStore {
 
     /// Persist one fetch watermark.
     ///
-    /// The stress watermark carries its ledger (`stageHelioStressCursor`): this is the ONLY place any
-    /// watermark is written, so routing `.autoStress` through here is what makes "the ledger moves in
-    /// the same save as the watermark" impossible to forget at a future call site (review-242b SF-1).
+    /// A backfilled type's watermark carries its ledger (`stageHelioCursorWithLedger`, stress `0x13`
+    /// and PAI `0x0d`): this is the ONLY place any watermark is written, so routing every type
+    /// through here is what makes "the ledger moves in the same save as the watermark" impossible to
+    /// forget at a future call site (review-242b SF-1). Any other type stages only its watermark,
+    /// exactly as before.
     func setHelioFetchCursor(_ type: ZeppFetchType, to date: Date, device: SyncDeviceID) throws {
-        if type == .autoStress {
-            stageHelioStressCursor(to: date, device: device)
-        } else {
-            stageHelioCursor(HelioFetchPlan.cursorName(for: type), to: date, device: device)
-        }
+        stageHelioCursorWithLedger(type, to: date, device: device)
         do { try context.save() } catch { context.rollback(); throw error }
     }
 
@@ -196,8 +194,16 @@ final class HelioStoreSink: HelioHistorySink {
         self.breadcrumbs = breadcrumbs
     }
 
-    func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date] {
-        store.applyHelioStressBackfillIfNeeded(device: timeline)   // #239: before the plan is built
+    func fetchCursors(timeline: SyncDeviceID, now: Date) -> [ZeppFetchType: Date] {
+        // Before the plan is built: #239 (stress `0x13`) and decision 45 (PAI `0x0d`). Each is due at
+        // most once per hole another build left, and neither can fire for an ordinary quiet stretch.
+        //
+        // Both take the SYNC's `now`, like `notBefore` and `persist` (review-248 SF-1): PAI's rewind
+        // is floored at `now − 30 days` of sample retention, and reading the wall clock for it while
+        // the rest of the sync ran on the session clock made that floor disagree with the plan built
+        // from it. On a phone the two are the same instant; under an injected clock they are not.
+        store.applyHelioStressBackfillIfNeeded(device: timeline, now: now)
+        store.applyHelioPAIBackfillIfNeeded(device: timeline, now: now)
         return store.helioFetchCursors(device: timeline)
     }
 
@@ -256,6 +262,10 @@ final class HelioStoreSink: HelioHistorySink {
                 _ = try store.ingest(owned(ZeppMetricMapping.storedSamples(from: round.parsed), timeline), device: timeline)
             case .pai(let records):
                 if let last = records.last { latestPAI = HelioReading(value: Double(last.totalPAI), at: last.time) }
+                // Decision 45: every valid record is kept as one `.pai` row, in the app only (no
+                // Health type). The card reads the newest of them, so it survives a sync with no PAI
+                // record — `0x0d` arrives about daily — and every relaunch.
+                _ = try store.ingest(owned(ZeppMetricMapping.storedSamples(from: round.parsed), timeline), device: timeline)
             default:
                 _ = try store.ingest(owned(ZeppMetricMapping.storedSamples(from: round.parsed), timeline), device: timeline)
             }

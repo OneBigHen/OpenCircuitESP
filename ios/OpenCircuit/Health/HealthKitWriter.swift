@@ -87,6 +87,10 @@ final class HealthKitWriter {
         // The Helio Strap's all-day stress (#239, decision 15): Apple Health has no stress type, so
         // nil keeps it out of BOTH the auth set and every write. It is stored and charted in the app only.
         case .stress: return nil
+        // The Helio Strap's PAI (decision 45, decision 15): Apple Health has no PAI type either, so
+        // nil keeps it out of BOTH the auth set and every write — the authorization prompt is exactly
+        // what it was before the kind existed. It is stored and shown in the app only.
+        case .pai: return nil
         }
         return HKQuantityType(id)
     }
@@ -105,6 +109,7 @@ final class HealthKitWriter {
         case .distance: return .meter()              // ESTIMATE — steps × RingConn's per-step constant
         case .exerciseMinutes: return .minute()      // ESTIMATE — elevated HR minutes
         case .stress: return .count()                // unused: no Health type (#239)
+        case .pai: return .count()                   // unused: no Health type (decision 45)
         }
     }
 
