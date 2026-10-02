@@ -622,11 +622,9 @@ struct UserProfileSettingsView: View {
                 Link(destination: URL(string: Self.privacyPolicyURL)!) {
                     Label("Privacy Policy", systemImage: "hand.raised")
                 }
-                Text("OpenCircuit is an independent, local-first app compatible with the RingConn "
-                     + "Gen 2 smart ring. It is not affiliated with, authorized, or endorsed by "
-                     + "RingConn or JZ_Tech; \"RingConn\" is a trademark of its respective owner. "
-                     + "Your data stays on your device and is written only to Apple Health — nothing "
-                     + "is sent to any server. OpenCircuit is not a medical device.")
+                // The same constant as onboarding's last page (#255), so the two can't drift apart.
+                Text(OnboardingCopy.disclaimer + " Your data stays on your device and is written only to "
+                     + "Apple Health — nothing is sent to any server.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
