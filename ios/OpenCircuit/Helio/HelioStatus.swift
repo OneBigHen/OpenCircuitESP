@@ -22,6 +22,13 @@ struct HelioStatus: Equatable {
     /// Link to the key guide (docs/HELIO_KEY_EXTRACTION.md), for the key states.
     static let keyGuideURL = URL(string: "https://github.com/perezjuanj/OpenCircuit/blob/master/docs/HELIO_KEY_EXTRACTION.md")!
 
+    /// Where the key comes from (`docs/HELIO_KEY_EXTRACTION.md`: Zepp's servers create it at pairing;
+    /// it's copied out of the Zepp account on a computer). One constant for the setup screen's "Before
+    /// you start" and onboarding's first steps, so the two can't fork (review-256 F1, F9).
+    static let keyOriginCopy = "The strap talks only to an app that knows its 16-byte key. Zepp's servers create the "
+        + "key once, when you pair the strap in the Zepp app; you copy it from your Zepp account on a computer. "
+        + "OpenCircuit never signs in to Zepp."
+
     /// Decision 6's coexistence copy, verbatim.
     static let dontUnpairCopy = "Don't unpair the strap in the Zepp app; unpairing makes the key stop working."
     static let zeppBluetoothCopy = "To let OpenCircuit connect, turn off Bluetooth for Zepp (Settings ▸ Zepp ▸ Bluetooth) or delete the Zepp app."

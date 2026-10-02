@@ -10,17 +10,16 @@ struct DeviceChoiceView: View {
     var body: some View {
         List {
             Section {
-                row(.ringConn, detail: "RingConn Gen 2, Gen 2 Air or Gen 3. No account needed.") {
+                row(.ringConn, detail: ActiveDeviceChoice.ringConn.cardDetail) {
                     if !choice.isRing { confirmRing = true }
                 }
                 NavigationLink {
                     HelioSetupView()
                 } label: {
-                    rowLabel(.helioStrap, detail: "Needs a one-time key from the Zepp app (see setup).")
+                    rowLabel(.helioStrap, detail: ActiveDeviceChoice.helioStrap.cardDetail)
                 }
             } footer: {
-                Text("OpenCircuit uses one device at a time. Switching keeps both devices' history on this phone; "
-                     + "the other device isn't searched for or connected until you switch back.")
+                Text(DeviceCopy.oneAtATime)
             }
         }
         .navigationTitle("Device")
@@ -29,7 +28,7 @@ struct DeviceChoiceView: View {
             Button("Use the RingConn ring") { DeviceSwitcher.activate(.ringConn) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The Helio Strap disconnects. Its history stays on this phone.")
+            Text("The \(choice.current.displayName) disconnects. Its history stays on this phone.")
         }
     }
 
@@ -89,8 +88,7 @@ struct HelioSetupView: View {
             }
 
             Section {
-                bullet("The strap talks only to an app that knows its 16-byte key. The Zepp app creates the key once, "
-                       + "when you pair the strap. OpenCircuit never signs in to Zepp.")
+                bullet(HelioStatus.keyOriginCopy)
                 Link("How to get the key", destination: HelioStatus.keyGuideURL)
                 bullet(HelioStatus.dontUnpairCopy)
                 bullet(HelioStatus.zeppBluetoothCopy)

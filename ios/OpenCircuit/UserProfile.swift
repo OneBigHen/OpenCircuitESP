@@ -267,7 +267,7 @@ struct UserProfileSettingsView: View {
                                 .labelStyle(.titleAndIcon)
                                 .foregroundStyle(.green)
                         }
-                        Text("OpenCircuit is writing your ring's metrics into Apple Health.")
+                        Text(ProfileDeviceCopy.healthWriting(activeDevice))
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
                         // A partial grant (#132) or a persisted write failure (#135): don't claim a
@@ -323,8 +323,7 @@ struct UserProfileSettingsView: View {
                                  + "still works as a local dashboard.")
                                 .font(.caption).foregroundStyle(.secondary)
                         } else {
-                            Text("Write your ring's heart rate, HRV, SpO₂, temperature, sleep and more "
-                                 + "into Apple Health.")
+                            Text(ProfileDeviceCopy.healthSummary(activeDevice))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -417,8 +416,7 @@ struct UserProfileSettingsView: View {
                             .foregroundStyle(.indigo)
                     }
                 }
-                Text("Add OpenCircuit to your Sleep Focus once, and turning that Focus off will "
-                     + "trigger a ring history sync alongside the existing automatic syncs.")
+                Text(ProfileDeviceCopy.sleepFocusNote(activeDevice))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -575,11 +573,7 @@ struct UserProfileSettingsView: View {
                         LabeledContent("Warn before bed", value: "\(bedtimeMinutesBefore) min")
                     }
                 }
-                Text(ringChosen
-                     ? "Reminders pause while the ring is on the charger or off your finger — it "
-                       + "counts no steps there, so that time isn't treated as sitting still. "
-                       + "Quiet hours and backoff use the same settings as health alerts above."
-                     : "Quiet hours and backoff use the same settings as health alerts above.")
+                Text(ProfileDeviceCopy.remindersFooter(activeDevice))
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -619,8 +613,7 @@ struct UserProfileSettingsView: View {
                 } label: {
                     Label("Export health data", systemImage: "square.and.arrow.up")
                 }
-                Text("Export all stored ring data (HR, SpO₂, sleep, steps) as CSV or JSON "
-                     + "for your own analysis. Data stays on your device unless you share it.")
+                Text(ProfileDeviceCopy.exportNote)
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -636,11 +629,9 @@ struct UserProfileSettingsView: View {
                 Link(destination: URL(string: Self.privacyPolicyURL)!) {
                     Label("Privacy Policy", systemImage: "hand.raised")
                 }
-                Text("OpenCircuit is an independent, local-first app compatible with the RingConn "
-                     + "Gen 2 smart ring. It is not affiliated with, authorized, or endorsed by "
-                     + "RingConn or JZ_Tech; \"RingConn\" is a trademark of its respective owner. "
-                     + "Your data stays on your device and is written only to Apple Health — nothing "
-                     + "is sent to any server. OpenCircuit is not a medical device.")
+                // The same constant as onboarding's last page (#255), so the two can't drift apart.
+                Text(DeviceCopy.disclaimer + " Your data stays on your device and is written only to "
+                     + "Apple Health — nothing is sent to any server.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -739,13 +730,13 @@ struct UserProfileSettingsView: View {
     /// The medical disclaimer paragraph, verbatim, shared by every section that touches a body
     /// signal (Health alerts, and the headache log). Hoisted to ONE constant rather than re-typed
     /// per section so the two can't drift into telling the user different things.
-    private static let medicalDisclaimer =
-        "Note: OpenCircuit is not a medical device. These reminders are based on ring "
-        + "sensor data only and are not a diagnosis. If you feel unwell, consult a "
-        + "qualified medical professional."
+    private static var medicalDisclaimer: String { ProfileDeviceCopy.alertsDisclaimer }
+
+    /// The device whose copy Profile's device lines use (decision 51e): the one in use.
+    private var activeDevice: ActiveDeviceChoice { ActiveDeviceChoiceStore.shared.current }
 
     /// Headache-specific wording. The shared `medicalDisclaimer` above says the reminders "are
-    /// based on ring sensor data only" — neither clause is true of a Phase-1 headache log, which is
+    /// based on your wearable's sensor data only" — neither clause is true of a Phase-1 headache log, which is
     /// typed by the user, derives nothing from the ring, and fires no reminder at all. Over-
     /// disclaiming is the safe direction, but a disclaimer that misdescribes the feature is its own
     /// kind of untrue, and this one has to carry the load-bearing sentence: we do not predict.

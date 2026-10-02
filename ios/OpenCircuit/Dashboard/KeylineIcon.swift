@@ -1,7 +1,7 @@
 // Keyline icons (MIT, keylineicons.com — see docs/THIRD_PARTY_NOTICES.md) used by the Today
-// dashboard (#216). The 24×24 stroke SVGs live unmodified in Assets.xcassets/Keyline as template,
-// vector-preserving image sets, so they tint with `foregroundStyle` and stay sharp at every
-// Dynamic Type size. Existing SF Symbols elsewhere in the app are untouched.
+// dashboard (#216) and onboarding (#255). The 24×24 stroke SVGs live unmodified in
+// Assets.xcassets/Keyline as template, vector-preserving image sets, so they tint with
+// `foregroundStyle` and stay sharp at every Dynamic Type size. Existing SF Symbols elsewhere in the app are untouched.
 
 import SwiftUI
 
@@ -13,6 +13,8 @@ enum KeylineIcon: String, CaseIterable {
     case chevronLeft = "chevron-left"
     case chevronRight = "chevron-right"
     case circleAlert = "circle-alert"
+    case circleCheck = "circle-check"
+    case circle, bluetooth
 
     /// The asset-catalog name (the `Keyline` folder provides a namespace).
     var assetName: String { "Keyline/\(rawValue)" }
