@@ -35,6 +35,7 @@ struct OnboardingView: View {
     /// The live read (UserDefaults + Keychain) has run. It runs once, on appear, not in `init`: the
     /// presenter re-renders often (a live device streams), and each render re-runs `init` (review-256 F5).
     @State private var readInstalled = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(onDone: @escaping () -> Void) {
         self.onDone = onDone
@@ -60,6 +61,8 @@ struct OnboardingView: View {
         if pick == nil { pick = live.preselection }
     }
 
+    private var motion: Animation? { reduceMotion ? nil : .default }
+
     private var isLastPage: Bool { page == .finish }
     private var finish: OnboardingFlow.Finish { flow.finish(for: pick) }
 
@@ -82,7 +85,7 @@ struct OnboardingView: View {
                         .padding(.vertical, 8)
                     Button(isLastPage ? finish.title : "Continue") {
                         if let next = OnboardingFlow.Page(rawValue: page.rawValue + 1) {
-                            withAnimation { page = next }
+                            withAnimation(motion) { page = next }
                         } else if finish == .setUpStrap {
                             showStrapSetup = true
                         } else {
@@ -221,11 +224,12 @@ struct OnboardingView: View {
     private func card(_ device: ActiveDeviceChoice) -> some View {
         let selected = pick == device
         return Button {
-            withAnimation { pick = device }
+            withAnimation(motion) { pick = device }
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 KeylineGlyph(selected ? .circleCheck : .circle, size: 22, relativeTo: .body)
                     .foregroundStyle(selected ? Theme.accent : Color.secondary)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline) {
                         Text(device.displayName).font(.body.weight(.semibold))
@@ -248,9 +252,9 @@ struct OnboardingView: View {
             .contentShape(RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(.plain)
-        .accessibilityElement(children: .ignore)
+        // On the Button itself, so VoiceOver has one element per card: device, detail, "In use".
         .accessibilityLabel(flow.cardAccessibilityLabel(device))
-        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     // MARK: Page scaffold
@@ -273,7 +277,7 @@ struct OnboardingView: View {
         .accessibilityLabel("Page \(page.rawValue + 1) of \(pages.count)")
         .accessibilityAdjustableAction { direction in
             let step = direction == .increment ? 1 : -1
-            if let next = OnboardingFlow.Page(rawValue: page.rawValue + step) { withAnimation { page = next } }
+            if let next = OnboardingFlow.Page(rawValue: page.rawValue + step) { withAnimation(motion) { page = next } }
         }
     }
 
