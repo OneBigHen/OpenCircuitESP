@@ -18,11 +18,12 @@ struct StrapLiveHeartRate {
     /// The control appears only when this connection can start a stream: authenticated, with the
     /// heart-rate endpoint and characteristic present (a keyless strap has nothing to start).
     var canMeasure: Bool { session.canStreamHeartRate }
-    var measuring: Bool { session.liveHeartRateRunning }
+    /// A Measure is running. A workout's stream is not a measurement: it has its own screen (#227).
+    var measuring: Bool { session.liveHeartRateRunning && session.liveHeartRateOwner == .measure }
     /// A reading from THIS measurement only (the start clears the previous one), nil while warming up.
     var liveHR: Int? { measuring ? session.liveHR : nil }
-    /// Like the ring's, not while a history sync holds the link.
-    var disabled: Bool { session.syncing }
+    /// Like the ring's, not while a history sync or a workout holds the link.
+    var disabled: Bool { session.syncing || session.liveHeartRateOwner == .workout }
 
     func toggle() {
         if measuring { session.stopLiveHeartRate() } else { session.startLiveHeartRate(duration: Self.duration) }

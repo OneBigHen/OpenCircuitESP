@@ -60,6 +60,10 @@ struct ContentView: View {
     /// Apple Health, or discard). Non-nil presents the recovery alert. See
     /// `WorkoutSessionRecovery` for what the app is allowed to claim about it.
     @State private var recoverableWorkout: RecoveredWorkout?
+    /// The strap's workout (#227): the app's one recorder, outliving every sheet as `workoutManager` does.
+    /// Built once, on first use (review-238 N2), idle and inert unless a strap workout starts.
+    private var strapWorkouts: StrapWorkoutRecorder { .shared }
+    @State private var showStrapWorkout = false
     @State private var showCalibration = false
     @StateObject private var calibration = CalibrationSessionManager()
     /// Raw-capture export state for the activity-channel probe (debug / RE — issue #93).
@@ -103,9 +107,14 @@ struct ContentView: View {
     /// True once a trends load has LANDED (`trendsLoadedAt` is stamped before the await, so it
     /// can't say that) — the Today header and tiles show a loading state until then (#216).
     @State private var trendsHaveLoaded = false
-    /// The Helio Strap's newest stored stress and today's readings, for its card and the Stress tile
-    /// (#239, steer 3). nil when there is no strap reading in the last 24 h (always, ring-only).
+    /// The Helio Strap's newest stored stress and today's readings, for the Stress tile (#239, steer 3).
+    /// nil when there is no strap reading in the last 24 h (always, ring-only).
     @State private var strapStress: StrapStressTile?
+    /// The Helio Strap's newest stored PAI, for its Your Numbers tile (decisions 45, 49). nil when there
+    /// is no strap PAI reading in the last 48 h (always, ring-only).
+    @State private var strapPAI: StrapPAIReading?
+    /// The PAI tile's explanation sheet (decision 49).
+    @State private var showPAIInfo = false
     /// Rolling buffer of recent live readings feeding the liveline live chart during an on-demand
     /// measurement (HR or SpO₂). Accumulated from `session.liveHR`/`liveSpO2` onChange, reset when
     /// monitoring stops. Display units: bpm for HR, whole-percent for SpO₂.
@@ -228,10 +237,16 @@ struct ContentView: View {
                     evaluateReminders: { evaluateReminders(includeSedentary: false) }),
                 // A switch made from Profile ▸ Device: hand the store to the newly chosen driver.
                 onChoiceChanged: { choice in
+                    // Switched to the ring mid-workout: the strap's link is already closed (its stream
+                    // stopped with `04 00`), so the strap workout ends here and keeps what it recorded.
+                    if choice != .helioStrap, strapWorkouts.isRecording { Task { await strapWorkouts.end() } }
                     if choice == .helioStrap { helio.setLocalStore(LocalStore(modelContext)) }
                     else { scanner.setLocalStore(LocalStore(modelContext)) }
                     Task { await loadTrends(.syncFinished) }
                 }))
+            // The strap's workout (#227): its sheet, the interrupted-workout offer, the landing pass.
+            .modifier(StrapWorkoutHooks(recorder: strapWorkouts, session: helioSession, show: $showStrapWorkout,
+                                        onWorkoutsChanged: { workoutHistoryToken += 1 }))
             // Feed / reset the liveline live-vitals buffer as on-demand readings arrive.
             .onChange(of: session?.liveHR) { _, hr in
                 if session?.monitoring == true, session?.liveMode == .hr, let hr { appendLive(Double(hr)) }
@@ -456,9 +471,7 @@ struct ContentView: View {
                     if ringActive {
                         connectionCard
                     } else {
-                        HelioConnectionCard(connection: helio, onSetUp: { showHelioSetup = true },
-                                            latestStress: strapStress?.currentReading(now: Date()),
-                                            onStress: { path.append(.strapStress) })
+                        HelioConnectionCard(connection: helio, onSetUp: { showHelioSetup = true })
                     }
                     // First-run Health authorization banner (#143) — right under the connection card.
                     if !healthAuthorized, HealthKitWriter.isAvailable {
@@ -482,6 +495,8 @@ struct ContentView: View {
             .navigationTitle("Today")
             .navigationDestination(for: Route.self) { route in destination(for: route) }
         }
+        // What PAI is, from the strap's PAI tile (decision 49): a sheet, as there is nothing to chart.
+        .sheet(isPresented: $showPAIInfo) { StrapPAIInfoSheet() }
     }
 
     /// The liveline live-vitals hero — shown ONLY during an on-demand HR/SpO₂ measurement, when the
@@ -595,6 +610,11 @@ struct ContentView: View {
                     }
                     // Workouts record the ring's live heart rate and native sport mode: ring only (#215).
                     if ringActive { workoutCard }
+                    // The strap's workout (#227): its live heart rate and the phone's GPS. Still shown
+                    // while one is recording after a switch, so it can always be ended.
+                    if !ringActive || strapWorkouts.isRecording {
+                        StrapWorkoutCard(recorder: strapWorkouts, show: $showStrapWorkout)
+                    }
                     // The app's own workout history, read back out of Apple Health (no SwiftData
                     // model, no schema version). Before this a finished workout was visible exactly
                     // once — on the summary screen — which is the other half of the tester's "it
@@ -724,7 +744,7 @@ struct ContentView: View {
         // completion would let the second one pass this guard while the first is still in flight —
         // which is the exact double-load being fixed.
         trendsLoadedAt = Date()
-        // The strap's stress for its card and tile (#239, steer 3), on the same triggers as the tiles —
+        // The strap's stress for its tile (#239, steer 3), on the same triggers as the tiles —
         // launch, foreground return, every finished sync, a device switch — and from the store, so it
         // survives a sync without a stress round, a relaunch and a background wake. Loaded alongside
         // the trends, not after them, so it adds nothing before `trendsHaveLoaded` (review-242c NIT 2).
@@ -734,8 +754,13 @@ struct ContentView: View {
         let unitRaw = tempUnitRaw
         async let loadedTrends = TrendsData.loadAsync(container: container, tempUnitRaw: unitRaw)
         async let loadedStress = StrapStressTile.loadAsync(container: container)
+        // The strap's PAI for its tile (decisions 45, 49), on the same triggers and off the main actor
+        // for the same reasons — `0x0d` arrives about daily, so reading it from the store is what keeps
+        // the number on the tile after a sync that brought no record, and after a relaunch.
+        async let loadedPAI = StrapPAIReading.loadAsync(container: container)
         trends = await loadedTrends
         strapStress = await loadedStress
+        strapPAI = await loadedPAI
         trendsHaveLoaded = true
     }
 
@@ -816,7 +841,9 @@ struct ContentView: View {
                                                onSelect: { path.append(.metric($0)) },
                                                onTimeline: { path.append(.timeline) },
                                                strapStress: strapStress,
-                                               onStress: { path.append(.strapStress) })
+                                               onStress: { path.append(.strapStress) },
+                                               strapPAI: strapPAI,
+                                               onPAI: { showPAIInfo = true })
         case .vitalsStatus: vitalsStatusCard
         case .calories:     caloriesCard
         case .goals:        card { GoalsCardView() }
@@ -854,6 +881,8 @@ struct ContentView: View {
     @MainActor
     private func handleActiveWorkoutLink() {
         selectedTab = .activity
+        // The strap's workout has its own sheet (#227); never recording for a ring-only user.
+        if strapWorkouts.isRecording { showStrapWorkout = true; return }
         showWorkout = true
     }
 
@@ -2254,7 +2283,7 @@ struct ContentView: View {
                     }
                     KeylineGlyph(.chevronRight, size: 12, relativeTo: .caption).foregroundStyle(.tertiary)
                 }
-                Text("Battery, key, Find My Strap, alarms").font(.subheadline).foregroundStyle(.secondary)
+                Text("Battery, key, settings, Find My Strap, alarms").font(.subheadline).foregroundStyle(.secondary)
             }
         }
         .buttonStyle(.plain)
@@ -2385,17 +2414,16 @@ struct ContentView: View {
         guard healthAuthorized else { return }
         let store = LocalStore(modelContext)
         if !ringActive {
-            // The Helio Strap (#215): its timeline's pending samples (HRV withheld, decision 14) and
-            // the nights of its last sync, through the same writer. Never the ring's segments.
+            // The Helio Strap (#215): its timeline's pending samples (`HelioConnection.flushStrap`'s
+            // kinds, HRV included since decision 44) and the nights of its last sync, through the same
+            // writer. Never the ring's segments.
             let timeline = helioSession?.timeline ?? HelioConnection.savedPeripheralID.map {
                 SyncDeviceID.timeline(for: .zeppOS(model: HelioSession.displayName), identityID: $0)
             }
             guard let timeline else { return }
             let nights = helioSession?.lastSyncResult?.nights.map(\.segments) ?? []
             Task {
-                let r = await health.flushToHealth(store: store, device: timeline,
-                                                   mirroredKinds: HelioHealthPolicy.healthMirroredKinds(),
-                                                   strapNights: nights)
+                let r = await HelioConnection.flushStrap(health, store: store, timeline: timeline, nights: nights)
                 refreshHealthShareState()
                 if r.wroteAnything {
                     observability.recordHealthWrite()

@@ -95,7 +95,14 @@ final class HealthKitShareTypesTests: XCTestCase {
         XCTAssertNil(HealthKitWriter.quantityType(for: .stress))
     }
 
-    /// #239 added `MetricKind.stress`, and `allTypes` loops `MetricKind.allCases`. Pinned as an
+    /// Decision 45: the strap's PAI is stored in the app only. Apple Health has no PAI type
+    /// (decision 15), so `.pai` maps to none and can't enter the auth request or a write.
+    func testPAIHasNoHealthKitType() {
+        XCTAssertNil(HealthKitWriter.quantityType(for: .pai))
+    }
+
+    /// #239 added `MetricKind.stress` and decision 45 `MetricKind.pai`, and `allTypes` loops
+    /// `MetricKind.allCases`. Pinned as an
     /// EQUALITY of identifiers, so a new kind can't silently add a type to the share request (which
     /// would put a fresh Health sheet in front of every existing install).
     func testTheShareTypeSetIsExactlyTheShippedOne() {

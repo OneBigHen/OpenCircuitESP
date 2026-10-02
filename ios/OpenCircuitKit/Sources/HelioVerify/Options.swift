@@ -25,10 +25,15 @@ struct Options {
     var deleteAlarmSlot: UInt8?
     var allowWrite = false
     var alerts = false
+    // Strap settings (Settings.swift, ZEPP_PROTOCOL.md §17, §19).
+    var settings = false
+    var setConfig: (setting: ZeppSetting, value: ZeppConfigValue)?
+    var configProbe: ConfigProbe?
 
     var writesAlarms: Bool { setAlarm != nil || deleteAlarmSlot != nil }
+    var writesConfig: Bool { setConfig != nil || configProbe != nil }
     /// Any control flag: the run does the controls instead of live HR and the history fetch.
-    var hasControls: Bool { findSeconds != nil || vibrate || listAlarms || writesAlarms || alerts }
+    var hasControls: Bool { findSeconds != nil || vibrate || listAlarms || writesAlarms || alerts || settings || writesConfig }
 }
 
 let usage = """
@@ -94,9 +99,32 @@ DEVICE CONTROLS (Helio Strap only; all need --key-file)
                       e.g. the one --set-alarm made. Prints the list before and after. Sets the
                       strap's clock first, like --set-alarm, even if the slot is empty and nothing
                       is deleted.
+  --settings          Read-only: the config capabilities, every listed group read with arg count
+                      00 (each group's version and the arg and type codes present, never their
+                      values), then the HEALTH and WORKOUT settings OpenCircuit offers, with the
+                      strap's values and allowed values (ZEPP_PROTOCOL.md §10 item 25, first part).
+  --set-config <setting>=<value>
+                      WRITES STRAP STATE; needs --allow-write. Changes ONE setting through the
+                      app's own write path (§17.8): read it and its parent with constraints,
+                      validate against the strap's allowed values, write one entry echoing the
+                      version read, wait 5 s for 06, re-read and print the strap's value. Nothing
+                      is sent if the value is invalid or already set. Settings: \(settingNames).
+                      Values: on/off for switches; off, smart, continuous or minutes for
+                      heartRateMonitoring; high, standard or low for workoutDetectionSensitivity;
+                      otherwise a number (bpm or %), 0 = off.
+  --config-probe <a|b|c>
+                      WRITES STRAP STATE; needs --allow-write. One of §10 item 25's rejection probes,
+                      each sent raw (the app would refuse it), then re-read, and the strap's previous
+                      value written back if the strap took the probe:
+                        a  a high-HR alert value (HEALTH 02) outside the strap's allowed list;
+                        b  relax reminder (14) on while stress monitoring (13) reads off. Skipped
+                           unless stress reads off and relax reads off; turn stress off first with
+                           --set-config stressMonitoring=off, and back on afterwards;
+                        c  relax reminder written with its CURRENT value but version byte + 1.
   --allow-write       Confirms the writes that change strap settings: --set-time (the clock),
-                      --set-alarm and --delete-alarm (which also set the clock). Each of those
-                      needs it, and it is refused on its own. Without it no setting is changed.
+                      --set-alarm and --delete-alarm (which also set the clock), --set-config and
+                      --config-probe. Each of those needs it, and it is refused on its own. Without
+                      it no setting is changed.
                       Dropping fetched data from the strap has its own flag, --allow-delete.
 
 EXIT CODES
@@ -153,6 +181,18 @@ func parseOptions(_ args: [String]) throws -> Options {
         case "--vibrate": o.vibrate = true
         case "--alarms": o.listAlarms = true
         case "--alerts": o.alerts = true
+        case "--settings": o.settings = true
+        case "--set-config":
+            let spec = try value("--set-config")
+            guard let parsed = parseSettingSpec(spec) else {
+                throw fail("--set-config takes <setting>=<value>, e.g. stressMonitoring=on or highHeartRateAlert=120 (see --help)")
+            }
+            o.setConfig = parsed
+        case "--config-probe":
+            guard let probe = ConfigProbe(rawValue: try value("--config-probe")) else {
+                throw fail("--config-probe takes a, b or c (see --help)")
+            }
+            o.configProbe = probe
         case "--allow-write": o.allowWrite = true
         case "--set-alarm":
             guard let alarm = parseAlarmSpec(try value("--set-alarm")) else {
@@ -183,7 +223,7 @@ func parseOptions(_ args: [String]) throws -> Options {
         throw fail("--allow-delete requires --key-file and --out: data is only dropped from the strap after it is durably saved")
     }
     if o.hasControls && o.keyFile == nil {
-        throw fail("--find, --vibrate, --alerts and the alarm flags need --key-file: the strap only takes them after auth")
+        throw fail("--find, --vibrate, --alerts, --settings and the alarm and config flags need --key-file: the strap only takes them after auth")
     }
     if o.setTime && o.keyFile == nil {
         throw fail("--set-time needs --key-file: the clock is set after auth")
@@ -194,11 +234,17 @@ func parseOptions(_ args: [String]) throws -> Options {
     if o.setTime && !o.allowWrite {
         throw fail("--set-time writes the strap's clock: add --allow-write to confirm")
     }
-    if o.allowWrite && !o.writesAlarms && !o.setTime {
-        throw fail("--allow-write only applies to --set-time / --set-alarm / --delete-alarm")
+    if o.writesConfig && !o.allowWrite {
+        throw fail("--set-config and --config-probe write the strap's settings: add --allow-write to confirm")
+    }
+    if o.allowWrite && !o.writesAlarms && !o.setTime && !o.writesConfig {
+        throw fail("--allow-write only applies to --set-time / --set-alarm / --delete-alarm / --set-config / --config-probe")
     }
     if o.setAlarm != nil && o.deleteAlarmSlot != nil {
         throw fail("one alarm write per run: use --set-alarm or --delete-alarm, not both")
+    }
+    if [o.writesAlarms, o.setConfig != nil, o.configProbe != nil].filter({ $0 }).count > 1 {
+        throw fail("one write per run: --set-alarm/--delete-alarm, --set-config and --config-probe exclude each other")
     }
     // Alarm edits need the strap's clock set on this connection (ZEPP_PROTOCOL.md §14).
     if o.writesAlarms { o.setTime = true }
@@ -219,4 +265,46 @@ func parseAlarmSpec(_ text: String) -> (hour: UInt8, minute: UInt8, days: ZeppAl
         days = parsed
     }
     return (hour, minute, days)
+}
+
+/// §10 item 25's three rejection probes (Settings.swift).
+enum ConfigProbe: String, Equatable {
+    /// a: a high-HR alert value outside the strap's allowed list.
+    case outsideAllowedList = "a"
+    /// b: relax reminder on while stress monitoring reads off.
+    case childWhileParentOff = "b"
+    /// c: the relax reminder's current value, with the version byte one more than the version read.
+    case versionPlusOne = "c"
+}
+
+/// The `--set-config` setting names.
+let settingNames = ZeppSetting.allCases.map(\.rawValue).joined(separator: ", ")
+
+/// `<setting>=<value>` for `--set-config`; nil for an unknown setting or a value it can't take.
+/// Only the shape is checked here: whether the strap allows the value is checked against its own
+/// allowed list after the read (§17.6).
+func parseSettingSpec(_ text: String) -> (setting: ZeppSetting, value: ZeppConfigValue)? {
+    let parts = text.split(separator: "=", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespaces) }
+    guard parts.count == 2, let setting = ZeppSetting(rawValue: parts[0]) else { return nil }
+    let word = parts[1].lowercased()
+    if setting.isSwitch {
+        switch word {
+        case "on", "1", "true": return (setting, .bool(true))
+        case "off", "0", "false": return (setting, .bool(false))
+        default: return nil
+        }
+    }
+    switch (setting, word) {
+    case (_, "off"): return (setting, .byte(0x00))
+    // §17.9: ff smart, fe continuous (never Gadgetbridge's 00).
+    case (.heartRateMonitoring, "smart"): return (setting, .byte(0xff))
+    case (.heartRateMonitoring, "continuous"): return (setting, .byte(0xfe))
+    case (.workoutDetectionSensitivity, "high"): return (setting, .byte(0x00))
+    case (.workoutDetectionSensitivity, "standard"): return (setting, .byte(0x01))
+    case (.workoutDetectionSensitivity, "low"): return (setting, .byte(0x02))
+    default: break
+    }
+    if word.hasPrefix("0x"), let byte = UInt8(word.dropFirst(2), radix: 16) { return (setting, .byte(byte)) }
+    if let byte = UInt8(word) { return (setting, .byte(byte)) }
+    return nil
 }

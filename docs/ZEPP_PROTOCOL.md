@@ -715,7 +715,7 @@ support, and the strap inherits all Zepp OS defaults except display-dependent on
 |---|---|---|---|---|---|---|---|
 | `0x01` | **activity** | **8 bytes/min** on Zepp OS: `[0]` kind, `[1]` intensity, `[2]` steps, `[3]` HR, `[4]` unknown, `[5]` sleep, `[6]` deep-sleep, `[7]` REM (sleep bytes: use low 7 bits) | 1/min from *start* | steps = count in that minute; HR bpm, `ff` or `00` = no reading (HelioCore drops them; GB stores raw); intensity 0–255 (GB divides by 256). CRC is **not** checked by GB for this type; on the Helio it **matches** like every type that has delivered data (60 records / 480 B, and a full 12 h round of 720 records / 5760 B); manual HR `0x02`, manual stress `0x12` and max HR `0x3d` have only answered empty, so their CRC has never been observed. | per-minute activity sample | yes (always) | 🟢 8 bytes/min, length in records `HW:2026-09-30 (hw 0.132.27.2)`; 🟢 CRC `HW:2026-09-30 13:35`; fields 🟡 `FOP/Activity:71-164`, `SUP:984-986`, `HC:1180-1193` |
 | `0x02` | manual HR | 6 bytes: u32 ts, i8 tz (¼ h), u8 bpm | event | bpm | manual-HR sample | yes | 🟡 `FOP/HeartRateManual:63-90` (only empty replies on the Helio so far) |
-| `0x0d` | PAI | 102 bytes: u8 type (`05` valid, `00` pre-reset: skip), u32 ts, i8 tz, 31 unknown, f32 PAI low, f32 moderate, f32 high, u16 min low, u16 min moderate, u16 min high, f32 PAI today, f32 PAI total, 39 unknown | daily | PAI points, minutes | PAI sample | yes | 🟢 102-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Pai:62-129` |
+| `0x0d` | PAI | 102 bytes: u8 type (`05` valid, `00` pre-reset: skip), u32 ts, i8 tz, 31 unknown, f32 PAI low, f32 moderate, f32 high, u16 min low, u16 min moderate, u16 min high, f32 PAI today, f32 PAI total, 39 unknown. **We store** the f32 PAI **total** of each kept record as one phone-only `MetricKind.pai` row at the record's own time (`ZeppMetricMapping.paiSamples`, decision 45); the app's PAI tile shows the newest (decision 49). Never written to Apple Health (no PAI type) | daily | PAI points, minutes | PAI sample | yes | 🟢 102-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Pai:62-129` |
 | `0x12` | stress (manual) | 5 bytes: u32 ts, u8 stress | event | 0–100 | stress, type manual | yes | 🟡 `FOP/StressManual:64-95` (only empty replies on the Helio so far) |
 | `0x13` | **stress (auto)** | 1 byte/min, `ff` = none (the minute still advances) | 1/min from *start* | 0–100; bands 0–39 relaxed, 40–59 mild, 60–79 moderate, 80–100 high | stress, type automatic | yes | 🟢 1 byte/min, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/StressAuto:62-91`, `HC:1195-1199` |
 | `0x25` | **SpO₂** (normal: manual + auto) | one leading **version byte `02`** per round, then 65-byte records: u32 ts, u8 value (**bit 7 set = automatic**, value = low 7 bits), 60 unknown bytes. Other versions: reject. | event | % | SpO₂ sample, type auto/manual | yes | 🟢 version `02` + 65-byte records, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Spo2Normal:64-103`, `HC:1201-1212` |
@@ -725,7 +725,7 @@ support, and the strap inherits all Zepp OS defaults except display-dependent on
 | `0x3a` | **resting HR** | 6 bytes: u32 ts, i8 tz, u8 bpm | ~daily (Zepp shows it per day) | bpm | resting-HR sample | yes | 🟢 6-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/HeartRateResting:63-91`, `HC:1214-1222` |
 | `0x3d` | **max HR** | 6 bytes: u32 ts, i8 tz, u8 bpm | ~daily 🔴 | bpm | max-HR sample | yes | 🟡 `FOP/HeartRateMax:63-90` (only empty replies on the Helio so far) |
 | `0x48` | **sleep session** | **594-byte** records, see §6.6 | per night | minutes | sleep-session blob; stages overlaid on activity | yes | 🟢 594-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/SleepSession:59-85` |
-| `0x49` | **HRV** | 6 bytes: u32 ts, u8 unknown (🔴 probably the tz byte, as in the 6-byte HR records), u8 HRV | a few per day/night 🔴 | **ms**; statistic **unknown** (RMSSD vs SDNN, 🔴) | HRV value | yes (no display) | 🟢 6-byte records, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Hrv:59-85`, `HC:1236-1245` |
+| `0x49` | **HRV** | 6 bytes: u32 ts, u8 unknown (🔴 probably the tz byte, as in the 6-byte HR records), u8 HRV | a few per day/night 🔴 | **ms**; statistic **RMSSD** 🟡: Amazfit documents that "Amazfit devices measure HRV using the RMSSD method" (https://us.amazfit.com/pages/amazfit-technology-page-health-technology; a product-line statement, the Helio Strap is not named), and a third-party Helio review says the same. Not compared with Zepp's display on our strap (§10 item 9); a capture that contradicts it wins | HRV value | yes (no display) | 🟢 6-byte records, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Hrv:59-85`, `HC:1236-1245`; statistic 🟡 Amazfit product-line documentation (2026-10-01) |
 | `0x2c` | statistics | opaque files; fetched only so the strap frees memory | — | — | discarded | yes | 🟡 `FOP/Statistics` |
 | `0x05` / `0x06` | workout summary / detail | binary summary + track; **out of scope for v1**, not specified here | per workout | — | workouts | yes | 🟡 `FOP/SportsSummary`, `FOP/SportsDetails` |
 | `0x07` | debug logs | — | — | — | — | no | 🟡 `GB/…/fetch/HuamiFetchDataType.java:24` |
@@ -919,7 +919,8 @@ Record firmware (DIS `0x2A26` or endpoint `0x0043`) with every run. The Helio ha
 9. **Fetch each type** in §6.5 over Path A for a 24 h window: record length rules, versions,
    first-record time vs *since*, and compare values against Gadgetbridge (or Zepp) for the
    same window. Specifically: HRV unknown byte (tz?), HRV statistic (compare to Zepp's
-   displayed HRV), temperature constants, sleep-session minute base (midnight vs noon).
+   displayed HRV; §6.5 holds RMSSD 🟡 on Amazfit's product-line documentation), temperature
+   constants, sleep-session minute base (midnight vs noon).
 10. **Ack semantics**: fetch a type, ack `09`, fetch again with the same *since*: same data
     re-delivered? Then (once, on a window already validated) ack `01` and fetch again.
 11. **Tier 0 live HR**: with Heart Rate Push on, connect **without** auth and subscribe to
@@ -1036,7 +1037,8 @@ sampling switch, recorded to settle §5.5).
 
 **Still untested** (keep their tags): wrong-key auth (`10 05 25`); ack `01` (delete); Tier 0
 live HR without auth; Zepp-app coexistence; time set (`0x0047`, `06 01`); the HRV statistic
-(RMSSD vs SDNN). Also not yet observed: the width of the device-info bit-0 prefix (§5.3; not
+(RMSSD vs SDNN; §6.5 holds RMSSD 🟡 on Amazfit's product-line documentation, which doesn't name
+the strap, and no value has been compared with Zepp's). Also not yet observed: the width of the device-info bit-0 prefix (§5.3; not
 recorded in the re-test); the advertisement; chunk acks; write types;
 Path B (`0x004B`); arg `0x05` vs "Heart Rate Push"; the device's sequence numbers; any value
 compared against Zepp (HRV unknown byte, temperature constants, sleep-session minute base);

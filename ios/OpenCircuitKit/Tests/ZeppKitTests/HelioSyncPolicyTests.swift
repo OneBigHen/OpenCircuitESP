@@ -93,23 +93,24 @@ final class HelioKeyTextTests: XCTestCase {
     }
 }
 
-// MARK: - Health policy and store mapping (decisions 10, 14, 16)
+// MARK: - Health policy and store mapping (decisions 10, 16, 44)
 
 final class HelioHealthPolicyTests: XCTestCase {
 
-    func testHRVIsNeverAHealthKindInV1() {
-        XCTAssertFalse(HelioHealthPolicy.writesHRV)
-        XCTAssertEqual(HelioHealthPolicy.healthMirroredKinds(), [.heartRate, .spo2, .respiratoryRate, .temperature])
-        XCTAssertFalse(HelioHealthPolicy.healthMirroredKinds().contains(.hrvSDNN))
-        // The one switch, flipped, is the only way HRV joins.
-        XCTAssertTrue(HelioHealthPolicy.healthMirroredKinds(writesHRV: true).contains(.hrvSDNN))
+    func testHRVIsAHealthKindByDefault() {
+        // Decision 44 (supersedes 14): the strap's HRV is RMSSD and is mirrored like the ring's.
+        XCTAssertTrue(HelioHealthPolicy.writesHRV)
+        XCTAssertEqual(HelioHealthPolicy.healthMirroredKinds(), [.heartRate, .spo2, .respiratoryRate, .temperature, .hrvSDNN])
+        XCTAssertTrue(HelioHealthPolicy.healthMirroredKinds().contains(.hrvSDNN))
+        // The one switch, off, still withholds exactly HRV.
+        XCTAssertEqual(HelioHealthPolicy.healthMirroredKinds(writesHRV: false), [.heartRate, .spo2, .respiratoryRate, .temperature])
     }
 
-    func testHRVIsStoredLocallyButStaysOutOfTheHealthMapping() throws {
+    func testHRVIsMappedThroughTheStoreOnly() throws {
         // Two made-up records (worked example D's shape) plus a 0 ms "no reading".
         let hrv = try ZeppRecordParser.parse(.hrv, data: hex("8c e4 ba 6a 08 2a b8 e5 ba 6a 08 39 e4 e6 ba 6a 08 00"),
                                              start: date(0))
-        XCTAssertEqual(ZeppMetricMapping.samples(from: hrv), [], "the Health-clean mapping keeps HRV out")
+        XCTAssertEqual(ZeppMetricMapping.samples(from: hrv), [], "HRV reaches Apple Health through the store (decision 44), never the direct mapping")
         XCTAssertEqual(ZeppMetricMapping.storedSamples(from: hrv), [
             QuantitySample(kind: .hrvSDNN, start: date(1_790_633_100), value: 42),
             QuantitySample(kind: .hrvSDNN, start: date(1_790_633_400), value: 57),

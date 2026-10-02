@@ -49,9 +49,18 @@ enum HelioWakePolicy {
         case catchUp
     }
 
+    /// The skip reason while the app records a strap workout (#227, review-238 B1).
+    static let workoutHoldsStrapReason = "a strap workout holds the strap"
+
     static func action(for wake: HelioWake, strapChosen: Bool, appIsActive: Bool, runActive: Bool,
-                       lastCompletedSync: Date?, lastBackgroundRunStart: Date?, now: Date) -> Action {
+                       lastCompletedSync: Date?, lastBackgroundRunStart: Date?, now: Date,
+                       workoutHoldsStrap: Bool = false) -> Action {
         guard strapChosen else { return .skip("the strap isn't the chosen device") }
+        // Review-238 B1: a strap workout's link carries its heart-rate stream until End. No wake (a
+        // reconnect, a restoration, the woke-up hint, the Health step delivery, the stream's own traffic
+        // on the held link) may sync, tear down or disconnect it; the sync the workout held back runs
+        // when it ends (`StrapWorkoutRecorder.end`).
+        if workoutHoldsStrap { return .skip(workoutHoldsStrapReason) }
         if appIsActive {
             // In front, a connect made there syncs on connect, and a session that came up in the
             // background syncs when the app comes to the front (`HelioActivationSync`, review-225e
@@ -100,8 +109,11 @@ struct HelioIdleTrafficGate {
     static let checkInterval: TimeInterval = 5 * 60
     private(set) var lastCheck: Date?
 
-    mutating func shouldCheck(now: Date, appIsActive: Bool, syncing: Bool, runActive: Bool) -> Bool {
-        guard !appIsActive, !syncing, !runActive else { return false }
+    /// `workoutHoldsStrap`: during a strap workout the link carries the heart-rate stream, which is the
+    /// app's own traffic, never a wake (#227, review-238 B1).
+    mutating func shouldCheck(now: Date, appIsActive: Bool, syncing: Bool, runActive: Bool,
+                              workoutHoldsStrap: Bool = false) -> Bool {
+        guard !appIsActive, !syncing, !runActive, !workoutHoldsStrap else { return false }
         if let last = lastCheck, now >= last, now.timeIntervalSince(last) < Self.checkInterval { return false }
         lastCheck = now
         return true
@@ -165,6 +177,8 @@ final class HelioWakeCoordinator {
         var afterRun: @MainActor (HelioBackgroundRun) async -> Void
         /// A breadcrumb line.
         var note: @MainActor (HelioWake, String) -> Void
+        /// The app records a strap workout (#227): every wake skips (review-238 B1).
+        var workoutHoldsStrap: @MainActor () -> Bool = { StrapWorkoutRecorder.holdsStrapLink }
     }
 
     static let shared = HelioWakeCoordinator(.live)
@@ -181,12 +195,15 @@ final class HelioWakeCoordinator {
         let action = HelioWakePolicy.action(
             for: wake, strapChosen: env.strapChosen(), appIsActive: env.appIsActive(),
             runActive: env.runActive() || isRunning, lastCompletedSync: env.state.lastCompletedSync,
-            lastBackgroundRunStart: env.state.lastBackgroundRunStart, now: env.now())
+            lastBackgroundRunStart: env.state.lastBackgroundRunStart, now: env.now(),
+            workoutHoldsStrap: env.workoutHoldsStrap())
         switch action {
         case .skip(let reason):
             // A reconnect or Health delivery that has nothing to do is the common case: noted only
-            // for the woke-up event, which should always lead somewhere.
-            if wake == .strapEvent { env.note(wake, "no catch-up: \(reason)") }
+            // for the woke-up event, which should always lead somewhere, and for a workout's hold.
+            if wake == .strapEvent || reason == HelioWakePolicy.workoutHoldsStrapReason {
+                env.note(wake, "no catch-up: \(reason)")
+            }
             once.call()
         case .syncInForeground:
             env.note(wake, "app in front; syncing the ordinary way")

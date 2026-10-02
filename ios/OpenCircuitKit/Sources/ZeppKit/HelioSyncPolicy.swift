@@ -1,5 +1,5 @@
 // The Amazfit Helio Strap's app-side rules (#215 phase 3; the decisions of record are
-// briefs/helio-decisions.md 4, 8–17): what a pasted key is, where each history type's next fetch
+// briefs/helio-decisions.md 4, 8–17, 44): what a pasted key is, where each history type's next fetch
 // starts, and which parts of a fetched round may be stored and written to Apple Health.
 //
 // Pure: no CoreBluetooth, HealthKit or SwiftData, so every rule is covered by `swift test`. The app
@@ -31,19 +31,26 @@ public enum HelioKeyText {
     }
 }
 
-// MARK: - Apple Health policy (decisions 12, 14, 15, 17)
+// MARK: - Apple Health policy (decisions 12, 15, 17, 44)
 
 public enum HelioHealthPolicy {
 
-    /// Decision 14: Apple Health's only HRV type is SDNN, and the strap's HRV statistic is unverified
-    /// (RMSSD vs SDNN, ZEPP_PROTOCOL.md §6.5 🔴). The strap's HRV is stored and shown in the app and
-    /// NOT written to Apple Health in v1. This constant is the whole switch.
-    public static let writesHRV = false
+    /// Decision 44 (supersedes 14): the strap's HRV is taken as RMSSD, 🟡. Amazfit documents that
+    /// "Amazfit devices measure HRV using the RMSSD method"
+    /// (https://us.amazfit.com/pages/amazfit-technology-page-health-technology), a product-line
+    /// statement that doesn't name the Helio Strap; a third-party Helio review says the same. Not
+    /// compared with Zepp's display on our strap (ZEPP_PROTOCOL.md §6.5, §10 item 9). Juan chose to ship
+    /// on it, labelled. It is written exactly like the ring's: the RMSSD
+    /// value in Apple Health's only HRV type, SDNN, tagged `OpenCircuitHRVStatistic = "RMSSD"`
+    /// (`HealthKitWriter.metadata(for:)`, HEALTHKIT_MAPPING.md, #37). Rows stored while this was off
+    /// backfill on the next flush: the strap's `hk:hrvSDNN` watermark was never advanced.
+    public static let writesHRV = true
 
     /// The stored kinds a strap's timeline mirrors to Apple Health through the ring's store → Health
-    /// path: heart rate, SpO₂ and respiratory rate (decision 17) and the gated skin temperature
-    /// (decision 12). Resting HR, steps and energy go through the ring's own daily and cumulative
-    /// writers (decisions 16–17); stress and PAI have no Health type and stay in the app (decision 15).
+    /// path: heart rate, SpO₂ and respiratory rate (decision 17), the gated skin temperature
+    /// (decision 12) and HRV (decision 44). Resting HR, steps and energy go through the ring's own daily
+    /// and cumulative writers (decisions 16–17); stress and PAI have no Health type and stay in the app
+    /// (decision 15).
     public static func healthMirroredKinds(writesHRV: Bool = writesHRV) -> [MetricKind] {
         var kinds: [MetricKind] = [.heartRate, .spo2, .respiratoryRate, .temperature]
         if writesHRV { kinds.append(.hrvSDNN) }
@@ -59,9 +66,10 @@ public enum HelioHealthPolicy {
 extension ZeppMetricMapping {
 
     /// Samples for the LOCAL store from one parsed round: `samples(from:)` (the Apple-Health-clean
-    /// mapping) plus the strap's HRV as `.hrvSDNN`, which is stored and shown in the app but kept out
-    /// of Apple Health by `HelioHealthPolicy.writesHRV` (decision 14). An HRV of 0 ms is no reading.
-    /// The strap's all-day stress becomes `.stress` (`stressSamples`), which has no Health type at all.
+    /// mapping) plus the strap's HRV (RMSSD) as `.hrvSDNN`, which reaches Apple Health through the
+    /// store → Health path when `HelioHealthPolicy.writesHRV` (decision 44). An HRV of 0 ms is no reading.
+    /// The strap's all-day stress becomes `.stress` (`stressSamples`) and its PAI `.pai`
+    /// (`paiSamples`), neither of which has a Health type at all.
     ///
     /// Steps and skin temperature are NOT here: steps go to the step ledger as additive per-minute
     /// deltas (decision 16) and temperature only through `HelioSkinTemperatureGate` (decision 12).
@@ -74,6 +82,7 @@ extension ZeppMetricMapping {
             }
         }
         if case .autoStress = parsed.records { return stressSamples(from: parsed) }
+        if case .pai = parsed.records { return paiSamples(from: parsed) }
         return samples(from: parsed).filter { $0.kind != .steps && $0.kind != .temperature }
     }
 
@@ -87,6 +96,26 @@ extension ZeppMetricMapping {
         guard case .autoStress(let minutes) = parsed.records else { return [] }
         return minutes.compactMap { minute in
             minute.rawLevel <= 100 ? QuantitySample(kind: .stress, start: minute.time, value: Double(minute.rawLevel)) : nil
+        }
+    }
+
+    /// The total PAI of each kept `0x0d` record as one `.pai` sample at the record's own time
+    /// (decision 45). The parser already dropped every record that is not type `05` (pre-reset and
+    /// unknown types), so what arrives here is the strap's own valid readings.
+    ///
+    /// A total of **0 is a real reading** — a week with no qualifying activity — and is stored like
+    /// any other. The only values skipped are ones no reading can be: a non-finite float, or a
+    /// negative total (SPEC-GAP: ZEPP_PROTOCOL.md §6.5 tags the `0x0d` fields 🟡, so a misread float
+    /// must not become a stored number).
+    ///
+    /// In the app only (decision 15): `.pai` is in no Health-mirrored kind list and
+    /// `HealthKitWriter.quantityType(for: .pai)` is nil.
+    public static func paiSamples(from parsed: ZeppParsedRecords) -> [QuantitySample] {
+        guard case .pai(let records) = parsed.records else { return [] }
+        return records.compactMap { record in
+            let total = Double(record.totalPAI)
+            guard total.isFinite, total >= 0 else { return nil }
+            return QuantitySample(kind: .pai, start: record.time, value: total)
         }
     }
 
@@ -445,7 +474,7 @@ public enum HelioFetchPlan {
         return max(previous, clamped)
     }
 
-    // MARK: Stress backfill (#239)
+    // MARK: One-time fetch-watermark backfills (#239 stress, decision 45 PAI)
 
     /// How far back a stress backfill reaches at most. Build 59 fetched the all-day stress (`0x13`)
     /// on every sync but kept only its latest value, while the type's watermark advanced, so no stress
@@ -483,10 +512,42 @@ public enum HelioFetchPlan {
     /// `plan(cursors:now:notBefore:)` bounds every type's start by `notBefore` again, so even a
     /// watermark written before any of this existed cannot reach time the ring owned.
     public static func stressBackfillCursor(watermark: Date?, ledger: Date?, notBefore: Date?) -> Date? {
+        backfillCursor(watermark: watermark, ledger: ledger, notBefore: notBefore,
+                       lookback: stressBackfillLookback)
+    }
+
+    /// How far back a PAI backfill reaches at most (decision 45). Builds 59–62 fetched `0x0d` on
+    /// every sync, kept only its latest value for the card and still advanced the type's watermark,
+    /// so no PAI row was ever stored.
+    ///
+    /// A week, the same as stress and `firstSyncLookback`: `0x0d` is written about once a day, so a
+    /// week is already seven records (714 bytes) and more than enough for the card to show a number
+    /// on build 63's first sync. It also sits well inside the store's 30-day raw-sample retention
+    /// (`LocalStore.sampleRetentionDays`), so nothing a rewind stores is pruned the moment it lands.
+    ///
+    /// SPEC-GAP: how much PAI history the strap itself keeps is not documented (§6.4 says nothing
+    /// about retention). The app always acked `03 09` (keep on strap, decision 8), so nothing was
+    /// released; if the strap has rotated older records out, the rounds just come back short.
+    public static let paiBackfillLookback: TimeInterval = 7 * 86_400
+
+    /// The PAI watermark a backfill rewinds to, or nil when none is due. Exactly the stress rule
+    /// above — the ledger is "where this code left the watermark", so a hole is only ever another
+    /// build's advance — with PAI's own lookback and its own ledger row.
+    public static func paiBackfillCursor(watermark: Date?, ledger: Date?, notBefore: Date?) -> Date? {
+        backfillCursor(watermark: watermark, ledger: ledger, notBefore: notBefore,
+                       lookback: paiBackfillLookback)
+    }
+
+    /// The shared ledger rule both backfills are: nil unless `watermark > ledger` (or there is a
+    /// watermark and no ledger at all), then `max(ledger, watermark − lookback, notBefore)`, with
+    /// `notBefore` rounded UP to its minute so the target never lies even seconds inside time the
+    /// strap doesn't own. nil when that leaves nothing to move.
+    public static func backfillCursor(watermark: Date?, ledger: Date?, notBefore: Date?,
+                                      lookback: TimeInterval) -> Date? {
         guard let watermark else { return nil }
         // Due only when another build moved the watermark past where this code left it.
         if let ledger, watermark <= ledger { return nil }
-        var target = floorToMinute(watermark.addingTimeInterval(-stressBackfillLookback))
+        var target = floorToMinute(watermark.addingTimeInterval(-lookback))
         if let ledger { target = max(target, ledger) }
         if let notBefore {
             target = max(target, Date(timeIntervalSince1970: (notBefore.timeIntervalSince1970 / 60).rounded(.up) * 60))
