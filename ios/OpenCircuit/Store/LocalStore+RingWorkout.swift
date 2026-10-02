@@ -57,11 +57,17 @@ extension LocalStore {
         WorkoutHealthExclusions().add(span, device: .ringConn)
         let sorted = samples.sorted { $0.start < $1.start }
         var i = 0
+        var firstError: Error?
         while i < sorted.count {
             let end = min(i + chunkSize, sorted.count)
-            try insertWorkoutHeartRateRows(Array(sorted[i..<end]), timeline: .ringConn)
+            // A failed chunk does not abandon the rest, which is what the per-chunk `try?` this
+            // replaces gave us: the readings are already in Health inside the HKWorkout, so every
+            // chunk that CAN land should, and only the local estimate is short if one cannot.
+            do { try insertWorkoutHeartRateRows(Array(sorted[i..<end]), timeline: .ringConn) }
+            catch { if firstError == nil { firstError = error } }
             i = end
             await betweenChunks()
         }
+        if let firstError { throw firstError }
     }
 }
