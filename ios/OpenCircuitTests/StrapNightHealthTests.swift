@@ -11,9 +11,9 @@ import ZeppKit
 //
 // The writer itself can't write in the simulator (no Health access), so "the flush mirrors it" is
 // shown in two halves: the night is in what `HelioConnection.flushStrap` hands the writer, ready to
-// write, and the writer's own `mirrorSettledNight` gets past every bail to its write (`.failed`, the
-// write being refused, never `.unchanged`). Then, with the record a successful write leaves, the
-// same call is the signature no-op and neither 50a nor 50b offers the night again.
+// write, and the writer's own `mirrorSettledNight` gets past every bail to its write: any outcome but
+// `.unchanged` (without Health access the write itself is refused). Then, with the record a successful
+// write leaves, the same call is the signature no-op and neither 50a nor 50b offers the night again.
 
 // MARK: - Fixtures
 
