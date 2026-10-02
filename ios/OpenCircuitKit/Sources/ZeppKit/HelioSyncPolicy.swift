@@ -35,10 +35,12 @@ public enum HelioKeyText {
 
 public enum HelioHealthPolicy {
 
-    /// Decision 44 (supersedes 14): the strap's HRV is RMSSD, per Amazfit's own documentation
-    /// ("Amazfit devices measure HRV using the RMSSD method",
-    /// https://us.amazfit.com/pages/amazfit-technology-page-health-technology; ZEPP_PROTOCOL.md §6.5,
-    /// vendor-documented, not an OpenCircuit capture). It is written exactly like the ring's: the RMSSD
+    /// Decision 44 (supersedes 14): the strap's HRV is taken as RMSSD, 🟡. Amazfit documents that
+    /// "Amazfit devices measure HRV using the RMSSD method"
+    /// (https://us.amazfit.com/pages/amazfit-technology-page-health-technology), a product-line
+    /// statement that doesn't name the Helio Strap; a third-party Helio review says the same. Not
+    /// compared with Zepp's display on our strap (ZEPP_PROTOCOL.md §6.5, §10 item 9). Juan chose to ship
+    /// on it, labelled. It is written exactly like the ring's: the RMSSD
     /// value in Apple Health's only HRV type, SDNN, tagged `OpenCircuitHRVStatistic = "RMSSD"`
     /// (`HealthKitWriter.metadata(for:)`, HEALTHKIT_MAPPING.md, #37). Rows stored while this was off
     /// backfill on the next flush: the strap's `hk:hrvSDNN` watermark was never advanced.

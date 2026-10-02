@@ -1196,7 +1196,7 @@ final class HealthKitWriter {
     static let hrvStatisticMetadataKey = "OpenCircuitHRVStatistic"
 
     /// Per-kind sample metadata. The ring and the Helio Strap both report HRV as **RMSSD** (the
-    /// strap per Amazfit's own documentation, decision 44), but HealthKit only offers an **SDNN**
+    /// strap 🟡, on Amazfit's product-line documentation, decision 44), but HealthKit only offers an **SDNN**
     /// field — so we store the RMSSD value in `.heartRateVariabilitySDNN` and tag it honestly here
     /// rather than invent an RMSSD→SDNN conversion constant (the two are not a fixed ratio; see
     /// docs/HEALTHKIT_MAPPING.md). Readers can distinguish via this key. One statistic for every

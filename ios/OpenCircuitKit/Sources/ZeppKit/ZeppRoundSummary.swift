@@ -33,7 +33,7 @@ public enum ZeppRoundSummary {
         case .manualHeartRate(let r), .restingHeartRate(let r), .maxHeartRate(let r):
             return "\(range(r.compactMap(\.beatsPerMinute))) bpm"
         case .hrv(let r):
-            return "\(range(r.map { Int($0.milliseconds) })) ms (statistic unknown)"
+            return "\(range(r.map { Int($0.milliseconds) })) ms (RMSSD per Amazfit, unverified on the strap)"
         case .spo2(let r):
             let auto = r.filter(\.isAutomatic).count
             return "\(range(r.compactMap(\.percent))) %, \(auto) automatic"
