@@ -333,6 +333,37 @@ final class HelioSessionTests: XCTestCase {
         XCTAssertTrue(try store.pendingHealthSamples().isEmpty, "the ring's timeline is untouched")
     }
 
+    // MARK: the night is scored on the phone (#246, decision 48)
+
+    /// A whole real sync, through the sink: the night ends with OpenCircuit's own Sleep Score and
+    /// overnight recovery, so Readiness has something to anchor on with the strap.
+    ///
+    /// The ordering is the point. `HelioFetchPlan.types` fetches sleep sessions before temperature
+    /// and HRV, so the save that stores the night has neither; `finishSync` re-saves every stored
+    /// night and that is what carries them on. Overnight recovery here is computed from the strap's
+    /// HRV taken as RMSSD, a statistic that is still 🟡 (decision 44).
+    func testTheStrapsNightIsScoredOnThePhone() throws {
+        let plan = HelioFetchPlan.types
+        let sleepAt = try XCTUnwrap(plan.firstIndex(of: .sleepSession))
+        XCTAssertLessThan(sleepAt, try XCTUnwrap(plan.firstIndex(of: .hrv)))
+        XCTAssertLessThan(sleepAt, try XCTUnwrap(plan.firstIndex(of: .temperature)))
+
+        let store = try makeStore()
+        _ = connect(makeStrap(), store: store)
+        let night = try XCTUnwrap(try store.context.fetch(FetchDescriptor<StoredSleepSummary>()).first)
+        XCTAssertGreaterThan(night.sleepScore, 0, "#246: the strap's night carries a Sleep Score")
+        // The fixture's two HRV readings are 41 and 47 ms; the median is the night's RMSSD.
+        XCTAssertEqual(night.stressScore, SleepStress.overnightScore(rmssd: [41, 47]))
+        // Its first night has no same-device baseline yet (decision 29), so the temperature factor
+        // drops out rather than being compared with nothing: the score is the composite without it.
+        XCTAssertEqual(night.sleepScore,
+                       StoredNightScore.scores(.init(
+                           segments: SleepHypnogramCodec.decode(night.hypnogramData),
+                           heartRate: try store.samples(kind: .heartRate, from: night.inBedStart, to: night.inBedEnd)
+                               .map { HRSample(bpm: Int($0.value.rounded()), start: $0.start, end: $0.end) })).sleepScore)
+        XCTAssertFalse(night.isManuallyEdited)
+    }
+
     // MARK: the same history twice → no duplicate rows
 
     func testSyncingTheSameHistoryTwiceLeavesIdenticalRows() throws {
