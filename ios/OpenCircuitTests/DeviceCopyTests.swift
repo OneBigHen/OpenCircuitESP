@@ -39,11 +39,13 @@ final class DeviceCopyTests: XCTestCase {
 
     func testTheAccountBulletStatesTheStrapsKeyStepHonestly() {
         XCTAssertEqual(DeviceCopy.accounts,
-                       "No subscription. The ring needs no account. The strap needs a Zepp account once, to get its "
-                       + "key: pair it in the Zepp app, then copy the key on a computer. After that, OpenCircuit talks "
-                       + "only to the strap and never signs in to Zepp.")
-        for fact in ["Zepp account", "once", "computer", "never signs in"] {
+                       "No subscription. The ring needs no account. The strap needs a Zepp account once: pairing it "
+                       + "in the Zepp app has Zepp's servers create its key, which you copy out on a computer. After "
+                       + "that, OpenCircuit talks only to the strap and never signs in to Zepp.")
+        // HELIO_KEY_EXTRACTION.md: the account, once, Zepp's servers create the key, a computer, no sign-in.
+        for fact in ["Zepp account", "once", "Zepp's servers", "computer", "never signs in"] {
             XCTAssertTrue(ActiveDeviceChoice.helioStrap.accountSentence.contains(fact), fact)
+            XCTAssertTrue(HelioStatus.keyOriginCopy.contains(fact), "the key bullet: \(fact)")
         }
         XCTAssertFalse(DeviceCopy.accounts.contains("no cloud"), "the key step goes through Zepp's servers")
     }
@@ -57,7 +59,15 @@ final class DeviceCopyTests: XCTestCase {
 
     func testTheCardDetails() {
         XCTAssertEqual(ActiveDeviceChoice.ringConn.cardDetail, "RingConn Gen 2, Gen 2 Air or Gen 3. No account needed.")
-        XCTAssertEqual(ActiveDeviceChoice.helioStrap.cardDetail, "Needs a one-time key from the Zepp app (see setup).")
+        XCTAssertEqual(ActiveDeviceChoice.helioStrap.cardDetail, "Needs a one-time key from your Zepp account (see setup).")
+    }
+
+    func testTheKeyBulletIsOneConstantSharedWithTheSetupScreen() {
+        XCTAssertEqual(HelioStatus.keyOriginCopy,
+                       "The strap talks only to an app that knows its 16-byte key. Zepp's servers create the key once, "
+                       + "when you pair the strap in the Zepp app; you copy it from your Zepp account on a computer. "
+                       + "OpenCircuit never signs in to Zepp.")
+        XCTAssertEqual(ActiveDeviceChoice.helioStrap.firstSteps.first, HelioStatus.keyOriginCopy, "by reference")
     }
 
     // MARK: Profile, per device

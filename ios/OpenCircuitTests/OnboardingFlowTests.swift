@@ -126,8 +126,7 @@ final class OnboardingFlowTests: XCTestCase {
     func testTheStrapBulletsAreHelioStatussOwnCopy() {
         let steps = ActiveDeviceChoice.helioStrap.firstSteps
         XCTAssertEqual(Array(steps.suffix(2)), [HelioStatus.dontUnpairCopy, HelioStatus.zeppBluetoothCopy])
-        XCTAssertEqual(steps.first, "The strap talks only to an app that knows its 16-byte key. The Zepp app creates "
-                       + "the key once, when you pair the strap. OpenCircuit never signs in to Zepp.")
+        XCTAssertEqual(steps.first, HelioStatus.keyOriginCopy)
         XCTAssertEqual(ActiveDeviceChoice.helioStrap.setupGuide?.url, HelioStatus.keyGuideURL)
         XCTAssertEqual(ActiveDeviceChoice.helioStrap.setupGuide?.title, "How to get the key")
         XCTAssertNil(ActiveDeviceChoice.ringConn.setupGuide)
@@ -145,7 +144,7 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertEqual(ring.cardAccessibilityLabel(.ringConn),
                        "RingConn ring. RingConn Gen 2, Gen 2 Air or Gen 3. No account needed. In use")
         XCTAssertEqual(ring.cardAccessibilityLabel(.helioStrap),
-                       "Amazfit Helio Strap. Needs a one-time key from the Zepp app (see setup).")
+                       "Amazfit Helio Strap. Needs a one-time key from your Zepp account (see setup).")
     }
 
     func testTheSharedPagesHaveNoRingOnlyWording() {

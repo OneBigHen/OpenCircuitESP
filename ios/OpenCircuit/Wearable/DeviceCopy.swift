@@ -34,7 +34,7 @@ extension ActiveDeviceChoice {
     var cardDetail: String {
         switch self {
         case .ringConn: return "RingConn Gen 2, Gen 2 Air or Gen 3. No account needed."
-        case .helioStrap: return "Needs a one-time key from the Zepp app (see setup)."
+        case .helioStrap: return "Needs a one-time key from your Zepp account (see setup)."
         }
     }
 
@@ -45,8 +45,9 @@ extension ActiveDeviceChoice {
         switch self {
         case .ringConn: return "The ring needs no account."
         case .helioStrap:
-            return "The strap needs a Zepp account once, to get its key: pair it in the Zepp app, then copy the key "
-                + "on a computer. After that, OpenCircuit talks only to the strap and never signs in to Zepp."
+            return "The strap needs a Zepp account once: pairing it in the Zepp app has Zepp's servers create its key, "
+                + "which you copy out on a computer. After that, OpenCircuit talks only to the strap and never signs "
+                + "in to Zepp."
         }
     }
 
@@ -80,10 +81,9 @@ extension ActiveDeviceChoice {
                 "Charge the ring as usual; OpenCircuit picks up where it left off.",
             ]
         case .helioStrap:
-            // `HelioSetupView`'s "Before you start", then decision 6's warnings by reference.
+            // `HelioSetupView`'s "Before you start", all three by reference.
             return [
-                "The strap talks only to an app that knows its 16-byte key. The Zepp app creates the key once, "
-                    + "when you pair the strap. OpenCircuit never signs in to Zepp.",
+                HelioStatus.keyOriginCopy,
                 HelioStatus.dontUnpairCopy,
                 HelioStatus.zeppBluetoothCopy,
             ]

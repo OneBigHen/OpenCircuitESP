@@ -87,8 +87,7 @@ struct HelioSetupView: View {
             }
 
             Section {
-                bullet("The strap talks only to an app that knows its 16-byte key. The Zepp app creates the key once, "
-                       + "when you pair the strap. OpenCircuit never signs in to Zepp.")
+                bullet(HelioStatus.keyOriginCopy)
                 Link("How to get the key", destination: HelioStatus.keyGuideURL)
                 bullet(HelioStatus.dontUnpairCopy)
                 bullet(HelioStatus.zeppBluetoothCopy)
