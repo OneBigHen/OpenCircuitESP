@@ -88,9 +88,18 @@ struct OnboardingFlow: Equatable {
     }
 
     /// Shown on Getting started when the pick isn't the device in use.
+    /// When the guide ends on the picked device's setup, that setup is what switches (review-256 F3):
+    /// its save button activates the device through `DeviceSwitcher`.
     func switchNote(for pick: ActiveDeviceChoice?) -> String? {
         guard let pick, let inUse, pick != inUse else { return nil }
-        return "You're using the \(inUse.displayName) now. To switch, go to Profile ▸ Device."
+        let using = "You're using the \(inUse.displayName) now."
+        switch finish(for: pick) {
+        case .getStarted:
+            return using + " To switch, go to Profile ▸ Device."
+        case .setUpStrap:
+            return using + " The \(pick.noun)'s setup at the end of this guide switches to the \(pick.noun); "
+                + "you can switch back in Profile ▸ Device."
+        }
     }
 
     /// Under a device's first steps: where it's set up, while it isn't yet. `pick` is nil when every

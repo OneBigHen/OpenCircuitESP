@@ -85,9 +85,18 @@ final class OnboardingFlowTests: XCTestCase {
     // MARK: "You're using X now"
 
     func testTheSwitchLineAppearsOnlyWhenThePickDiffersFromTheDeviceInUse() {
-        XCTAssertEqual(flow(.ringConn, ring: true).switchNote(for: .helioStrap),
-                       "You're using the RingConn ring now. To switch, go to Profile ▸ Device.")
+        // The guide ends on the strap's setup, whose save button switches (review-256 F3).
+        let strapSetupSwitches = "You're using the RingConn ring now. The strap's setup at the end of this guide "
+            + "switches to the strap; you can switch back in Profile ▸ Device."
+        XCTAssertEqual(flow(.ringConn, ring: true).finish(for: .helioStrap), .setUpStrap)
+        XCTAssertEqual(flow(.ringConn, ring: true).switchNote(for: .helioStrap), strapSetupSwitches)
+        XCTAssertEqual(flow(.ringConn, ring: true, key: true).switchNote(for: .helioStrap), strapSetupSwitches,
+                       "a saved key: the setup screen's one-tap \"Use the Helio Strap\" switches too")
+        // The guide ends with Get Started: switching is Profile ▸ Device's.
+        XCTAssertEqual(flow(.helioStrap, key: true).finish(for: .ringConn), .getStarted)
         XCTAssertEqual(flow(.helioStrap, key: true).switchNote(for: .ringConn),
+                       "You're using the Amazfit Helio Strap now. To switch, go to Profile ▸ Device.")
+        XCTAssertEqual(flow(.helioStrap).switchNote(for: .ringConn),
                        "You're using the Amazfit Helio Strap now. To switch, go to Profile ▸ Device.")
         XCTAssertNil(flow(.ringConn, ring: true).switchNote(for: .ringConn), "the pick is the device in use")
         XCTAssertNil(flow(.helioStrap).switchNote(for: .helioStrap))
