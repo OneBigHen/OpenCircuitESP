@@ -63,10 +63,13 @@ struct OnboardingView: View {
                     permissions.tag(OnboardingFlow.Page.permissions)
                     disclaimer.tag(OnboardingFlow.Page.finish)
                 }
-                .tabViewStyle(.page(indexDisplayMode: .always))
-                .indexViewStyle(.page(backgroundDisplayMode: .always))
+                // The dots are drawn below the pages, not over them, so a page's scrolling text
+                // never runs under them at the largest text sizes.
+                .tabViewStyle(.page(indexDisplayMode: .never))
 
                 VStack(spacing: 4) {
+                    pageDots
+                        .padding(.vertical, 8)
                     Button(isLastPage ? finish.title : "Continue") {
                         if let next = OnboardingFlow.Page(rawValue: page.rawValue + 1) {
                             withAnimation { page = next }
@@ -241,9 +244,31 @@ struct OnboardingView: View {
 
     // MARK: Page scaffold
 
+    /// The page dots, outside the pages. VoiceOver reads the page and swipes up/down to turn it,
+    /// as it does the system's dots.
+    private var pageDots: some View {
+        let pages = OnboardingFlow.Page.allCases
+        return HStack(spacing: 8) {
+            ForEach(pages, id: \.self) { item in
+                Circle()
+                    .fill(item == page ? Color.primary : Color.secondary.opacity(0.4))
+                    .frame(width: 7, height: 7)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Capsule().fill(Color(.secondarySystemBackground)))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Page \(page.rawValue + 1) of \(pages.count)")
+        .accessibilityAdjustableAction { direction in
+            let step = direction == .increment ? 1 : -1
+            if let next = OnboardingFlow.Page(rawValue: page.rawValue + step) { withAnimation { page = next } }
+        }
+    }
+
     /// One page: scrolls when the text outgrows the screen (the largest accessibility sizes), and
-    /// stays vertically centred when it doesn't. The bottom padding keeps the last line clear of
-    /// the page dots.
+    /// stays vertically centred when it doesn't. The scroll indicator flashes when a page appears,
+    /// so the page reads as scrollable.
     private func page(title: String, @ViewBuilder header: () -> some View,
                       @ViewBuilder content: () -> some View) -> some View {
         let header = header()
@@ -259,10 +284,11 @@ struct OnboardingView: View {
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 28)
-                .padding(.bottom, 44)   // clear the page dots
+                .padding(.bottom, 16)
                 .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .leading)
             }
             .scrollBounceBehavior(.basedOnSize)
+            .scrollIndicatorsFlash(onAppear: true)
         }
     }
 
