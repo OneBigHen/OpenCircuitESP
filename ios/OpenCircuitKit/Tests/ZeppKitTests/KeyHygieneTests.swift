@@ -5,6 +5,7 @@
 
 import XCTest
 @testable import ZeppKit
+import ZeppKitTesting
 
 final class KeyHygieneTests: XCTestCase {
 

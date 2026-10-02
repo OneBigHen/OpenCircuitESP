@@ -241,3 +241,24 @@ pins the throw.
 1. User-entered samples (headache, menstrual flow, asserted/typed sleep) are **not** given the
    ring's `HKDevice` (§2). OK, or do you want literally every sample attributed?
 2. `manufacturer` = brand ("RingConn") rather than the DIS string (`JZ_Tech`). OK?
+
+## 6. The second device (Helio Strap, #215 phase 3)
+
+- `ActiveWearable.session` now reads the device `ActiveDeviceChoiceStore` names:
+  `RingScanner.shared.session` or `HelioConnection.shared.session`. Only the chosen driver is read,
+  so the other is never constructed by it. The ring stays the default.
+- `HealthKitWriter.flushToHealth` gained the strap's pass (`device:`, `mirroredKinds:`,
+  `strapNights:`); `LocalStore.pendingHealthSamples` gained a `kinds:` filter. Their defaults are
+  the ring's pass, byte for byte.
+- No view was retyped to `(any WearableSession)?`: the strap got its own screens
+  (`ios/OpenCircuit/Helio/`), and `ContentView` hides the ring-only surfaces while the strap is
+  chosen (its `session` is nil then). Follow-up §4 item 1 still stands for the ring's views.
+
+- **Who owns which time (decision 28, review-224).** Every switch is recorded in
+  `DeviceOwnershipLog` (Kit, pure; persisted by `DeviceOwnershipStore` under
+  `device.ownershipLog.v1`, written only by `ActiveDeviceChoiceStore.set`). Health attribution now
+  follows the ROW, not the current choice: `ActiveWearable.identityForHealthWrite(timeline:)` for a
+  timeline's rows, `identityForHealthWrite(at:)` (the owner at that moment) for untagged rows. The
+  no-argument `identityForHealthWrite()` is unchanged. With an empty log (a ring-only install)
+  every one of them is the pre-decision answer (`DeviceOwnershipAppTests.testARingOnlyInstallIsUnchanged`).
+  The store and Health rules are listed in `HEALTHKIT_MAPPING.md` ("Who owns which time").

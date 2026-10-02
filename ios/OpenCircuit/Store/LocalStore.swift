@@ -800,6 +800,12 @@ struct LocalStore {
         self.ownedContainer = nil
     }
 
+    /// Decision 28 (#215): which device owns which time. Empty for a ring-only install, and then every
+    /// ownership rule in this store is a no-op. Read through `ActiveDeviceChoiceStore.shared`, so the
+    /// choice and the log are reconciled before the first read (review-224b S-A). Replaceable only by
+    /// tests.
+    static var ownershipLog: @MainActor () -> DeviceOwnershipLog = { ActiveDeviceChoiceStore.shared.ownershipLog }
+
     /// A store over `container`'s main context that keeps `container` alive for as long as this
     /// store, or any copy of it, exists.
     init(container: ModelContainer) {
@@ -1230,6 +1236,17 @@ struct LocalStore {
         try context.fetch(Self.samplesDescriptor(kind: kind, from: start, to: end)).compactMap(\.sample)
     }
 
+    /// Stored samples of one kind within `[start, end)` that were recorded by the device owning their
+    /// time (decision 28), oldest→newest: the input for derived values (resting HR, energy, exercise
+    /// minutes), so a catch-up recorded for the other device's time never feeds them. Equal to
+    /// `samples(kind:from:to:)` for a ring-only install.
+    func ownedSamples(kind: MetricKind, from start: Date, to end: Date) throws -> [QuantitySample] {
+        let log = Self.ownershipLog()
+        let rows = try context.fetch(Self.samplesDescriptor(kind: kind, from: start, to: end))
+        guard !log.isEmpty else { return rows.compactMap(\.sample) }
+        return rows.filter { log.owns(SyncDeviceID(rawValue: $0.deviceID), at: $0.start) }.compactMap(\.sample)
+    }
+
     /// Stored samples of one kind newer than `since`, oldest→newest. Bounded by the predicate so
     /// it never scans all history — used by the health-alert engine (#73/#85) to evaluate recent
     /// HR/SpO2 readings against the user's thresholds.
@@ -1239,6 +1256,42 @@ struct LocalStore {
             predicate: #Predicate { $0.kindRaw == kindRaw && $0.start >= since && $0.value > 0 },
             sortBy: [SortDescriptor(\.start, order: .forward)])
         return try context.fetch(descriptor).compactMap(\.sample)
+    }
+
+    /// Decision 29: `samples(kind:from:to:)` measured by `family` during its own time (exactly
+    /// `samples(kind:from:to:)` with an empty log).
+    func ownSamples(kind: MetricKind, from start: Date, to end: Date,
+                    of family: DeviceOwnershipLog.Family) throws -> [QuantitySample] {
+        let log = Self.ownershipLog()
+        guard !log.isEmpty else { return try samples(kind: kind, from: start, to: end) }
+        return try context.fetch(Self.samplesDescriptor(kind: kind, from: start, to: end))
+            .filter { log.isOwn(recordedBy: SyncDeviceID(rawValue: $0.deviceID), at: $0.start, by: family) }
+            .compactMap(\.sample)
+    }
+
+    /// Decision 29: `recentSamples` measured by the CURRENT device during its own time, for a "your
+    /// usual" that is that device's own (a ring's and a strap's readings are never one baseline).
+    /// Exactly `recentSamples` with an empty log.
+    func recentOwnSamples(kind: MetricKind, since: Date) throws -> [QuantitySample] {
+        let log = Self.ownershipLog()
+        guard !log.isEmpty else { return try recentSamples(kind: kind, since: since) }
+        let kindRaw = kind.rawValue
+        let descriptor = FetchDescriptor<StoredSample>(
+            predicate: #Predicate { $0.kindRaw == kindRaw && $0.start >= since && $0.value > 0 },
+            sortBy: [SortDescriptor(\.start, order: .forward)])
+        return try context.fetch(descriptor)
+            .filter { log.isOwn(recordedBy: SyncDeviceID(rawValue: $0.deviceID), at: $0.start, by: log.currentFamily) }
+            .compactMap(\.sample)
+    }
+
+    /// Decision 29: the nights from the same device as `reference` (`owner(ofNightFrom:)`), so a night
+    /// is only ever judged against that device's own. `nights` unchanged with an empty log.
+    @MainActor
+    static func sameDevice(_ nights: [StoredSleepSummary], as reference: StoredSleepSummary) -> [StoredSleepSummary] {
+        let log = ownershipLog()
+        guard !log.isEmpty else { return nights }
+        let device = log.owner(ofNightFrom: reference.inBedStart, to: reference.inBedEnd)
+        return nights.filter { log.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd) == device }
     }
 
     func latestSample(kind: MetricKind) throws -> QuantitySample? {
@@ -1274,11 +1327,16 @@ struct LocalStore {
     /// Per device (#214): `device`'s samples against `device`'s `hk:` watermark, so a second
     /// device's backfill older than the ring's watermark still reaches Health. The ring (the
     /// default) owns every pre-V8 row, so its pending set is exactly what it was.
-    func pendingHealthSamples(device: SyncDeviceID = .ringConn) throws -> [QuantitySample] {
+    ///
+    /// `kinds` narrows the mirrored set for a device whose policy withholds a kind (the Helio
+    /// Strap's HRV, `HelioHealthPolicy.writesHRV`); it defaults to every mirrored kind.
+    func pendingHealthSamples(device: SyncDeviceID = .ringConn,
+                              kinds: [MetricKind]? = nil) throws -> [QuantitySample] {
+        let kinds = kinds ?? Self.healthMirroredKinds
         let cursor = try loadHealthCursor(device: device)
         let deviceID = device.rawValue
         var out: [QuantitySample] = []
-        for kind in Self.healthMirroredKinds {
+        for kind in Self.healthMirroredKinds where kinds.contains(kind) {
             let kindRaw = kind.rawValue
             let last = cursor.last(kind) ?? .distantPast
             let descriptor = FetchDescriptor<StoredSample>(
@@ -1287,6 +1345,13 @@ struct LocalStore {
                 },
                 sortBy: [SortDescriptor(\.start, order: .forward)])
             out += try context.fetch(descriptor).compactMap(\.sample)
+        }
+        // Decision 28: only time `device` owned reaches Apple Health. What it recorded for the other
+        // device's time (the ring's catch-up after a switch back) stays in the app. A no-op for a
+        // ring-only install (empty log: the ring owns all time).
+        let log = Self.ownershipLog()
+        if !(log.isEmpty && device == .ringConn) {
+            out = out.filter { log.owns(device, at: $0.start) }
         }
         return out.sorted { $0.start < $1.start }
     }
@@ -1602,6 +1667,81 @@ struct LocalStore {
         }
     }
 
+    /// Decision 28a's verdict for one device's night.
+    struct NightKeeping: Equatable {
+        /// `family` may store (and mirror) this night.
+        var keep: Bool
+        /// A stored night the save would resolve to belongs to the other device.
+        var otherDeviceRowExists: Bool
+    }
+
+    /// May `family` keep the night `[inBedStart, inBedEnd]` (decision 28a, review-224b S-C)?
+    /// - The device you went to bed with keeps it: `owner(ofNightFrom:to:)` must be `family`.
+    /// - A stored night is never replaced or merged by the other device's, whichever syncs first:
+    ///   every stored row this save could resolve to (in-bed overlap, or the same night key) must be
+    ///   `family`'s own. A row's device is the owner at ITS in-bed start, the rule it was stored under
+    ///   (the log only ever appends switches at the present, so that answer never changes).
+    /// Always kept with an empty log (a ring-only install): no query runs.
+    func nightKeeping(_ family: DeviceOwnershipLog.Family, inBedStart: Date, inBedEnd: Date,
+                      night: Date? = nil) -> NightKeeping {
+        let log = Self.ownershipLog()
+        guard !log.isEmpty else { return NightKeeping(keep: true, otherDeviceRowExists: false) }
+        let others = contendingSleepRows(inBedStart: inBedStart, inBedEnd: inBedEnd, night: night)
+            .filter { log.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd) != family }
+        let wentToBedWith = log.owner(ofNightFrom: inBedStart, to: inBedEnd) == family
+        return NightKeeping(keep: wentToBedWith && others.isEmpty, otherDeviceRowExists: !others.isEmpty)
+    }
+
+    /// Every stored night a save of `[inBedStart, inBedEnd]` contends with: the rows its in-bed window
+    /// overlaps (whichever synced first keeps those, 28a), and the row on its night key when that row
+    /// is the key's night. Decision 28d (review-224d S-1): of two sleeps that DON'T overlap but share
+    /// one key, the longer one that ends in the wake window is the night, so a shorter or evening
+    /// keyed row never makes this save's night unkeepable (it may be replaced by it). Only reached
+    /// with a non-empty ownership log (`nightKeeping`).
+    private func contendingSleepRows(inBedStart: Date, inBedEnd: Date, night: Date?) -> [StoredSleepSummary] {
+        var rows: [StoredSleepSummary] = []
+        if inBedEnd > inBedStart {
+            let overlapping = FetchDescriptor<StoredSleepSummary>(
+                predicate: #Predicate { $0.inBedStart < inBedEnd && $0.inBedEnd > inBedStart })
+            rows += ((try? context.fetch(overlapping)) ?? []).filter { $0.inBedEnd > $0.inBedStart }
+        }
+        let dayStart = Calendar.current.startOfDay(for: night ?? SleepNightKey.night(inBedStart: inBedStart, inBedEnd: inBedEnd))
+        let keyed = FetchDescriptor<StoredSleepSummary>(predicate: #Predicate { $0.night == dayStart })
+        for row in (try? context.fetch(keyed)) ?? [] where !rows.contains(where: { $0 === row })
+            && Self.keyedRowIsTheNight(row, againstInBedStart: inBedStart, inBedEnd: inBedEnd) {
+            rows.append(row)
+        }
+        return rows
+    }
+
+    /// Decision 28d: whether a disjoint row on the same key is that key's night rather than the
+    /// incoming sleep. It is when it ends in the wake window and the incoming one doesn't, or when
+    /// both do and it is at least as long (a tie keeps the stored one). A row with no known window
+    /// (legacy) is kept as the night, the conservative side.
+    static func keyedRowIsTheNight(_ row: StoredSleepSummary, againstInBedStart inBedStart: Date, inBedEnd: Date) -> Bool {
+        guard row.inBedEnd > row.inBedStart, inBedEnd > inBedStart else { return true }
+        guard SleepNightKey.endsInWakeWindow(row.inBedEnd) else { return false }
+        guard SleepNightKey.endsInWakeWindow(inBedEnd) else { return true }
+        return row.inBedEnd.timeIntervalSince(row.inBedStart) >= inBedEnd.timeIntervalSince(inBedStart)
+    }
+
+    /// The Health spans of stored nights the OTHER device keeps (recorded ∪ edited window) that touch
+    /// `[start, end]`: `mirrorSettledNight` excludes them from its union delete, so it can never remove
+    /// the other device's kept night (decision 28a). Empty with an empty log.
+    func otherDevicesNightWindows(_ family: DeviceOwnershipLog.Family, overlapping start: Date, to end: Date) -> [DateInterval] {
+        let log = Self.ownershipLog()
+        guard !log.isEmpty, end > start else { return [] }
+        let rows = (try? context.fetch(FetchDescriptor<StoredSleepSummary>())) ?? []
+        return rows.compactMap { row in
+            guard row.inBedEnd > row.inBedStart,
+                  log.owner(ofNightFrom: row.inBedStart, to: row.inBedEnd) != family else { return nil }
+            let lo = min(row.inBedStart, row.sleepEditCurrentInBedStart)
+            let hi = max(row.inBedEnd, row.sleepEditCurrentInBedEnd)
+            guard hi > lo, lo < end, hi > start else { return nil }
+            return DateInterval(start: lo, end: hi)
+        }
+    }
+
     /// The stored row this staging belongs to: by in-bed OVERLAP first (identity), then by calendar
     /// bucket (index). See the call site for why the order matters.
     private func resolveSleepRow(dayStart: Date, inBedStart: Date, inBedEnd: Date) -> StoredSleepSummary? {
@@ -1644,11 +1784,26 @@ struct LocalStore {
     func saveSleepSummary(_ summary: SleepStaging.Summary, night: Date,
                           inBedStart: Date, inBedEnd: Date,
                           sleepOnset: Date = .distantPast, sleepWake: Date = .distantPast,
-                          extras: SleepNightExtras = SleepNightExtras()) throws -> SleepPersistOutcome {
+                          extras: SleepNightExtras = SleepNightExtras(),
+                          device: SyncDeviceID = .ringConn) throws -> SleepPersistOutcome {
         // Before the FIRST write under the new key — see `ensureNightKeyMigrated`. A failed
         // migration DEFERS the write rather than filing it under a scheme the rest of the table has
         // not adopted; the epochs survive in the archive and the next drain re-stages them.
         guard ensureNightKeyMigrated() else { throw StoreError.nightKeyMigrationPending }
+        // Decision 28a (#215, review-224b S-C): the device you went to bed with keeps the night, and a
+        // stored night is never replaced or merged by the other device's (`nightKeeping`). Another
+        // device's staging of it is not stored. No-op for a ring-only install (empty log).
+        let family = DeviceOwnershipLog.Family(timeline: device)
+        let keeping = nightKeeping(family, inBedStart: inBedStart, inBedEnd: inBedEnd, night: night)
+        if !keeping.keep {
+            ObservabilityStore().recordMetricEvent(
+                source: "sleep-drop",
+                detail: "night=\(Self.stamp(Calendar.current.startOfDay(for: night))) device=\(family.rawValue) "
+                    + "reason=owned-by-other-device otherNightStored=\(keeping.otherDeviceRowExists)")
+            // Review-224b N-3: only a stored night of the other device makes this a keep; without one
+            // the wearer has no night, and the card must say so rather than hide the gap.
+            return keeping.otherDeviceRowExists ? .ownedByOtherDevice : .ownedByOtherDeviceNoRow
+        }
         let dayStart = Calendar.current.startOfDay(for: night)
         let m = summary.minutes
         // ⚠️ IDENTITY IS THE SPAN; THE KEY IS ONLY AN INDEX. Resolve by in-bed OVERLAP before falling
@@ -2932,6 +3087,8 @@ struct LocalStore {
         // to be a night on its own) would otherwise re-save a "nap" the archive-union staging
         // absorbs into the night (🟢 2026-08-16 device case; review find).
         if overlapsStoredNight(start, end) { return }
+        // Decision 28: the ring detects naps; one in time the strap owned is not the ring's to store.
+        if !Self.ownershipLog().owns(.ringConn, at: DeviceOwnershipLog.midpoint(start, end)) { return }
         let descriptor = FetchDescriptor<StoredNap>(predicate: #Predicate { $0.start == start })
         if let existing = try? context.fetch(descriptor).first {
             // A manually edited/added nap is authoritative — auto re-detection must not overwrite it.
@@ -3079,7 +3236,15 @@ struct LocalStore {
         let descriptor = FetchDescriptor<StoredNap>(
             predicate: #Predicate { $0.healthWritten == false },
             sortBy: [SortDescriptor(\.start, order: .forward)])
-        return try context.fetch(descriptor)
+        let naps = try context.fetch(descriptor)
+        // Decision 28: a detected nap in time the ring didn't own never reaches Apple Health. A nap
+        // the person added or edited is theirs, whatever device was chosen. No-op for ring-only.
+        let log = Self.ownershipLog()
+        guard !log.isEmpty else { return naps }
+        return naps.filter { nap in
+            nap.isManuallyAdded || nap.isManuallyEdited
+                || log.owns(.ringConn, at: DeviceOwnershipLog.midpoint(nap.effectiveStart, nap.effectiveEnd))
+        }
     }
 
     /// Mark a nap written to Apple Health so it isn't written again, RECORDING THE SPAN so a later
@@ -3119,6 +3284,10 @@ struct LocalStore {
     /// own bucket so a delta is never smeared back over hours it cannot cover.
     func addDailySteps(_ delta: Int, day: Date = Date(), windowStart: Date? = nil) throws {
         guard delta > 0 else { return }
+        // Decision 28 (defensive): the ring's steps for time the strap owned stay out of the day's
+        // totals and Apple Health. No-op for a ring-only install.
+        let ownership = Self.ownershipLog()
+        guard ownership.owns(.ringConn, at: day) else { return }
         let dayStart = Calendar.current.startOfDay(for: day)
         let descriptor = FetchDescriptor<StoredDaily>(predicate: #Predicate { $0.day == dayStart })
         if let existing = try? context.fetch(descriptor).first {
@@ -3127,7 +3296,12 @@ struct LocalStore {
         } else {
             context.insert(StoredDaily(day: dayStart, steps: delta))
         }
-        context.insert(StoredStepSample(start: windowStart ?? dayStart, end: day, delta: delta))
+        // Decision 28b (review-224b B-1): the first bucket after a strap→ring switch starts before the
+        // switch. Clamp the row to the ring's ownership start, delta kept, so it lies wholly in ring
+        // time: named the ring, given distance, not overlapping the strap's minutes. Empty log: no
+        // clamp (`.distantPast`).
+        let start = max(windowStart ?? dayStart, ownership.ownershipStart(at: day))
+        context.insert(StoredStepSample(start: start, end: day, delta: delta))
         try context.save()
     }
 

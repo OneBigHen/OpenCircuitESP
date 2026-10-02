@@ -53,7 +53,21 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // launch — before onboarding says the prompt comes later. `hasSavedRingToRestore` reads
         // UserDefaults WITHOUT touching `.shared`, so the check itself creates no central. A saved
         // ring implies a restorable central, so a state-restoration relaunch is covered by this gate.
-        if RingScanner.hasSavedRingToRestore {
+        // #215: only the CHOSEN device's central is re-created. With the Helio Strap active the ring's
+        // scanner is never constructed (decision 1); the strap's own central is re-created instead,
+        // with its own restore identifier, so iOS can hand back its state (Phase 3 only re-adopts the
+        // peripheral; background syncing is Phase 4).
+        let helioActive = ActiveDeviceChoiceStore.persisted() == .helioStrap
+        if helioActive, HelioConnection.hasSavedStrap {
+            MainActor.assumeIsolated {
+                if let container = OpenCircuitApp.sharedContainer ?? (try? OpenCircuitApp.makeContainerOrThrow()) {
+                    // `container:` keeps a fallback-built container alive as long as the strap's store.
+                    HelioConnection.shared.setLocalStore(LocalStore(container: container))
+                }
+                HelioConnection.shared.reconnectKnown()
+            }
+        }
+        if !helioActive, RingScanner.hasSavedRingToRestore {
             MainActor.assumeIsolated {
                 // Wire the process-wide store into the shared scanner BEFORE arming reconnect, so a
                 // CoreBluetooth state-restoration relaunch (iOS waking us because the ring came back
@@ -162,6 +176,18 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 // below → the run aborts, the scheduler chain stays armed, and the next wake retries;
                 // the store is never touched.
                 let container = try OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()
+                // #215: the ring's background drain runs only while the ring is the chosen device; it
+                // is what constructs the ring's scanner and central. The Helio Strap's background
+                // sync is Phase 4, so its wake only runs the store-based alert pass below.
+                guard ActiveDeviceChoiceStore.persisted() == .ringConn else {
+                    observability.recordSyncOutcome(kind: kind, success: false,
+                                                    detail: "helio strap active: background sync not in this build")
+                    await Self.evaluateAlerts()
+                    scheduler.schedule()
+                    scheduler.scheduleProcessing()
+                    task.setTaskCompleted(success: false)
+                    return
+                }
                 let service = RingBackgroundSyncService(
                     store: LocalStore(container.mainContext),
                     health: HealthKitWriter()

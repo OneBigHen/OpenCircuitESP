@@ -17,11 +17,12 @@ device's own timestamps (so historical sync backfills correctly).
 | Sleep stages | `HKCategoryType(.sleepAnalysis)` | Category | — | values: `inBed`, `asleepCore`, `asleepDeep`, `asleepREM`, `awake` |
 | Workout / strain | `HKWorkout` | Workout | — | openwhoop "strain" has no native type; store as workout + metadata |
 
-## Amazfit Helio Strap (Zepp OS), proposed (#215)
+## Amazfit Helio Strap (Zepp OS) (#215)
 
 The strap's metrics land on the **same `MetricKind`s and HealthKit types as the ring**. Wire
-layouts are in `ZEPP_PROTOCOL.md` §6.5. Nothing below is implemented yet, and every wire
-claim is 🟡 until checked on a real strap.
+layouts are in `ZEPP_PROTOCOL.md` §6.5. The table below was the proposal; what the app does
+(phase 3, the decisions of record) is in "What the app writes" right after it. Wire claims keep
+their spec tags until checked on a real strap.
 
 | Helio fetch type | `MetricKind` → HealthKit type | Conversion | Gap / decision needed |
 |---|---|---|---|
@@ -42,6 +43,85 @@ claim is 🟡 until checked on a real strap.
 Cross-device rules (plan of record §4): attach an `HKDevice` naming the strap to every write,
 and allow **one active device at a time** in v1, because Apple Health can't dedupe two
 devices writing under the same source app.
+
+### What the app writes (phase 3)
+
+Everything is stored on the strap's own timeline (`zeppos:<peripheral id>`) and reaches Apple
+Health through the ring's `LocalStore` → `HealthKitWriter` path, carrying the strap's `HKDevice`
+(name "Helio Strap", manufacturer "Amazfit", hardware/firmware from the strap's reads). The pure
+rules are in `ZeppKit/HelioSyncPolicy.swift`, tested by `HelioSyncPolicyTests`.
+
+| Metric | Stored | Apple Health |
+|---|---|---|
+| Heart rate (activity per-minute HR) | `.heartRate` | yes, per reading |
+| SpO₂ (`0x25`), respiratory rate (`0x38`) | `.spo2`, `.respiratoryRate` | yes |
+| Skin temperature (`0x2e`) | `.temperature`, **gated**: 30–42 °C, the minute's activity record known and not `0x73`/`0x76`, inside the strap's own sleep window | yes, as the ring's nightly readings (`.bodyTemperature`); the night's mean goes to the Sleep summary via the ring's `SkinTempBaseline.nightlyVerdict` |
+| Steps (activity per-minute) | `StoredStepSample` per minute + `StoredDaily` | yes, additive deltas over their real minute, through the ring's step writer (watermark advances only after the save) |
+| Active / basal energy, resting HR, exercise minutes | derived from the stored HR, as for the ring | yes, the ring's derived writers |
+| Resting HR (`0x3a`, strap-reported) | `.restingHeartRate` (local only) | no: the ring's derived daily writer already writes one per day, and writing both would double it |
+| HRV (`0x49`) | `.hrvSDNN` (local only) | **no** (`HelioHealthPolicy.writesHRV = false`): the statistic is unverified |
+| Sleep (`0x48`) | the strap's own stages → Sleep summary + hypnogram; no invented in-bed span | yes, through `mirrorSettledNight`; a manually edited night is never overwritten. No `SleepStaging` fallback yet (DECISION-GAP, see `HelioSleepSelection`) |
+| Stress (`0x13`), PAI (`0x0d`) | shown in the app only | no Health type |
+| Walking + running distance | — | **no**: the ring's distance is its own per-step estimate, so it is derived only from step rows the RING owned (decision 28). The strap sends no distance history and its steps get none. The ring's day distance is one sample from midnight to its last row, named the ring, so on a day with a switch Health's hourly chart spreads it across the strap's hours too (review-224c N-c; the day total is right) |
+
+#### Who owns which time (decision 28)
+
+A wearer can switch between the ring and the strap, and both record the same sleep and steps. Each
+switch is recorded (`DeviceOwnershipLog`, persisted by `DeviceOwnershipStore`), and a device only
+stores and writes what it measured for time it owned:
+
+- the ring owns everything before the first switch, so a ring-only install is unchanged;
+- nights (decisions 28a, 28c–28f):
+  - a strap sleep is a night only if it could be that night: it passes the ring's own overnight
+    gate (`SleepWindow.isOvernightBlock`, 28c) AND ends in its key's wake window
+    (`SleepNightKey.endsInWakeWindow`, before noon, 28d), both judged in the time zone it was
+    recorded in, from the strap's own local-midnight reference (28e). Sessions 60 min or less apart
+    are stitched into one night first (`HelioSleepSelection.stitch`, 28f): segments exactly as
+    reported, the gap left a gap. Anything else gets a log line and no row, so it never takes a
+    night key (strap naps as `StoredNap` are a follow-up);
+  - the strap's gate is the ring's pass 1 only: the ring's second pass (a night whose onset was
+    never recorded, `onsetIsUnobserved:`) needs its epoch archive's evidence of a hole, which the
+    strap has no equivalent of, so a strap session recorded only from 06:00 is not a night;
+  - the device you went to bed with keeps the night: the device chosen when its in-bed window began,
+    however late a switch lands inside it. A switch at exactly the in-bed start goes to the NEW
+    device (the switch counts as made before bed);
+  - sleeps that overlap: a stored night is never replaced or merged by the other device's night;
+    when a switch falls between the two devices' bedtimes, each window began under its own device,
+    so whichever device syncs first keeps the night. "Whichever syncs first" applies only to sleeps
+    that overlap;
+  - two sleeps that DON'T overlap but share one key (e.g. the ring's 23:00–07:00 and the strap's
+    07:30–10:00 after a morning switch): the longer one that ends in the wake window is the night,
+    and the shorter one never makes it unkeepable (the night may replace it);
+  - the device that doesn't keep the night is skipped (`ownedByOtherDevice`, or
+    `ownedByOtherDeviceNoRow` when the owner stored none, which the Sleep card shows as a notice
+    instead of the ring's reading). A kept night goes to Health named its owner, even where it covers
+    the other device's minutes; the mirror's delete never reaches the other device's kept night.
+    **Don't switch while asleep** anyway: the night stays with the device you went to bed with, and
+    the new device's reading of it is not kept;
+- step rows lie wholly in their device's time (decision 28b): the ring's first quarter-hour bucket
+  after a switch back is clamped to the switch, its delta kept, so it is named the ring and gets
+  distance. At most the pre-switch part of that one bucket can be counted by both devices;
+- the strap fetches nothing older than the start of its current ownership (`HelioFetchPlan`'s
+  `notBefore`), except on an install that never had a ring, where its first ownership starts in the
+  distant past and the first sync is the normal backfill;
+- the ring's catch-up after a switch back stores its rows for the strap's window locally, but none
+  of them is pending for Apple Health and no night is saved from them;
+- resting HR, active/basal energy and exercise minutes use only HR from the device that owned it;
+- every write names the device of its ROW: a timeline's rows name that timeline's device, untagged
+  rows (steps, sleep, naps, derived values) name the device that owned their start (a night: the
+  device it belongs to, above). A strap sync flushed after a switch back to the ring still names the
+  strap, or writes nothing when the strap never passed the first-write guard. BP estimates (its PPG
+  calibration) and the distance estimate (its per-step constant, a sample starting at midnight) are
+  the ring's and always name the ring.
+- baselines ("your usual") are per device (decision 29): every in-app comparison (the Today tiles and
+  sentence, Vitals Status and its Apple Health fallback, the temperature and fever alerts, the Sleep
+  card's skin temperature, cycle and headache signals, the ring's own prior-nights judgement, the
+  basal-energy resting-HR baseline) compares a night or day only with earlier ones from the same
+  device, so a new device starts "Learning your usual". Nothing written to Health changes;
+- **Known limit (v1 is one strap):** untagged rows in strap-owned time name the CURRENTLY saved strap
+  (`HelioConnection.savedPeripheralID`). Pairing a second strap before the first one's untagged rows
+  (steps, sleep, derived values) are flushed would name the new strap for them. Tagged rows (heart
+  rate, SpO₂, respiratory rate, temperature) always name their own strap.
 
 ## User-entered logs
 

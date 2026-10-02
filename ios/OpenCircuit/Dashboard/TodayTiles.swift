@@ -142,6 +142,26 @@ enum TodayTiles {
 
     static let windowDays = TrendsData.lookbackDays
 
+    /// Decision 29: which device each point belongs to, so a tile's "usual" compares the newest value
+    /// only with the same device's earlier ones, and a device new to the person starts "Learning
+    /// your usual". nil (the default, and every ring-only install): every point counts, as before.
+    struct DeviceScope {
+        let night: (Date) -> DeviceOwnershipLog.Family
+        let day: (Date) -> DeviceOwnershipLog.Family
+
+        /// The scope a trends load implies; nil when no switch is on record.
+        static func from(_ trends: TrendsData) -> DeviceScope? {
+            trends.ownership.isEmpty ? nil : DeviceScope(night: trends.nightOwner, day: trends.dayOwner)
+        }
+
+        /// `pts` from the newest point's device.
+        static func sameDevice(_ pts: [BaselineTrend.Point], _ owner: ((Date) -> DeviceOwnershipLog.Family)?) -> [BaselineTrend.Point] {
+            guard let owner, let newest = pts.max(by: { $0.date < $1.date }) else { return pts }
+            let device = owner(newest.date)
+            return pts.filter { owner($0.date) == device }
+        }
+    }
+
     /// Build all six tiles over the last `windowDays` days. `now`/`calendar` are injectable for
     /// tests and fixtures.
     static func build(points: [TrendsEngine.DailyPoint],
@@ -149,10 +169,11 @@ enum TodayTiles {
                       tempUnit: TemperatureUnit,
                       windowDays: Int = windowDays,
                       now: Date = Date(),
-                      calendar: Calendar = .current) -> [TodayTile] {
+                      calendar: Calendar = .current,
+                      scope: DeviceScope? = nil) -> [TodayTile] {
         TodayTile.Metric.allCases.map {
             build($0, points: points, restingHR: restingHR, tempUnit: tempUnit,
-                  windowDays: windowDays, now: now, calendar: calendar)
+                  windowDays: windowDays, now: now, calendar: calendar, scope: scope)
         }
     }
 
@@ -163,7 +184,8 @@ enum TodayTiles {
                       tempUnit: TemperatureUnit,
                       windowDays: Int = windowDays,
                       now: Date = Date(),
-                      calendar: Calendar = .current) -> TodayTile {
+                      calendar: Calendar = .current,
+                      scope: DeviceScope? = nil) -> TodayTile {
         let today = calendar.startOfDay(for: now)
         let days: [Date] = (0..<max(windowDays, 2)).reversed().compactMap {
             calendar.date(byAdding: .day, value: -$0, to: today)
@@ -172,11 +194,12 @@ enum TodayTiles {
         let yesterday = calendar.date(byAdding: .day, value: -1, to: today) ?? today
 
         func series(_ pick: (TrendsEngine.DailyPoint) -> Double?) -> [BaselineTrend.Point] {
-            points.compactMap { p in
+            let pts = points.compactMap { p -> BaselineTrend.Point? in
                 guard let v = pick(p), v > 0, v.isFinite else { return nil }
                 return BaselineTrend.Point(date: calendar.startOfDay(for: p.date), value: v)
             }
             .filter { $0.date >= first && $0.date <= today }
+            return DeviceScope.sameDevice(pts, scope?.night)   // every series here is nightly
         }
         func slots(_ pts: [BaselineTrend.Point]) -> [Double?] {
             var byDay: [Date: Double] = [:]
@@ -211,9 +234,9 @@ enum TodayTiles {
             return nightly("HRV", "overnight avg", .activity, Theme.hrv, "ms", spokenUnit: "milliseconds",
                            pts: series(\.sleepHRVAvg), floor: 3, format: whole, formatDelta: signedWhole)
         case .restingHR:
-            let pts = restingHR
+            let pts = DeviceScope.sameDevice(restingHR
                 .map { BaselineTrend.Point(date: calendar.startOfDay(for: $0.day), value: $0.bpm) }
-                .filter { $0.value > 0 && $0.date >= first && $0.date <= today }
+                .filter { $0.value > 0 && $0.date >= first && $0.date <= today }, scope?.day)
             return nightly("Resting HR", "daily estimate", .heart, Theme.hr, "bpm", spokenUnit: "beats per minute",
                            pts: pts, floor: 2, format: whole, formatDelta: signedWhole, isNightly: false)
         case .spo2:
@@ -235,7 +258,12 @@ enum TodayTiles {
                            format: oneDecimal, formatDelta: signedOne)
         case .steps:
             // Headline = today's total; trend = the last complete day vs the days before it.
-            let pts = series { $0.steps.map(Double.init) }
+            // Steps are per day, not per night: their device is the day's owner (decision 29).
+            let pts = DeviceScope.sameDevice(points.compactMap { p -> BaselineTrend.Point? in
+                guard let v = p.steps.map(Double.init), v > 0, v.isFinite else { return nil }
+                return BaselineTrend.Point(date: calendar.startOfDay(for: p.date), value: v)
+            }
+            .filter { $0.date >= first && $0.date <= today }, scope?.day)
             let trend = BaselineTrend.evaluate(pts.filter { $0.date < today }, minAbsoluteDelta: 1_000)
             let todaySteps = pts.first { $0.date == today }
             let headline = todaySteps ?? pts.max { $0.date < $1.date }

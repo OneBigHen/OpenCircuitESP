@@ -55,15 +55,22 @@ struct CycleCalendarView: View {
     /// Consumes the canonical `skinTempC` values + the 30-night rolling
     /// baseline from `SkinTempBaseline` — no new temperature write. (#78)
     private var skinTempDeviations: [(night: Date, offsetC: Double)] {
-        let nights = sleepSummaries
-            .filter { $0.skinTempC > 0 }
-            .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }
+        Self.skinTempDeviations(sleepSummaries, log: LocalStore.ownershipLog())
+    }
+
+    /// Each night's offset from its OWN device's earlier nights (decision 29: a ring's finger and a
+    /// strap's arm temperature are never one baseline). Exactly the single-baseline result with an
+    /// empty log, since every night is then the ring's.
+    static func skinTempDeviations(_ summaries: [StoredSleepSummary], log: DeviceOwnershipLog) -> [(night: Date, offsetC: Double)] {
+        let valid = summaries.filter { $0.skinTempC > 0 }
+        let device = { (row: StoredSleepSummary) in log.owner(ofNightFrom: row.inBedStart, to: row.inBedEnd) }
+        let nights = valid.map { (temp: SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC), device: device($0)) }
         guard nights.count >= SkinTempBaseline.minBaselineNights else { return [] }
         return nights.compactMap { n in
             // Exclude tonight from the prior nights used to build its own baseline.
-            let prior = nights.filter { $0.night < n.night }
+            let prior = nights.filter { $0.temp.night < n.temp.night && $0.device == n.device }.map(\.temp)
             guard let base = SkinTempBaseline.baseline(priorNights: prior) else { return nil }
-            return (night: n.night, offsetC: SkinTempBaseline.offset(tonight: n.celsius, baseline: base))
+            return (night: n.temp.night, offsetC: SkinTempBaseline.offset(tonight: n.temp.celsius, baseline: base))
         }
     }
 
