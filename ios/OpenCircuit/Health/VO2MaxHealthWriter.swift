@@ -85,9 +85,12 @@ struct VO2MaxHealthWriter {
             HKMetadataKeyWasUserEntered: false,
             Self.methodMetadataKey: Self.methodMetadataValue,
         ]
+        // The estimate comes from a ring workout's heart rate (the ring's recorder is the only one that
+        // computes it), so it names the ring, like BP and the distance estimate (review-224b N-2):
+        // attribution follows the data, never the current device choice (decision 28).
         let sample = HKQuantitySample(type: Self.vo2MaxType, quantity: quantity,
                                       start: workoutEnd, end: workoutEnd,
-                                      device: HealthKitWriter().activeWearableDevice(),
+                                      device: HealthKitWriter.wearableDevice(forTimeline: .ringConn, wearable: .shared),
                                       metadata: metadata)
         do {
             try await store.save(sample)
