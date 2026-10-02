@@ -1,0 +1,199 @@
+import XCTest
+@testable import OpenCircuit
+
+/// #255 (decision 51): the first run's decisions, which device is preselected and marked "In use",
+/// what the last button does, and the "You're using X now" line, plus the copy that must not fork
+/// from its sources. All values are synthetic.
+@MainActor
+final class OnboardingFlowTests: XCTestCase {
+    private typealias Installed = OnboardingFlow.Installed
+
+    private func flow(_ choice: ActiveDeviceChoice = .ringConn, ring: Bool = false, key: Bool = false) -> OnboardingFlow {
+        OnboardingFlow(installed: Installed(persistedChoice: choice, hasSavedRing: ring, hasStrapKey: key))
+    }
+
+    // MARK: preselection (51d)
+
+    func testAFreshInstallPreselectsNothing() {
+        XCTAssertNil(flow().preselection, "the ring default on a fresh install is not a ring in use")
+        XCTAssertNil(flow().inUse)
+    }
+
+    func testASavedRingWithTheRingChosenIsPreselected() {
+        XCTAssertEqual(flow(.ringConn, ring: true).preselection, .ringConn)
+        XCTAssertEqual(flow(.ringConn, ring: true).inUse, .ringConn)
+    }
+
+    func testTheStrapChosenIsPreselectedWithOrWithoutASavedRing() {
+        XCTAssertEqual(flow(.helioStrap).preselection, .helioStrap)
+        XCTAssertEqual(flow(.helioStrap, ring: true).preselection, .helioStrap)
+        XCTAssertEqual(flow(.helioStrap, ring: true, key: true).preselection, .helioStrap)
+        XCTAssertEqual(flow(.helioStrap, ring: true).inUse, .helioStrap)
+    }
+
+    func testASavedKeyWithTheRingChosenAndASavedRingPreselectsTheRing() {
+        XCTAssertEqual(flow(.ringConn, ring: true, key: true).preselection, .ringConn)
+    }
+
+    func testASavedKeyAndNothingElsePreselectsNothing() {
+        XCTAssertNil(flow(.ringConn, key: true).preselection, "a key alone doesn't make the strap the device in use")
+        XCTAssertNil(flow(.ringConn, key: true).inUse)
+    }
+
+    // MARK: the last button (51b)
+
+    func testTheStrapPickedAndNotSetUpEndsOnTheStrapsSetup() {
+        XCTAssertEqual(flow().finish(for: .helioStrap), .setUpStrap, "no key, ring default")
+        XCTAssertEqual(flow(.ringConn, ring: true, key: true).finish(for: .helioStrap), .setUpStrap,
+                       "a key but the ring chosen: the switch is still to make")
+        XCTAssertEqual(flow(.helioStrap).finish(for: .helioStrap), .setUpStrap, "the strap chosen but its key forgotten")
+        XCTAssertEqual(OnboardingFlow.Finish.setUpStrap.title, "Set up the strap")
+    }
+
+    func testTheStrapPickedAndSetUpGetsStarted() {
+        XCTAssertEqual(flow(.helioStrap, key: true).finish(for: .helioStrap), .getStarted)
+        XCTAssertEqual(flow(.helioStrap, ring: true, key: true).finish(for: .helioStrap), .getStarted)
+    }
+
+    func testTheRingOrNoPickGetsStarted() {
+        for installed in [flow(), flow(.ringConn, ring: true), flow(.helioStrap), flow(.helioStrap, key: true)] {
+            XCTAssertEqual(installed.finish(for: .ringConn), .getStarted)
+            XCTAssertEqual(installed.finish(for: nil), .getStarted)
+        }
+        XCTAssertEqual(OnboardingFlow.Finish.getStarted.title, "Get Started")
+    }
+
+    // MARK: "You're using X now"
+
+    func testTheSwitchLineAppearsOnlyWhenThePickDiffersFromTheDeviceInUse() {
+        XCTAssertEqual(flow(.ringConn, ring: true).switchNote(for: .helioStrap),
+                       "You're using the RingConn ring now. To switch, go to Profile ▸ Device.")
+        XCTAssertEqual(flow(.helioStrap, key: true).switchNote(for: .ringConn),
+                       "You're using the Amazfit Helio Strap now. To switch, go to Profile ▸ Device.")
+        XCTAssertNil(flow(.ringConn, ring: true).switchNote(for: .ringConn), "the pick is the device in use")
+        XCTAssertNil(flow(.helioStrap).switchNote(for: .helioStrap))
+        XCTAssertNil(flow(.ringConn, ring: true).switchNote(for: nil), "nothing picked")
+        XCTAssertNil(flow().switchNote(for: .helioStrap), "a fresh install has no device in use")
+        XCTAssertNil(flow().switchNote(for: .ringConn))
+        XCTAssertNil(flow(.ringConn, key: true).switchNote(for: .ringConn), "a key alone is no device in use")
+    }
+
+    func testTheStrapSetupHintSaysWhereTheStrapIsSetUp() {
+        XCTAssertEqual(flow().strapSetupHint(for: .helioStrap),
+                       "Set up the strap at the end of this guide, or later in Profile ▸ Device.")
+        XCTAssertEqual(flow().strapSetupHint(for: nil), "Set it up in Profile ▸ Device.")
+        XCTAssertNil(flow(.helioStrap, key: true).strapSetupHint(for: .helioStrap), "already set up")
+        XCTAssertNil(flow(.helioStrap, key: true).strapSetupHint(for: nil))
+        XCTAssertNil(flow().strapSetupHint(for: .ringConn), "the strap's steps aren't shown")
+    }
+
+    // MARK: copy and constants
+
+    func testTheCompletionFlagIsVersionTwo() {
+        XCTAssertEqual(OnboardingView.completedKey, "onboarding.completed.v2")
+    }
+
+    func testTheSharedDisclaimerNamesEveryCompanyAndTrademark() {
+        let text = OnboardingCopy.disclaimer
+        for name in ["RingConn", "JZ_Tech", "Amazfit", "Zepp Health", "not a medical device",
+                     "\"RingConn\"", "\"Amazfit\"", "\"Helio\"", "\"Zepp\"", "Gen 2 Air", "Gen 3", "Helio Strap"] {
+            XCTAssertTrue(text.contains(name), "missing \(name)")
+        }
+        XCTAssertFalse(text.contains("compatible with the RingConn Gen 2 smart ring"), "the old ring-only wording")
+    }
+
+    func testTheStrapBulletsAreHelioStatussOwnCopy() {
+        XCTAssertEqual(OnboardingCopy.strapWarnings, [HelioStatus.dontUnpairCopy, HelioStatus.zeppBluetoothCopy])
+        XCTAssertEqual(OnboardingCopy.keyGuideURL, HelioStatus.keyGuideURL)
+    }
+
+    func testTheRingStepsAreTodaysFour() {
+        XCTAssertEqual(OnboardingCopy.ringSteps.count, 4)
+        XCTAssertTrue(OnboardingCopy.ringSteps[0].hasPrefix("No RingConn account and no official app needed"))
+        XCTAssertTrue(OnboardingCopy.ringSteps[3].hasPrefix("Charge the ring as usual"))
+    }
+
+    func testEachCardReadsAsTheDeviceAndItsDetail() {
+        let ring = flow(.ringConn, ring: true)
+        XCTAssertEqual(ring.cardAccessibilityLabel(.ringConn),
+                       "RingConn ring. RingConn Gen 2, Gen 2 Air or Gen 3. No account needed. In use")
+        XCTAssertEqual(ring.cardAccessibilityLabel(.helioStrap),
+                       "Amazfit Helio Strap. Needs a one-time key from the Zepp app (see setup).")
+    }
+
+    func testTheSharedPagesHaveNoRingOnlyWording() {
+        for text in OnboardingCopy.welcome + [OnboardingCopy.bluetoothPermission] {
+            XCTAssertNil(text.range(of: "your ring\\b(?! or)", options: .regularExpression), text)
+            XCTAssertFalse(text.contains("RingConn Gen 2's"), text)
+        }
+        XCTAssertTrue(OnboardingCopy.bluetoothPermission.contains("your ring or strap"))
+    }
+
+#if DEBUG && targetEnvironment(simulator)
+    func testTheScreenshotHookMapsEveryId() {
+        let fresh = flow()
+        let cases: [(String, OnboardingFlow.Page, ActiveDeviceChoice?)] = [
+            ("welcome", .welcome, nil), ("choose", .choose, nil), ("choose-strap", .choose, .helioStrap),
+            ("start-ring", .gettingStarted, .ringConn), ("start-strap", .gettingStarted, .helioStrap),
+            ("permissions", .permissions, nil), ("last-ring", .finish, .ringConn), ("last-strap", .finish, .helioStrap),
+        ]
+        for (id, page, pick) in cases {
+            let start = fresh.debugStart(id)
+            XCTAssertEqual(start?.page, page, id)
+            XCTAssertEqual(start?.pick, pick, id)
+        }
+        XCTAssertNil(fresh.debugStart("nope"))
+        XCTAssertEqual(flow(.ringConn, ring: true).debugStart("choose")?.pick, .ringConn, "plain ids keep the preselection")
+    }
+#endif
+
+    // MARK: no side effects (#142, decision 1)
+
+    func testReadingThePreselectionCreatesNoCentralAndSwitchesNothing() throws {
+        let standard = UserDefaults.standard
+        let choiceBefore = standard.object(forKey: ActiveDeviceChoiceStore.key) as? String
+        let logBefore = standard.data(forKey: DeviceOwnershipStore.key)
+        let persistedBefore = ActiveDeviceChoiceStore.persisted()
+        let centralBefore = HelioConnection.shared.hasCentral
+        XCTAssertFalse(centralBefore, "the test host has the ring chosen, so the strap has no central")
+
+        let suite = "test.OnboardingFlowTests.keys"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let keys = HelioKeyStore(service: "test.OnboardingFlowTests", defaults: defaults)
+        XCTAssertTrue(try keys.save(pasted: "00112233445566778899aabbccddeeff"))
+        defer { keys.forget() }
+
+        let live = OnboardingFlow(installed: .live(keyStore: keys))
+        XCTAssertTrue(live.installed.hasStrapKey)
+        _ = live.preselection
+        for pick in [nil, ActiveDeviceChoice.ringConn, .helioStrap] {
+            _ = live.finish(for: pick)
+            _ = live.switchNote(for: pick)
+            _ = live.strapSetupHint(for: pick)
+        }
+        _ = OnboardingFlow(installed: .live())
+
+        XCTAssertEqual(HelioConnection.shared.hasCentral, centralBefore, "no central was created")
+        XCTAssertFalse(HelioConnection.shared.hasCentral)
+        XCTAssertEqual(ActiveDeviceChoiceStore.persisted(), persistedBefore, "nothing was switched")
+        XCTAssertEqual(standard.object(forKey: ActiveDeviceChoiceStore.key) as? String, choiceBefore)
+        XCTAssertEqual(standard.data(forKey: DeviceOwnershipStore.key), logBefore, "the ownership log is untouched")
+    }
+
+    func testTheLiveReadUsesThePersistedChoiceFromItsDefaults() throws {
+        let suite = "test.OnboardingFlowTests.choice"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let keys = HelioKeyStore(service: "test.OnboardingFlowTests.none", defaults: defaults)
+        keys.forget()
+
+        XCTAssertEqual(Installed.live(defaults: defaults, keyStore: keys).persistedChoice, .ringConn)
+        defaults.set(ActiveDeviceChoice.helioStrap.rawValue, forKey: ActiveDeviceChoiceStore.key)
+        let strap = Installed.live(defaults: defaults, keyStore: keys)
+        XCTAssertEqual(strap.persistedChoice, .helioStrap)
+        XCTAssertFalse(strap.hasStrapKey)
+        XCTAssertNil(defaults.data(forKey: DeviceOwnershipStore.key), "a read records no ownership entry")
+    }
+}
