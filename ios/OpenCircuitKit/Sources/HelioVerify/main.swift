@@ -9,7 +9,8 @@
 // and flushed to the drive with F_FULLFSYNC.
 //
 // Device controls (`--find`, `--vibrate`, `--alarms`, `--set-alarm`, `--delete-alarm`, `--alerts`)
-// live in Controls.swift. Every write of strap settings (`--set-time`, and the alarm writes, which
+// live in Controls.swift; strap settings (`--settings`, `--set-config`, `--config-probe`) in
+// Settings.swift. Every write of strap settings (`--set-time`, and the alarm writes, which
 // set the clock first) needs `--allow-write`; dropping fetched data needs `--allow-delete`.
 
 import CoreBluetooth
@@ -82,6 +83,12 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     var controlWaitToken = 0
     var controlTimer: Timer?
     var configCapabilities: ZeppConfigCapabilities?
+    // Strap settings (Settings.swift).
+    var settingsEditor: ZeppSettingsEditor?
+    var settingsSteps: [SettingsStep] = []
+    var rawGroupQueue: [UInt8] = []
+    var rawGroupInFlight: UInt8?
+    var probeRun: ProbeRun?
     /// DIS 0x2A27, to cross-check the device-info hardware version.
     var disHardwareRevision: String?
 
@@ -632,6 +639,8 @@ final class HelioVerifier: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
 
 // MARK: - Main
 
+// Before anything is printed: a dead stdout pipe must not kill the run before the find stop.
+StopSignals.ignoreBrokenPipe()
 let options = parseCommandLine()
 let key = options.keyFile.map(loadKey)
 if options.allowDelete {

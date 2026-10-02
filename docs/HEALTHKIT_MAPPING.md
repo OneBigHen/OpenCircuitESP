@@ -17,11 +17,12 @@ device's own timestamps (so historical sync backfills correctly).
 | Sleep stages | `HKCategoryType(.sleepAnalysis)` | Category | — | values: `inBed`, `asleepCore`, `asleepDeep`, `asleepREM`, `awake` |
 | Workout / strain | `HKWorkout` | Workout | — | openwhoop "strain" has no native type; store as workout + metadata |
 
-## Amazfit Helio Strap (Zepp OS), proposed (#215)
+## Amazfit Helio Strap (Zepp OS) (#215)
 
 The strap's metrics land on the **same `MetricKind`s and HealthKit types as the ring**. Wire
-layouts are in `ZEPP_PROTOCOL.md` §6.5. Nothing below is implemented yet, and every wire
-claim is 🟡 until checked on a real strap.
+layouts are in `ZEPP_PROTOCOL.md` §6.5. The table below was the proposal; what the app does
+(phase 3, the decisions of record) is in "What the app writes" right after it. Wire claims keep
+their spec tags until checked on a real strap.
 
 | Helio fetch type | `MetricKind` → HealthKit type | Conversion | Gap / decision needed |
 |---|---|---|---|
@@ -29,19 +30,108 @@ claim is 🟡 until checked on a real strap.
 | `0x01` activity: per-minute steps | `.steps` → `.stepCount` | one sample per minute (or folded per quarter-hour), count as-is | the strap reports **true per-minute counts with a backlog**, unlike the ring's quarter-hour bucket (#192). Don't route these through `StepAccumulator`. Double-counting with the phone is the same trade-off as the ring |
 | `0x3A` resting HR | `.restingHeartRate` → `.restingHeartRate` | bpm, one per day | **device-reported**, unlike the ring's derived `RestingHR`. Write it as-is; skip `RestingHR` derivation for this device |
 | `0x3D` max HR | none | — | **gap**: no HealthKit type. Keep it local (or drop it) |
-| `0x49` HRV | `.hrvSDNN` → `.heartRateVariabilitySDNN` | ms | **statistic unknown** (RMSSD vs SDNN). Until a capture settles it, tag the metadata with `OpenCircuitHRVStatistic = "unknown"` rather than guessing "RMSSD" |
+| `0x49` HRV (RMSSD) | `.hrvSDNN` → `.heartRateVariabilitySDNN` | ms | strap reports **RMSSD** 🟡 (Amazfit's product-line documentation, which doesn't name the strap; not compared with Zepp's display, `ZEPP_PROTOCOL.md` §6.5); written into the SDNN field and **tagged via metadata** (`OpenCircuitHRVStatistic = "RMSSD"`, no fake conversion), exactly like the ring's — see "HRV: RMSSD stored in the SDNN field" below |
 | `0x25` SpO₂ (auto + manual) | `.spo2` → `.oxygenSaturation` | % ÷ 100 (fraction), from the low 7 bits of the value byte | none. `0x26` sleep SpO₂ is optional (Gadgetbridge doesn't store it) |
 | `0x2E` temperature | `.temperature` → `.bodyTemperature` | centi-°C ÷ 100 | per-minute **all day**, not just the sleep window like the ring. Decide whether to write every minute, only the sleep window (matching the ring's #29 behaviour), or a downsampled series. Same skin-vs-core caveat as the ring |
 | `0x38` sleep respiratory rate | `.respiratoryRate` → `.respiratoryRate` | breaths/min as-is | none |
 | `0x48` sleep session + stages | `.sleep` → `.sleepAnalysis` | stage `04` light → `asleepCore`, `05` deep → `asleepDeep`, `08` REM → `asleepREM`, `07` awake → `awake`; unknown stage → `asleepUnspecified` | the strap's own staging. Decide device staging vs `SleepStaging`, and whether to write `inBed` (the record has no separate in-bed span, 🔴) |
 | `0x13` stress (auto) | none | — | **gap**: no HealthKit type. Local only |
-| `0x0D` PAI | none | — | **gap**: no HealthKit type. Local only |
+| `0x0D` PAI | none | — | **gap**: no HealthKit type. Stored as phone-only `.pai` history (decision 45), never in Health |
 | active energy | `.activeEnergy` → `.activeEnergyBurned` | derived from HR with `Calories` (the strap sends no energy history) | same derivation as the ring. Needs dense HR, which the strap's per-minute HR provides |
 | `0x05`/`0x06` workouts | `HKWorkout` | — | **out of scope for v1** (see protocol §6.5) |
 
 Cross-device rules (plan of record §4): attach an `HKDevice` naming the strap to every write,
 and allow **one active device at a time** in v1, because Apple Health can't dedupe two
 devices writing under the same source app.
+
+### What the app writes (phase 3)
+
+Everything is stored on the strap's own timeline (`zeppos:<peripheral id>`) and reaches Apple
+Health through the ring's `LocalStore` → `HealthKitWriter` path, carrying the strap's `HKDevice`
+(name "Helio Strap", manufacturer "Amazfit", hardware/firmware from the strap's reads). The pure
+rules are in `ZeppKit/HelioSyncPolicy.swift`, tested by `HelioSyncPolicyTests`.
+
+| Metric | Stored | Apple Health |
+|---|---|---|
+| Heart rate (activity per-minute HR) | `.heartRate` | yes, per reading |
+| SpO₂ (`0x25`), respiratory rate (`0x38`) | `.spo2`, `.respiratoryRate` | yes |
+| Skin temperature (`0x2e`) | `.temperature`, **gated**: 30–42 °C, the minute's activity record known and not `0x73`/`0x76`, inside the strap's own sleep window | yes, as the ring's nightly readings (`.bodyTemperature`); the night's mean goes to the Sleep summary via the ring's `SkinTempBaseline.nightlyVerdict` |
+| Steps (activity per-minute) | `StoredStepSample` per minute + `StoredDaily` | yes, additive deltas over their real minute, through the ring's step writer (watermark advances only after the save) |
+| Active / basal energy, resting HR, exercise minutes | derived from the stored HR, as for the ring | yes, the ring's derived writers |
+| Resting HR (`0x3a`, strap-reported) | `.restingHeartRate` (local only) | no: the ring's derived daily writer already writes one per day, and writing both would double it |
+| HRV (`0x49`, RMSSD 🟡) | `.hrvSDNN` | yes, per reading (`HelioHealthPolicy.writesHRV`, decision 44): the RMSSD value in the SDNN field, tagged `OpenCircuitHRVStatistic = "RMSSD"` like the ring's. Readings stored before this shipped backfill on the next flush (the strap's `hk:hrvSDNN` watermark was never advanced), back to the 30-day raw-sample retention |
+| Sleep (`0x48`) | the strap's own stages → Sleep summary + hypnogram; no invented in-bed span | yes, through `mirrorSettledNight`; a manually edited night is never overwritten. No `SleepStaging` fallback yet (DECISION-GAP, see `HelioSleepSelection`) |
+| Stress (`0x13`) | `.stress`, one 0–100 sample per minute (`ff` skipped), charted through the day (#239). A backfill moves only its fetch watermark back, up to 7 days and never before the strap's ownership start, and only when another build advanced that watermark without storing the minutes (builds 59/60) | **no**: no Health type (`HealthKitWriter.quantityType(for: .stress)` is nil; not in any mirrored-kind list; not exported) |
+| PAI (`0x0d`) | `.pai`, one row per valid record (value = total PAI, at the record's own time, owned rows only). Phone-only history (decision 45): the PAI tile in Today's Your Numbers grid shows the newest row under 48 h old (decision 49; tapping it explains PAI), so the number survives a sync with no `0x0d` record and every relaunch. A backfill moves only its fetch watermark back, up to 7 days, never before the strap's ownership start and never past the 30-day sample retention, and only when another build advanced that watermark without storing the records (builds 59–62). No chart, no trend, no usual range in v1, and not a `TodayTile` | **no**: no Health type (`HealthKitWriter.quantityType(for: .pai)` is nil; not in any mirrored-kind list; not exported) |
+| Walking + running distance | — | **no**: the ring's distance is its own per-step estimate, so it is derived only from step rows the RING owned (decision 28). The strap sends no distance history and its steps get none. The ring's day distance is one sample from midnight to its last row, named the ring, so on a day with a switch Health's hourly chart spreads it across the strap's hours too (review-224c N-c; the day total is right) |
+
+#### Who owns which time (decision 28)
+
+A wearer can switch between the ring and the strap, and both record the same sleep and steps. Each
+switch is recorded (`DeviceOwnershipLog`, persisted by `DeviceOwnershipStore`), and a device only
+stores and writes what it measured for time it owned:
+
+- the ring owns everything before the first switch, so a ring-only install is unchanged;
+- nights (decisions 28a, 28c–28f):
+  - a strap sleep is a night only if it could be that night: it passes the ring's own overnight
+    gate (`SleepWindow.isOvernightBlock`, 28c) AND ends in its key's wake window
+    (`SleepNightKey.endsInWakeWindow`, before noon, 28d), both judged in the time zone it was
+    recorded in, from the strap's own local-midnight reference (28e). First, each session's sleep is
+    kept only when the strap owns its own window (28a); only those sleeps, 60 min or less apart, are
+    then stitched into one night (`HelioSleepSelection.stitch`, 28f): segments exactly as reported,
+    the gap left a gap. (Stitching before that check let a doze from before a ring → strap switch
+    drag the strap's night into ring time, so neither device kept it: review-224e S-1, fixed in
+    #225.) Anything else gets a log line and no row, so it never takes a night key (strap naps as
+    `StoredNap` are a follow-up);
+  - a sleep more than 60 min from the rest of its night is not stitched, and its night key already
+    holds the longer part, so until strap naps (#231) the smaller part is stored nowhere and doesn't
+    reach Health. A `helio-link` breadcrumb notes that it happened (no time, no length);
+  - a strap night already written to Health stands: a later sync can't grow it by stitching or
+    replace it with another sleep for its key (#225); a night not yet written still stitches;
+  - the strap's gate is the ring's pass 1 only: the ring's second pass (a night whose onset was
+    never recorded, `onsetIsUnobserved:`) needs its epoch archive's evidence of a hole, which the
+    strap has no equivalent of, so a strap session recorded only from 06:00 is not a night;
+  - the device you went to bed with keeps the night: the device chosen when its in-bed window began,
+    however late a switch lands inside it (for the strap, the window of its own stitched sleeps, so a
+    doze before the switch never moves the night's start into the other device's time). A switch at exactly the in-bed start goes to the NEW
+    device (the switch counts as made before bed);
+  - sleeps that overlap: a stored night is never replaced or merged by the other device's night;
+    when a switch falls between the two devices' bedtimes, each window began under its own device,
+    so whichever device syncs first keeps the night. "Whichever syncs first" applies only to sleeps
+    that overlap;
+  - two sleeps that DON'T overlap but share one key (e.g. the ring's 23:00–07:00 and the strap's
+    07:30–10:00 after a morning switch): the longer one that ends in the wake window is the night,
+    and the shorter one never makes it unkeepable (the night may replace it);
+  - the device that doesn't keep the night is skipped (`ownedByOtherDevice`, or
+    `ownedByOtherDeviceNoRow` when the owner stored none, which the Sleep card shows as a notice
+    instead of the ring's reading). A kept night goes to Health named its owner, even where it covers
+    the other device's minutes; the mirror's delete never reaches the other device's kept night.
+    **Don't switch while asleep** anyway: the night stays with the device you went to bed with, and
+    the new device's reading of it is not kept;
+- step rows lie wholly in their device's time (decision 28b): the ring's first quarter-hour bucket
+  after a switch back is clamped to the switch, its delta kept, so it is named the ring and gets
+  distance. At most the pre-switch part of that one bucket can be counted by both devices;
+- the strap fetches nothing older than the start of its current ownership (`HelioFetchPlan`'s
+  `notBefore`), except on an install that never had a ring, where its first ownership starts in the
+  distant past and the first sync is the normal backfill;
+- the ring's catch-up after a switch back stores its rows for the strap's window locally, but none
+  of them is pending for Apple Health and no night is saved from them;
+- resting HR, active/basal energy and exercise minutes use only HR from the device that owned it;
+- every write names the device of its ROW: a timeline's rows name that timeline's device, untagged
+  rows (steps, sleep, naps, derived values) name the device that owned their start (a night: the
+  device it belongs to, above). A strap sync flushed after a switch back to the ring still names the
+  strap, or writes nothing when the strap never passed the first-write guard. BP estimates (its PPG
+  calibration) and the distance estimate (its per-step constant, a sample starting at midnight) are
+  the ring's and always name the ring.
+- baselines ("your usual") are per device (decision 29): every in-app comparison (the Today tiles and
+  sentence, Vitals Status and its Apple Health fallback, the temperature and fever alerts, the Sleep
+  card's skin temperature, cycle and headache signals, the ring's own prior-nights judgement, the
+  basal-energy resting-HR baseline) compares a night or day only with earlier ones from the same
+  device, so a new device starts "Learning your usual". Nothing written to Health changes;
+- **Known limit (v1 is one strap):** untagged rows in strap-owned time name the CURRENTLY saved strap
+  (`HelioConnection.savedPeripheralID`). Pairing a second strap before the first one's untagged rows
+  (steps, sleep, derived values) are flushed would name the new strap for them. Tagged rows (heart
+  rate, SpO₂, respiratory rate, temperature) always name their own strap.
 
 ## User-entered logs
 
@@ -105,13 +195,16 @@ skin reading (~5 °C below core) will look low there. Values stay in °C.
 
 ### HRV: RMSSD stored in the SDNN field, labeled via metadata (#37)
 
-The ring reports HRV as **RMSSD** (`BulkSleep` / `HRV.rmssd`), but HealthKit only has a
+The ring reports HRV as **RMSSD** (`BulkSleep` / `HRV.rmssd`), and so does the Helio Strap
+(`0x49`, 🟡: Amazfit documents its devices' HRV as RMSSD without naming the strap, and no value has
+been compared with Zepp's, `ZEPP_PROTOCOL.md` §6.5), but HealthKit only has a
 single HRV field, `.heartRateVariabilitySDNN`. RMSSD and SDNN are **not** related by a
 fixed constant (their ratio depends on the RR spectrum), so we do **not** apply a made-up
 conversion. Instead each HRV sample is written to the SDNN field with metadata
 `OpenCircuitHRVStatistic = "RMSSD"` (`HealthKitWriter.metadata(for:)`), so the value is
 honest and a reader can tell which statistic it actually is. If a future capture shows the
-ring also reports true SDNN, switch to writing that directly and drop the tag.
+ring also reports true SDNN, switch to writing that directly and drop the tag. The tag has no
+per-device branch: both devices are taken as RMSSD, so a device with another statistic would need one.
 
 ### HRV and RR come from ANY worn epoch, not sleep-vitals only (#185)
 

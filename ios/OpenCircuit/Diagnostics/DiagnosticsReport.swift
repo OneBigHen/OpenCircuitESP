@@ -116,12 +116,7 @@ enum DiagnosticsReport {
         s.append("")
 
         // 4) Sync activity log — when syncs ran and what they drained.
-        let allRecs = observability.records().sorted { $0.date > $1.date }
-        s.append("# Sync activity log (latest \(min(allRecs.count, 20)) of \(allRecs.count))")
-        if allRecs.isEmpty { s.append("  (none)") }
-        for r in allRecs.prefix(20) {
-            s.append("  \(t(r.date))  \(r.kind.rawValue)  \(r.success ? "ok  " : "FAIL")  \(r.detail ?? "")")
-        }
+        s.append(contentsOf: activityLogSection(observability, format: t))
         s.append("")
 
         // 4b) Background scheduling diagnostics (#bg-observability) — the decisive triage for
@@ -130,26 +125,7 @@ enum DiagnosticsReport {
         // (bgpending), and whether iOS ever invoked the handler (bgtask "handler INVOKED"). If this
         // shows submits ok + pending requests but never a "handler INVOKED" line, iOS isn't granting;
         // a "SUBMIT FAILED — …" line names the cause (refresh disabled / id missing from Info.plist).
-        s.append("# Background scheduling")
-        s.append("  Last (re)scheduled: \(t(observability.bgLastScheduled))")
-        // `hrv-pool` (#185 gate) and `sleep-sync` were being recorded but never surfaced — this
-        // filter is the only thing that reaches a tester, and os_log does not. A permanently
-        // suppressed HRV recovery, or a sleep drain that keeps skipping its re-stage, is otherwise
-        // invisible in the one channel a TestFlight tester has. (Adversarial review.)
-        // `focus` and `bgphase` join the whitelist: the Sleep Focus filter is OPT-IN (iOS never
-        // invokes it until the user attaches it under Settings ▸ Focus ▸ Sleep ▸ Add Filter), and
-        // without its breadcrumb "did Focus-off ever fire a sync?" is UNANSWERABLE from a tester
-        // bundle — which is exactly the question the 2026-08-07 report turned on. Both are
-        // low-volume (a couple of rows a day), so they cannot crowd out the scheduling lines.
-        let bgSources: Set<String> = ["bgregister", "bgschedule", "bgpending", "bgtask",
-                                      "bgphase", "focus", "hrv-pool", "sleep-sync"]
-        let bgLog = observability.metricRecords()
-            .filter { bgSources.contains($0.source) }
-            .sorted { $0.date > $1.date }
-        if bgLog.isEmpty { s.append("  (no scheduling events recorded)") }
-        for r in bgLog.prefix(24) {
-            s.append("  \(t(r.date))  \(r.source)  \(r.detail)")
-        }
+        s.append(contentsOf: backgroundSchedulingSection(observability, format: t))
         s.append("")
 
         // 4c) Per-channel drain outcomes (#188 follow-up). These were being recorded and never
@@ -178,6 +154,13 @@ enum DiagnosticsReport {
             s.append("  \(t(r.date))  \(r.source)  \(r.detail)")
         }
         s.append("")
+
+        // 4d) The Helio Strap's link and wake breadcrumbs (#233), in their own section with their own
+        // budget like the drains above. Absent when there are none, so a ring-only bundle is unchanged.
+        if let strap = strapLinkSection(observability.metricRecords(), format: t) {
+            s.append(contentsOf: strap)
+            s.append("")
+        }
 
         // 5) Headache signals (#183) — the remote-debugging section for the overnight-signals
         // detector. It exists because the maintainer does not get headaches: TestFlight testers are
@@ -215,6 +198,99 @@ enum DiagnosticsReport {
             s.append(session.frameCaptureReport(redactMAC: redactMAC))
         }
 
+        return s.joined(separator: "\n")
+    }
+
+    /// Section 4: the sync activity log, latest first. Shared by the ring's bundle and the strap's.
+    static func activityLogSection(_ observability: ObservabilityStore, format: (Date?) -> String) -> [String] {
+        let allRecs = observability.records().sorted { $0.date > $1.date }
+        var s = ["# Sync activity log (latest \(min(allRecs.count, 20)) of \(allRecs.count))"]
+        if allRecs.isEmpty { s.append("  (none)") }
+        for r in allRecs.prefix(20) {
+            s.append("  \(format(r.date))  \(r.kind.rawValue)  \(r.success ? "ok  " : "FAIL")  \(r.detail ?? "")")
+        }
+        return s
+    }
+
+    /// Section 4b: background scheduling. Shared by the ring's bundle and the strap's.
+    static func backgroundSchedulingSection(_ observability: ObservabilityStore, format: (Date?) -> String) -> [String] {
+        var s: [String] = ["# Background scheduling"]
+        s.append("  Last (re)scheduled: \(format(observability.bgLastScheduled))")
+        // `hrv-pool` (#185 gate) and `sleep-sync` were being recorded but never surfaced — this
+        // filter is the only thing that reaches a tester, and os_log does not. A permanently
+        // suppressed HRV recovery, or a sleep drain that keeps skipping its re-stage, is otherwise
+        // invisible in the one channel a TestFlight tester has. (Adversarial review.)
+        // `focus` and `bgphase` join the whitelist: the Sleep Focus filter is OPT-IN (iOS never
+        // invokes it until the user attaches it under Settings ▸ Focus ▸ Sleep ▸ Add Filter), and
+        // without its breadcrumb "did Focus-off ever fire a sync?" is UNANSWERABLE from a tester
+        // bundle — which is exactly the question the 2026-08-07 report turned on. Both are
+        // low-volume (a couple of rows a day), so they cannot crowd out the scheduling lines.
+        let bgSources: Set<String> = ["bgregister", "bgschedule", "bgpending", "bgtask",
+                                      "bgphase", "focus", "hrv-pool", "sleep-sync"]
+        let bgLog = observability.metricRecords()
+            .filter { bgSources.contains($0.source) }
+            .sorted { $0.date > $1.date }
+        if bgLog.isEmpty { s.append("  (no scheduling events recorded)") }
+        for r in bgLog.prefix(24) {
+            s.append("  \(format(r.date))  \(r.source)  \(r.detail)")
+        }
+        return s
+    }
+
+    /// How many strap breadcrumbs the export prints: a night's worth and more (one 12 h window holds
+    /// at most 48, `HelioBreadcrumbBudget`).
+    static let strapLinkLimit = 100
+
+    /// Section 4d (#233): the Helio Strap's link and wake breadcrumbs (`HelioBreadcrumbs.source`),
+    /// latest first. nil when there are none.
+    static func strapLinkSection(_ records: [MetricRecord], format: (Date?) -> String) -> [String]? {
+        let rows = records.filter { $0.source == HelioBreadcrumbs.source }.sorted { $0.date > $1.date }
+        guard !rows.isEmpty else { return nil }
+        var s = ["# Strap link and wakes (latest \(min(rows.count, strapLinkLimit)) of \(rows.count))",
+                 "  link up/down, restoration relaunches, messages the strap sent on its own (endpoint,"
+                 + " opcode and length only), and why each strap sync ran. A message's time is when it"
+                 + " arrived: the strap may have sent it earlier (ZEPP_PROTOCOL.md §16.2, queuing unknown)"]
+        for r in rows.prefix(strapLinkLimit) {
+            s.append("  \(format(r.date))  \(r.detail)")
+        }
+        return s
+    }
+
+    /// The Helio Strap's bundle (#233): reachable from the strap's device screen, where the ring's
+    /// (`build`) isn't. Sync and scheduling history and the strap's breadcrumbs only: times, counts and
+    /// control bytes, no identifier and no health value.
+    static func buildForStrap(firmware: String?, hardware: String?,
+                              observability: ObservabilityStore = ObservabilityStore(),
+                              timeZone: TimeZone = .current,
+                              now: Date = Date()) -> String {
+        let fmt = DateFormatter()
+        fmt.timeZone = timeZone
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyy-MM-dd HH:mm"
+        func t(_ d: Date?) -> String { d.map { fmt.string(from: $0) } ?? "—" }
+        let build = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "?"
+        let short = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
+
+        var s: [String] = []
+        s.append("OpenCircuit — diagnostics bundle (Helio Strap)")
+        s.append("Generated: \(t(now)) (\(timeZone.identifier))")
+        s.append("App: \(short) (build \(build))")
+        s.append("Strap firmware: \(firmware ?? "(unread)") · Hardware: \(hardware ?? "(unread)")")
+        s.append("")
+        s.append("# Privacy")
+        s.append("This file holds when the app synced and connected, with counts and control bytes.")
+        s.append("It holds no health values and no device identifiers.")
+        s.append("")
+        s.append("# Sync state")
+        s.append("  Last successful sync: \(t(observability.lastSuccessfulSync))")
+        s.append("  Last background run:  \(t(observability.bgLastRun))")
+        s.append("")
+        s.append(contentsOf: activityLogSection(observability, format: t))
+        s.append("")
+        s.append(contentsOf: backgroundSchedulingSection(observability, format: t))
+        s.append("")
+        s.append(contentsOf: strapLinkSection(observability.metricRecords(), format: t)
+                 ?? ["# Strap link and wakes", "  (none recorded)"])
         return s.joined(separator: "\n")
     }
 

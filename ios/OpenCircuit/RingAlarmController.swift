@@ -166,7 +166,8 @@ final class RingAlarmController {
     /// any ring without a motor, and `vibrate` itself declines while the ring is charging or the
     /// link is busy: a missed buzz on a notification is not worth contending the BLE link for.
     func buzzForAlert() {
-        guard buzzAlertsEnabled else { return }
+        // Ring only: with the Helio Strap active the ring is not touched (decision 1, #215).
+        guard buzzAlertsEnabled, ActiveDeviceChoiceStore.persisted() == .ringConn else { return }
         RingScanner.shared.session?.vibrate(.notification)
     }
 

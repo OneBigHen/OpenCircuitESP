@@ -68,12 +68,37 @@ final class WearableSeamTests: XCTestCase {
 
     // MARK: ActiveWearable
 
+    /// An `ActiveWearable` over a ring-only install (empty ownership log) whose ring fallback is
+    /// `fallback`, the id the production resolvers fall back to (review-224b N-1).
+    private func wearable(_ session: @escaping @MainActor () -> (any WearableSession)?, fallback: String?,
+                          store: WearableIdentityStore) -> ActiveWearable {
+        ActiveWearable(session: session, fallbackDeviceID: { fallback }, identityStore: store,
+                       ringFallbackID: { fallback }, strapFallbackID: { nil }, ownership: { DeviceOwnershipLog() })
+    }
+
+    /// The `HKDevice` a ring write names, through BOTH resolvers every Health write calls (review-224b
+    /// N-1): `wearableDevice(forTimeline:)` for tagged rows and `wearableDevice(ownerAt:)` for untagged
+    /// ones. For a ring they must agree.
+    private func healthDevice(_ active: ActiveWearable, file: StaticString = #filePath, line: UInt = #line) -> HKDevice? {
+        let tagged = HealthKitWriter.wearableDevice(forTimeline: .ringConn, wearable: active)
+        let untagged = HealthKitWriter.wearableDevice(ownerAt: Date(timeIntervalSince1970: 1_790_000_000), wearable: active)
+        XCTAssertEqual(fields(tagged), fields(untagged), "both resolvers name the same device", file: file, line: line)
+        return tagged
+    }
+
+    private func fields(_ device: HKDevice?) -> [String?] {
+        device.map { [$0.name, $0.manufacturer, $0.model, $0.hardwareVersion, $0.firmwareVersion, $0.localIdentifier] } ?? []
+    }
+
+    private func device(of identity: WearableIdentity) -> HKDevice? {
+        HealthKitWriter.hkDevice(HealthDeviceAttribution.fields(for: identity, origin: .device))
+    }
+
     func testNoSessionAndNoHistoryMeansNoDevice() {
-        let active = ActiveWearable(session: { nil }, fallbackDeviceID: { nil },
-                                    identityStore: WearableIdentityStore(defaults))
+        let active = wearable({ nil }, fallback: nil, store: WearableIdentityStore(defaults))
         XCTAssertNil(active.session)
         XCTAssertEqual(active.capabilities, [])
-        XCTAssertNil(active.identityForHealthWrite())
+        XCTAssertNil(healthDevice(active))
     }
 
     func testCapabilitiesComeFromTheActiveSession() {
@@ -88,12 +113,12 @@ final class WearableSeamTests: XCTestCase {
     func testIdentityIsMergedWithWhatWasKnownForTheSameRing() {
         let store = WearableIdentityStore(defaults)
         var current = FakeWearable(identity: ring(firmware: fullFirmware))
-        let active = ActiveWearable(session: { current }, fallbackDeviceID: { nil }, identityStore: store)
-        XCTAssertEqual(active.identityForHealthWrite()?.firmwareVersion, "FR02.018")
+        let active = wearable({ current }, fallback: nil, store: store)
+        XCTAssertEqual(healthDevice(active)?.firmwareVersion, "FR02.018")
 
         current = FakeWearable(identity: ring(firmware: FirmwareInfo(modelName: "RingConn Gen2-03AD")))
-        let merged = active.identityForHealthWrite()
-        XCTAssertEqual(merged, ring(firmware: fullFirmware))
+        XCTAssertEqual(fields(healthDevice(active)), fields(device(of: ring(firmware: fullFirmware))))
+        XCTAssertEqual(store.load(id: ringID), ring(firmware: fullFirmware))
     }
 
     /// With nothing connected (a cold background flush, a ring out of range), writes still name
@@ -101,37 +126,33 @@ final class WearableSeamTests: XCTestCase {
     func testDisconnectedWritesUseThePersistedIdentity() {
         let store = WearableIdentityStore(defaults)
         let connected = FakeWearable(identity: ring(firmware: fullFirmware))
-        _ = ActiveWearable(session: { connected }, fallbackDeviceID: { nil }, identityStore: store)
-            .identityForHealthWrite()
+        _ = healthDevice(wearable({ connected }, fallback: nil, store: store))
 
-        let disconnected = ActiveWearable(session: { nil }, fallbackDeviceID: { self.ringID },
-                                          identityStore: store)
-        XCTAssertEqual(disconnected.identityForHealthWrite(), ring(firmware: fullFirmware))
+        let disconnected = wearable({ nil }, fallback: ringID, store: store)
+        XCTAssertEqual(fields(healthDevice(disconnected)), fields(device(of: ring(firmware: fullFirmware))))
 
-        let unknownRing = ActiveWearable(session: { nil }, fallbackDeviceID: { "NEVER-SEEN" },
-                                         identityStore: store)
-        XCTAssertNil(unknownRing.identityForHealthWrite())
+        let unknownRing = wearable({ nil }, fallback: "NEVER-SEEN", store: store)
+        XCTAssertNil(healthDevice(unknownRing))
     }
 
     /// Switching rings never reports one ring's firmware under the other's id.
     func testASecondRingDoesNotInheritTheFirstRingsFields() {
         let store = WearableIdentityStore(defaults)
         let ringA = FakeWearable(identity: ring(firmware: fullFirmware))
-        _ = ActiveWearable(session: { ringA }, fallbackDeviceID: { nil }, identityStore: store)
-            .identityForHealthWrite()
+        _ = healthDevice(wearable({ ringA }, fallback: nil, store: store))
 
         let ringB = FakeWearable(identity: ring(firmware: FirmwareInfo(modelName: "RingConn Gen2-11FF"),
                                                 id: "OTHER-RING"))
-        let active = ActiveWearable(session: { ringB }, fallbackDeviceID: { nil }, identityStore: store)
-        XCTAssertNil(active.identityForHealthWrite(), "ring B hasn't identified itself and must not borrow A's fields")
+        let active = wearable({ ringB }, fallback: nil, store: store)
+        XCTAssertNil(healthDevice(active), "ring B hasn't identified itself and must not borrow A's fields")
         XCTAssertNil(store.load(id: "OTHER-RING"))
 
         ringB.identity = ring(firmware: FirmwareInfo(version: "FR02.020", modelName: "RingConn Gen2-11FF"),
                               id: "OTHER-RING")
-        let identity = active.identityForHealthWrite()
-        XCTAssertEqual(identity?.id, "OTHER-RING")
-        XCTAssertEqual(identity?.firmwareVersion, "FR02.020")
-        XCTAssertNil(identity?.hardwareVersion, "never ring A's hardware version")
+        let named = healthDevice(active)
+        XCTAssertEqual(store.load(id: "OTHER-RING")?.id, "OTHER-RING")
+        XCTAssertEqual(named?.firmwareVersion, "FR02.020")
+        XCTAssertNil(named?.hardwareVersion, "never ring A's hardware version")
     }
 
     /// Review #217 N1 (the reviewer's probe, now asserting the fix). On a ring's first connection
@@ -141,28 +162,22 @@ final class WearableSeamTests: XCTestCase {
     func testAWriteBeforeTheRingHasIdentifiedItselfNamesNoDevice() throws {
         let store = WearableIdentityStore(defaults)
         let fake = FakeWearable(identity: ring(firmware: FirmwareInfo(modelName: "RingConn Gen2-03AD")))
-        let active = ActiveWearable(session: { fake }, fallbackDeviceID: { nil }, identityStore: store)
-        XCTAssertNil(active.identityForHealthWrite())
+        let active = wearable({ fake }, fallback: nil, store: store)
+        XCTAssertNil(healthDevice(active))
         XCTAssertNil(store.load(id: ringID), "a sparse identity is never recorded")
-        XCTAssertNil(HealthKitWriter.hkDevice(HealthDeviceAttribution.fields(for: active.identityForHealthWrite(),
-                                                                             origin: .device)))
-        XCTAssertNil(ActiveWearable(session: { nil }, fallbackDeviceID: { self.ringID }, identityStore: store)
-            .identityForHealthWrite(), "nor does a disconnected flush find one")
+        XCTAssertNil(healthDevice(wearable({ nil }, fallback: ringID, store: store)),
+                     "nor does a disconnected flush find one")
 
         fake.identity = ring(firmware: fullFirmware)   // the DIS reads landed
-        let identified = try XCTUnwrap(HealthDeviceAttribution.fields(for: active.identityForHealthWrite(),
-                                                                      origin: .device))
+        let identified = try XCTUnwrap(healthDevice(active))
         XCTAssertEqual(identified.model, "Gen 2")
         XCTAssertEqual(identified.hardwareVersion, "00010001")
         XCTAssertEqual(identified.firmwareVersion, "FR02.018")
 
         // From here on every write names that same device, even one before a reconnect's DIS reads.
         fake.identity = ring(firmware: FirmwareInfo(modelName: "RingConn Gen2-03AD"))
-        XCTAssertEqual(HealthDeviceAttribution.fields(for: active.identityForHealthWrite(), origin: .device),
-                       identified)
-        XCTAssertEqual(HealthDeviceAttribution.fields(
-            for: ActiveWearable(session: { nil }, fallbackDeviceID: { self.ringID }, identityStore: store)
-                .identityForHealthWrite(), origin: .device), identified)
+        XCTAssertEqual(fields(healthDevice(active)), fields(identified))
+        XCTAssertEqual(fields(healthDevice(wearable({ nil }, fallback: ringID, store: store))), fields(identified))
     }
 
     /// Review #217 S1 (Juan's decision): two RingConn rings are ONE device in Apple Health — the
@@ -171,15 +186,11 @@ final class WearableSeamTests: XCTestCase {
     func testTwoRingsAreOneHealthDeviceButEachKeepsItsOwnFirmware() throws {
         let store = WearableIdentityStore(defaults)
         let ringA = FakeWearable(identity: ring(firmware: fullFirmware))
-        let a = try XCTUnwrap(ActiveWearable(session: { ringA }, fallbackDeviceID: { nil }, identityStore: store)
-            .identityForHealthWrite())
+        let deviceA = try XCTUnwrap(healthDevice(wearable({ ringA }, fallback: nil, store: store)))
         let gen3 = FirmwareInfo(version: "FR05.011", modelName: "RingConn Gen3-11FF", hardwareRevision: "00030002")
         let ringB = FakeWearable(identity: ring(firmware: gen3, id: "OTHER-RING"))
-        let b = try XCTUnwrap(ActiveWearable(session: { ringB }, fallbackDeviceID: { nil }, identityStore: store)
-            .identityForHealthWrite())
+        let deviceB = try XCTUnwrap(healthDevice(wearable({ ringB }, fallback: nil, store: store)))
 
-        let deviceA = try XCTUnwrap(HealthKitWriter.hkDevice(HealthDeviceAttribution.fields(for: a, origin: .device)))
-        let deviceB = try XCTUnwrap(HealthKitWriter.hkDevice(HealthDeviceAttribution.fields(for: b, origin: .device)))
         XCTAssertEqual(deviceA.localIdentifier, "ringconn")
         XCTAssertEqual(deviceB.localIdentifier, deviceA.localIdentifier)
         XCTAssertEqual(deviceA.firmwareVersion, "FR02.018")
@@ -190,8 +201,7 @@ final class WearableSeamTests: XCTestCase {
         XCTAssertEqual(store.load(id: ringID)?.firmwareVersion, "FR02.018")
         XCTAssertEqual(store.load(id: "OTHER-RING")?.firmwareVersion, "FR05.011")
         // A disconnected flush attributed to ring A names ring A's firmware, not B's.
-        XCTAssertEqual(ActiveWearable(session: { nil }, fallbackDeviceID: { self.ringID }, identityStore: store)
-            .identityForHealthWrite()?.firmwareVersion, "FR02.018")
+        XCTAssertEqual(healthDevice(wearable({ nil }, fallback: ringID, store: store))?.firmwareVersion, "FR02.018")
     }
 
     // MARK: HKDevice

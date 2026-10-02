@@ -258,6 +258,6 @@ final class MappingAndSummaryTests: XCTestCase {
         _ = fetch.receiveData(hex("00 8c e4 ba 6a 08 2a b8 e5 ba 6a 08 39"))
         guard case .roundReady(let round)? = fetch.receiveControl(hex("10 02 01 39 62 bb d7")).first else { return XCTFail() }
         XCTAssertEqual(ZeppRoundSummary.describe(round),
-                       "HRV [0x49]: 2 record(s), 12 B, CRC ok, 2026-09-28T22:05:00Z … 2026-09-28T22:10:00Z — 42–57 ms (statistic unknown)")
+                       "HRV [0x49]: 2 record(s), 12 B, CRC ok, 2026-09-28T22:05:00Z … 2026-09-28T22:10:00Z — 42–57 ms (RMSSD per Amazfit, unverified on the strap)")
     }
 }

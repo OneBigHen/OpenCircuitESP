@@ -71,18 +71,6 @@ public struct QuietHours: Equatable, Sendable {
         }
         return m >= startMinutes || m < endMinutes // wraps past midnight
     }
-
-    /// How long the window suppresses for, in seconds — 0 when disabled or degenerate. Wrap-aware.
-    ///
-    /// This is not decoration: a caller that derives its candidates from a rolling LOOKBACK must
-    /// widen that lookback by this span, or everything the window suppresses ages out of the
-    /// lookback before the window reopens and is lost rather than delayed. See
-    /// `HealthNotificationCenter.instantLookback` for the measured failure that motivated it.
-    public var suppressedSpan: TimeInterval {
-        guard enabled, startMinutes != endMinutes else { return 0 }
-        let minutes = ((endMinutes - startMinutes) % 1440 + 1440) % 1440
-        return TimeInterval(minutes * 60)
-    }
 }
 
 // MARK: - De-dupe / DND gate
@@ -198,11 +186,9 @@ public struct HealthAlertHit: Equatable, Sendable {
     }
 }
 
-// NOTE: HR alerts intentionally have NO device-timestamp "freshness" gate. All-day HR reaches the
-// phone via ~hourly background drains whose device timestamps are routinely 30–60+ min old on
-// arrival, evaluated ONCE right after each drain; a freshness window would permanently silence the
-// older half of every drain. De-dupe is done here by the per-notification `lastFired` filter in
-// `evaluate` (a crossing fires once on first sight and never replays), not by the sample's age.
+// NOTE: the evaluator below is the THRESHOLD layer and is deliberately age-blind. Whether a crossing
+// may notify — only while its reading is fresh, at most once — is decided on top of it by
+// `LiveHealthAlerts` (decision 32, #234), which is what the app calls.
 
 public enum HealthAlertEvaluator {
 
@@ -254,8 +240,9 @@ public enum HealthAlertEvaluator {
     /// The depth is the entire payload of the copy, and understating a desaturation is the unsafe
     /// direction. So the sweep below classifies EVERY run first and only then takes the minimum.
     ///
-    /// `minReadings <= 1` restores the pre-persistence behaviour exactly: the guard below short-
-    /// circuits to the old "worst reading at/below threshold" over the whole series. That is the
+    /// `minReadings <= 1` restores the pre-persistence behaviour exactly: `lowSpO2Runs` then makes
+    /// every reading its own run, which is the old "worst reading at/below threshold" over the whole
+    /// series. That is the
     /// kill-switch — `HealthAlertThresholds.lowSpO2MinReadings` is the one knob to turn.
     ///
     /// `since` is the recency cut (the last time this notification fired). It is applied HERE, after
@@ -270,13 +257,30 @@ public enum HealthAlertEvaluator {
                                window: TimeInterval = 30 * 60,
                                maxGap: TimeInterval = 20 * 60,
                                since: Date? = nil) -> SpO2Reading? {
+        let cut = since ?? .distantPast
+        // A run must both QUALIFY and carry something new since the last fire. Depth is then taken
+        // over the whole surviving run — including readings older than `cut` — because the number
+        // shown must be the desaturation's real nadir, not the nadir of whatever part of it happens
+        // to postdate the previous notification.
+        let live = lowSpO2Runs(readings, thresholdPercent: thresholdPercent, minReadings: minReadings,
+                               window: window, maxGap: maxGap)
+            .filter { $0.contains { $0.time > cut } }
+        return lowest(live.flatMap { $0 })
+    }
+
+    /// The QUALIFYING low-SpO2 runs of `readings`, each in time order — the classification half of
+    /// `lowSpO2`, shared with `LiveHealthAlerts`. With `minReadings <= 1` (the kill-switch) every
+    /// reading at/below the threshold is its own run.
+    public static func lowSpO2Runs(_ readings: [SpO2Reading], thresholdPercent: Int,
+                                   minReadings: Int = 2,
+                                   window: TimeInterval = 30 * 60,
+                                   maxGap: TimeInterval = 20 * 60) -> [[SpO2Reading]] {
         // `percent > 0` drops the "no reading" sentinel; the decoder's own 70…100 plausibility
         // guard (`BulkRecord.spo2Percent`) has already rejected impossible bytes upstream.
         let low = readings.filter { $0.percent > 0 && $0.percent <= thresholdPercent }
             .sorted { $0.time < $1.time }
-        guard !low.isEmpty else { return nil }
-        let cut = since ?? .distantPast
-        guard minReadings > 1 else { return lowest(low.filter { $0.time > cut }) }
+        guard !low.isEmpty else { return [] }
+        guard minReadings > 1 else { return low.map { [$0] } }
 
         // Split into runs of readings joined by <= maxGap. The gap term is what stops two unrelated
         // single-epoch artifacts far apart from pairing into a fake run.
@@ -304,18 +308,12 @@ public enum HealthAlertEvaluator {
             }
             return false
         }
-
-        // A run must both QUALIFY and carry something new since the last fire. Depth is then taken
-        // over the whole surviving run — including readings older than `cut` — because the number
-        // shown must be the desaturation's real nadir, not the nadir of whatever part of it happens
-        // to postdate the previous notification.
-        let live = runs.filter { qualifies($0) && $0.contains { $0.time > cut } }
-        return lowest(live.flatMap { $0 })
+        return runs.filter(qualifies)
     }
 
     /// Lowest reading, ties broken by the EARLIEST time so the same series always words itself the
     /// same way. nil for an empty series.
-    private static func lowest(_ readings: [SpO2Reading]) -> SpO2Reading? {
+    static func lowest(_ readings: [SpO2Reading]) -> SpO2Reading? {
         readings.min { a, b in a.percent == b.percent ? a.time < b.time : a.percent < b.percent }
     }
 
@@ -326,7 +324,19 @@ public enum HealthAlertEvaluator {
     public static func elevatedHRInactive(_ samples: [HRSample], thresholdBpm: Int,
                                           minDuration: TimeInterval,
                                           maxGap: TimeInterval = 5 * 60) -> HRSample? {
+        elevatedHRInactiveReadings(samples, thresholdBpm: thresholdBpm, minDuration: minDuration,
+                                   maxGap: maxGap).first
+    }
+
+    /// EVERY reading at which a continuous run of HR ≥ threshold has lasted ≥ `minDuration`, in time
+    /// order: the one that completes a run and each one that continues it. `elevatedHRInactive` is
+    /// the first of these; `LiveHealthAlerts` needs the rest, because a run that completed over 30
+    /// minutes ago but is still going is live now.
+    public static func elevatedHRInactiveReadings(_ samples: [HRSample], thresholdBpm: Int,
+                                                  minDuration: TimeInterval,
+                                                  maxGap: TimeInterval = 5 * 60) -> [HRSample] {
         let sorted = samples.sorted { $0.start < $1.start }
+        var out: [HRSample] = []
         var runStart: Date?
         var prev: Date?
         for s in sorted {
@@ -337,9 +347,9 @@ public enum HealthAlertEvaluator {
                 runStart = s.start
             }
             prev = s.start
-            if let rs = runStart, s.start.timeIntervalSince(rs) >= minDuration { return s }
+            if let rs = runStart, s.start.timeIntervalSince(rs) >= minDuration { out.append(s) }
         }
-        return nil
+        return out
     }
 
     /// Default cap on a step snapshot's window width still treated as a discrete activity burst
@@ -446,6 +456,172 @@ public enum HealthAlertEvaluator {
             hits.append(HealthAlertHit(notification: .elevatedHRInactive, value: Double(s.bpm), time: s.start))
         }
         return hits
+    }
+}
+
+// MARK: - Live instant alerts (decision 32, #234)
+
+/// One instant alert that may notify now, and the watermark it claims if it does.
+public struct LiveHealthAlert: Equatable, Sendable {
+    public let hit: HealthAlertHit
+    /// The end of the latest reading this alert covers, clamped to the evaluation's `now`. Persist it
+    /// as the kind's watermark when the alert notifies, so none of those readings can notify again.
+    public let watermark: Date
+    public init(hit: HealthAlertHit, watermark: Date) {
+        self.hit = hit; self.watermark = watermark
+    }
+}
+
+/// The instant alerts (high heart rate, low blood oxygen, elevated heart rate while inactive) are
+/// LIVE OR NOT AT ALL — decision 32, #234 (Juan, 2026-10-01: "alerts should come live when they
+/// happen").
+///
+/// The rule, in full:
+///  - FRESH ONLY. An alert notifies only for a reading that ended at most `maxReadingAge` (90 min,
+///    decision 37) before the evaluation's `now`. A crossing that arrives later than that (a link
+///    that dropped all evening, a catch-up after hours) or that happened inside quiet hours never
+///    notifies. It stays in the charts.
+///  - THE READING'S OWN TIME. Freshness is measured from the sample's end, never from when it
+///    synced. An end after `now` (clock skew) is clamped to `now`; a reading that has not even
+///    STARTED by `now` is dropped, as the app always has.
+///  - QUIET HOURS. A reading taken inside the quiet window never notifies, even once the window
+///    ends and the reading is still fresh — it is suppressed, never delivered later. (The gate
+///    separately holds everything while `now` is inside the window, as before.)
+///  - AT MOST ONCE. Freshness plus the 2 h backoff already give this today: by the time the backoff
+///    lets a kind through again, every reading that notified is older than `maxReadingAge`. The
+///    WATERMARK keeps it true where that argument breaks — if the backoff is ever made no longer than
+///    `maxReadingAge`, or for a reading whose end was clamped to `now` (a clock-skewed future end,
+///    which stays "fresh" until real time passes it). A reading is NEW only if it started after the
+///    kind's watermark: the end of the latest reading that already notified, clamped to `now`. The
+///    caller persists `LiveHealthAlert.watermark` synchronously, before its first `await`,
+///    alongside the gate's `lastFired`.
+///
+/// What this covers, and what it gives up (decision 37): by day a crossing reaches the phone on the
+/// first regular background sync after it — the ring drains about hourly (`HistoryDrainCadence`,
+/// day arm) and the strap syncs about hourly — and 90 minutes is one such sync plus 30 minutes of
+/// wake-timing slack, so those crossings notify, on the ring and the strap alike. A catch-up after a
+/// long gap (overnight, the app closed for hours) brings readings too old to notify; that is the
+/// decision. KNOWN LIMIT, documented and not changed: a ring in battery saver drains every 3 h by
+/// day, so some of its crossings still arrive too old. The strap's "about hourly" depends on its
+/// wakes (#225: reconnect, idle-link traffic, BGTasks, the iPhone's step-count delivery); while the
+/// wearer is sedentary with the phone set down, step delivery may not fire, so an
+/// elevated-while-inactive crossing can age past the limit before a sync (unmeasured; build 60's
+/// `helio-link` breadcrumbs will show it). For a truly live heart-rate alert the strap also buzzes
+/// on its own thresholds (#230).
+///
+/// Night-level notifications (skin temperature, fever, headache signs, the morning summary),
+/// reminders and battery are NOT instant alerts and are untouched by this: they describe a night or
+/// a schedule, not a moment.
+public enum LiveHealthAlerts {
+
+    /// How old a reading may be and still notify: its end at most this long before `now`,
+    /// INCLUSIVE (a reading exactly 90 minutes old still notifies — the decision says "at most").
+    /// Decision 32 (#234), widened from 30 to 90 minutes by decision 37: one hourly background sync
+    /// plus 30 minutes of slack, the same for every device. The one number to change if the rule
+    /// ever moves.
+    public static let maxReadingAge: TimeInterval = 90 * 60
+
+    /// How far back the caller fetches readings. NOT a delivery window: nothing older than
+    /// `maxReadingAge` can notify. It exists so a rule that needs a run has the run's earlier
+    /// readings — an elevated stretch that began before the freshness limit and is still going, or a
+    /// low-SpO2 run whose first qualifying reading predates the fresh one.
+    ///
+    /// INVARIANT: at least `maxReadingAge` plus the longest rule window (the 30-minute low-SpO2
+    /// window). Below that, the oldest fresh reading's run loses its early readings and silently
+    /// fails to qualify. Pinned by `testTheContextWindowCoversTheFreshnessLimitPlusTheLongestRuleWindow`.
+    public static let contextWindow: TimeInterval = 2 * 3600
+
+    /// The kinds this rule governs. Disjoint from the night-level and reminder families by design.
+    public static let notificationSet: Set<HealthNotification> = [.highHR, .lowSpO2, .elevatedHRInactive]
+
+    /// A reading's time for freshness: its end, clamped to `now`.
+    public static func readingTime(end: Date, now: Date) -> Date { min(end, now) }
+
+    /// Whether a reading that ended at `end` is fresh enough to notify at `now`.
+    public static func isFresh(end: Date, now: Date) -> Bool {
+        now.timeIntervalSince(readingTime(end: end, now: now)) <= maxReadingAge
+    }
+
+    /// The instant alerts that may notify at `now`, before the shared gate (backoff, and `now`
+    /// inside quiet hours) — the caller still routes them through `NotificationGate`.
+    ///
+    /// Each rule reads its whole series for context (runs need their earlier readings) but only
+    /// ever REPORTS a reading that is fresh, new since the watermark, and outside quiet hours. For
+    /// low SpO2 that means the depth shown is the lowest FRESH reading of a qualifying run, not the
+    /// run's all-time nadir: an older, deeper reading is exactly the late news this rule refuses to
+    /// send.
+    public static func evaluate(hr: [HRSample], spo2: [SpO2Reading], inactiveHR: [HRSample],
+                                thresholds: HealthAlertThresholds,
+                                watermark: [HealthNotification: Date],
+                                quietHours: QuietHours,
+                                now: Date,
+                                calendar: Calendar = .current) -> [LiveHealthAlert] {
+        func isNew(_ start: Date, _ n: HealthNotification) -> Bool {
+            start <= now && start > (watermark[n] ?? .distantPast)
+        }
+        func live(end: Date) -> Bool {
+            isFresh(end: end, now: now)
+                && !quietHours.contains(readingTime(end: end, now: now), calendar: calendar)
+        }
+        var out: [LiveHealthAlert] = []
+
+        if thresholds.highHREnabled {
+            let eligible = hr.filter {
+                $0.bpm >= thresholds.highHRBpm && isNew($0.start, .highHR) && live(end: $0.end)
+            }
+            if let s = HealthAlertEvaluator.highHR(eligible, thresholdBpm: thresholds.highHRBpm),
+               let mark = eligible.map({ readingTime(end: $0.end, now: now) }).max() {
+                out.append(LiveHealthAlert(
+                    hit: HealthAlertHit(notification: .highHR, value: Double(s.bpm), time: s.start),
+                    watermark: mark))
+            }
+        }
+
+        if thresholds.lowSpO2Enabled {
+            // Runs are classified on the FULL series, never a pre-trimmed one: trimming splits a run
+            // and can drop it below `minReadings` (see `HealthAlertEvaluator.lowSpO2`). An SpO2
+            // reading carries one time, its start, which is used as its end here — conservative by
+            // at most one epoch.
+            let runs = HealthAlertEvaluator.lowSpO2Runs(
+                spo2.filter { $0.time <= now }, thresholdPercent: thresholds.lowSpO2Percent,
+                minReadings: thresholds.lowSpO2MinReadings, window: thresholds.lowSpO2Window,
+                maxGap: thresholds.lowSpO2MaxGap)
+            let eligible = runs.joined().filter { isNew($0.time, .lowSpO2) && live(end: $0.time) }
+            if let s = HealthAlertEvaluator.lowest(eligible),
+               let mark = eligible.map({ readingTime(end: $0.time, now: now) }).max() {
+                out.append(LiveHealthAlert(
+                    hit: HealthAlertHit(notification: .lowSpO2, value: Double(s.percent), time: s.time),
+                    watermark: mark))
+            }
+        }
+
+        if thresholds.elevatedHREnabled {
+            // Readings at or before the watermark are cut BEFORE the runs are built, as the
+            // `lastFired` cut always was: a run that already notified has to re-accumulate its
+            // sustained span from new readings before it can notify again.
+            let series = inactiveHR.filter { isNew($0.start, .elevatedHRInactive) }
+            let eligible = HealthAlertEvaluator.elevatedHRInactiveReadings(
+                series, thresholdBpm: thresholds.elevatedHRBpm,
+                minDuration: thresholds.elevatedSustained, maxGap: thresholds.elevatedMaxGap)
+                .filter { live(end: $0.end) }
+            if let s = eligible.last,
+               let mark = eligible.map({ readingTime(end: $0.end, now: now) }).max() {
+                out.append(LiveHealthAlert(
+                    hit: HealthAlertHit(notification: .elevatedHRInactive, value: Double(s.bpm),
+                                        time: s.start),
+                    watermark: mark))
+            }
+        }
+        return out
+    }
+
+    /// The watermarks to persist for the alerts that the gate let through. Call it with the gate's
+    /// output, before the first `await`.
+    public static func watermarks(fired: [HealthNotification],
+                                  from alerts: [LiveHealthAlert]) -> [HealthNotification: Date] {
+        var out: [HealthNotification: Date] = [:]
+        for a in alerts where fired.contains(a.hit.notification) { out[a.hit.notification] = a.watermark }
+        return out
     }
 }
 

@@ -103,6 +103,21 @@ struct BackgroundRefreshScheduler {
         submit(makeProcessingRequest(), cancelIdentifier: Self.processingIdentifier, label: "processing")
     }
 
+    /// The Helio Strap only (#233 item 5): the next app-refresh request at `date`, at least a minute
+    /// from now, instead of the aimed date, when a strap night is still inside its settle margin (or
+    /// its record may be late after the woke-up event), so its Health write doesn't wait for the next
+    /// generic grant. The ring never calls this; its requests (`schedule()`, `makeRequest()`) are
+    /// unchanged.
+    @discardableResult
+    func scheduleRefresh(notBefore date: Date) -> Bool {
+        let request = BGAppRefreshTaskRequest(identifier: Self.identifier)
+        request.earliestBeginDate = max(date, now().addingTimeInterval(Self.minimumRefreshDelay))
+        return submit(request, cancelIdentifier: Self.identifier, label: "refresh (strap night margin)")
+    }
+
+    /// `scheduleRefresh(notBefore:)`'s floor.
+    static let minimumRefreshDelay: TimeInterval = 60
+
     /// Cancel any duplicate then submit, recording the REAL outcome into the Diagnostics metric log
     /// (#bg-observability). The old `#if DEBUG print` swallowed submit failures, so on a
     /// device/TestFlight build a request iOS rejected on EVERY call (Background App Refresh

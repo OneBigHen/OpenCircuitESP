@@ -35,7 +35,7 @@ struct HeadacheOnboardingView: View {
                           title: "Log every headache — even mild ones",
                           body: "Your logged headaches are the only thing any of this can ever be "
                               + "checked against. One you don't log can't be filled in later, the "
-                              + "way ring data can.")
+                              + "way your device's data can.")
 
                     point(icon: "bolt.fill",
                           title: "Make it quick",

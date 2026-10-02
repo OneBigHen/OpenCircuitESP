@@ -169,7 +169,7 @@ struct WellnessBalanceCardView: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Text("Estimate — a blend of last night's sleep, overnight recovery & today's activity. Not the RingConn app's readiness score, and not medical advice.")
+                Text("Estimate — a blend of last night's sleep, overnight recovery & today's activity. Not your device app's own score, and not medical advice.")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {

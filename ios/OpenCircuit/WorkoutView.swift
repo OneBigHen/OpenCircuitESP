@@ -566,7 +566,7 @@ struct WorkoutView: View {
 
 // MARK: - Sport button
 
-private struct SportButton: View {
+struct SportButton: View {   // also the strap's picker (StrapWorkoutView, #227)
     let sport: WorkoutSportType
     let selected: Bool
     let action: () -> Void
@@ -595,7 +595,7 @@ private struct SportButton: View {
 
 // MARK: - Zone bar row
 
-private struct ZoneBarRow: View {
+struct ZoneBarRow: View {   // also the strap's zones (StrapWorkoutView, #227)
     let zone: HRZone
     let seconds: Double
     let fraction: Double

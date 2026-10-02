@@ -168,6 +168,11 @@ struct UserProfileSettingsView: View {
     /// authorization (the lazy-prompt design is preserved).
     @State private var notifStatus: UNAuthorizationStatus = .notDetermined
 
+    /// The settings that drive only the ring (auto-record, BP write-back, the sedentary and wear
+    /// reminders) are hidden while the Helio Strap is chosen; their stored values are untouched
+    /// (#215, review-224 S4).
+    private var ringChosen: Bool { ActiveDeviceChoiceStore.shared.isRing }
+
     var body: some View {
         Form {
             Section("Profile") {
@@ -348,12 +353,14 @@ struct UserProfileSettingsView: View {
                 if phase == .active { Task { await refreshHealthAuthState() } }
             }
 
-            Section("Tracking") {
-                Toggle("Auto-record HR & SpO₂", isOn: $autoMeasureEnabled)
-                Text("While connected, OpenCircuit periodically records heart rate (~every 10 min) "
-                     + "and blood oxygen in the background so the app and Apple Health pick up fresh "
-                     + "samples without relying on a live home-screen reading. Uses more ring battery.")
-                    .font(.caption).foregroundStyle(.secondary)
+            if ringChosen {
+                Section("Tracking") {
+                    Toggle("Auto-record HR & SpO₂", isOn: $autoMeasureEnabled)
+                    Text("While connected, OpenCircuit periodically records heart rate (~every 10 min) "
+                         + "and blood oxygen in the background so the app and Apple Health pick up fresh "
+                         + "samples without relying on a live home-screen reading. Uses more ring battery.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
 
             Section("Calibration server") {
@@ -364,7 +371,9 @@ struct UserProfileSettingsView: View {
                 SecureField("API token (optional)", text: $calibrationAPIToken)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                Toggle("Write BP estimates to Apple Health", isOn: $autoWriteBPToHealth)
+                if ringChosen {
+                    Toggle("Write BP estimates to Apple Health", isOn: $autoWriteBPToHealth)
+                }
                 Text("Used by the cuff + PPG calibration flow. OpenCircuit uploads raw PPG to `/ppg/import`, optional ECG to `/ecg/raw-import`, and calibration metadata to `/calibration/session`.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -454,6 +463,10 @@ struct UserProfileSettingsView: View {
                          + "Sharpens once activity detection lands.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Text("Heart rate and blood oxygen alerts are sent only for readings from the last "
+                     + "hour and a half. Older readings, such as ones that sync after a long gap, "
+                     + "appear in your charts without an alert.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("Skin-temp & fever alerts", isOn: $tempFeverEnabled)
                     .onChange(of: tempFeverEnabled) { _, on in escalateNotifAuth(enabled: on) }
                 Text(Self.medicalDisclaimer)
@@ -530,29 +543,34 @@ struct UserProfileSettingsView: View {
                     DatePicker("To", selection: timeBinding($quietEnd),
                                displayedComponents: .hourAndMinute)
                 }
-                Text("Health alerts are held during this window (delivered once it ends if still "
-                     + "relevant).")
+                Text("Health alerts are muted during this window. Skin temperature and fever alerts, "
+                     + "and the headache Morning signal, are held and arrive once it ends; heart rate "
+                     + "and blood oxygen alerts from inside it are not sent later.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
             // MARK: Reminders (#84)
             Section("Reminders") {
-                Toggle("Sedentary / move reminder", isOn: $sedentaryEnabled)
-                if sedentaryEnabled {
-                    Stepper(value: $sedentaryIntervalMin, in: 30...120, step: 10) {
-                        LabeledContent("Remind after", value: "\(sedentaryIntervalMin) min inactive")
+                if ringChosen {
+                    Toggle("Sedentary / move reminder", isOn: $sedentaryEnabled)
+                    if sedentaryEnabled {
+                        Stepper(value: $sedentaryIntervalMin, in: 30...120, step: 10) {
+                            LabeledContent("Remind after", value: "\(sedentaryIntervalMin) min inactive")
+                        }
                     }
+                    Toggle("Wear reminder", isOn: $wearEnabled)
                 }
-                Toggle("Wear reminder", isOn: $wearEnabled)
                 Toggle("Bedtime reminder", isOn: $bedtimeEnabled)
                 if bedtimeEnabled {
                     Stepper(value: $bedtimeMinutesBefore, in: 15...60, step: 15) {
                         LabeledContent("Warn before bed", value: "\(bedtimeMinutesBefore) min")
                     }
                 }
-                Text("Reminders pause while the ring is on the charger or off your finger — it "
-                     + "counts no steps there, so that time isn't treated as sitting still. "
-                     + "Quiet hours and backoff use the same settings as health alerts above.")
+                Text(ringChosen
+                     ? "Reminders pause while the ring is on the charger or off your finger — it "
+                       + "counts no steps there, so that time isn't treated as sitting still. "
+                       + "Quiet hours and backoff use the same settings as health alerts above."
+                     : "Quiet hours and backoff use the same settings as health alerts above.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

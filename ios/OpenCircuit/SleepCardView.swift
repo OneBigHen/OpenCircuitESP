@@ -90,8 +90,8 @@ struct SleepCardView: View {
     var sleepPersistOutcome: SleepPersistOutcome? = nil
     /// Sleep-vitals samples (HR / HRV / SpO₂) over the last few days — narrowed in memory to the
     /// resolved night window for the "overnight average" row under the stage breakdown. Bounded
-    /// (value-positive + windowed) so it never scans all history (#32), mirroring
-    /// `VitalsTableView.recentTemp`. A night older than this window keeps its totals but omits the
+    /// (value-positive + windowed) so it never scans all history (#32), the pattern the Vitals card's
+    /// `recentTemp` set before #245 removed it. A night older than this window keeps its totals but omits the
     /// averages (its raw samples have aged out of the query window).
     @Query private var recentVitals: [StoredSample]
     /// Days of HR/HRV/SpO₂ history scanned before the precise night window is applied in memory.
@@ -162,7 +162,7 @@ struct SleepCardView: View {
     }
 
     /// One night resolved for display, from either the live staging or the persisted rollup.
-    private struct Night {
+    struct Night {
         let nightKey: Date
         let summary: SleepStaging.Summary
         let inBedStart: Date?
@@ -253,7 +253,10 @@ struct SleepCardView: View {
     /// thinner fragment repainted the smaller number over the fuller stored night. Live still wins
     /// instantly when it's at least as complete, or when it's a genuinely newer night. Only ever a
     /// real night (asleep > 0); daytime naps are gated out upstream by RingSession (review #1).
-    private var night: Night? {
+    private var night: Night? { Self.selectNight(liveSegments: liveSegments, stored: storedSleep.first) }
+
+    /// The night selection above, over explicit inputs (extracted unchanged so a test can drive it).
+    static func selectNight(liveSegments: [SleepSegment], stored latestRow: StoredSleepSummary?) -> Night? {
         let live: Night? = {
             guard !liveSegments.isEmpty else { return nil }
             let s = SleepStaging.summary(liveSegments)
@@ -274,7 +277,7 @@ struct SleepCardView: View {
                          stageSource: .live)
         }()
         let stored: Night? = {
-            guard let s = storedSleep.first, s.asleepMin > 0 else { return nil }
+            guard let s = latestRow, s.asleepMin > 0 else { return nil }
             let currentStart = s.sleepEditCurrentInBedStart
             let currentEnd = s.sleepEditCurrentInBedEnd
             let start = currentStart > .distantPast ? currentStart : nil
@@ -309,8 +312,16 @@ struct SleepCardView: View {
     /// would target the older night while the button appeared attached to the newer one.
     private var editableSleepSummary: StoredSleepSummary? {
         guard let latest, let night, latest.night == night.nightKey,
-              latest.inBedEnd > latest.inBedStart else { return nil }
+              latest.inBedEnd > latest.inBedStart,
+              Self.ringMayEdit(latest, log: LocalStore.ownershipLog()) else { return nil }
         return latest
+    }
+
+    /// Edit re-stages the RING's epoch archive over the night (`RingSession.applySleepEdit`), so it is
+    /// offered only on a night the ring owns: one the strap keeps would take the ring's readings of
+    /// strap time (decision 28; review-224d U-1). Always true with an empty log (a ring-only install).
+    static func ringMayEdit(_ row: StoredSleepSummary, log: DeviceOwnershipLog) -> Bool {
+        log.isEmpty || log.owner(ofNightFrom: row.inBedStart, to: row.inBedEnd) == .ringConn
     }
 
     /// Recency of the night on screen, resolved by the shared kit predicate so this card and the
@@ -350,12 +361,31 @@ struct SleepCardView: View {
     private var unsavedNightNotice: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.icloud").font(.caption2).foregroundStyle(.orange)
-            Text(sleepPersistOutcome?.isRecoverableByRetry == true
-                 ? "This night hasn’t been saved yet, so it isn’t in Apple Health and won’t survive a restart. Sync again near the ring — the epochs are still on it."
-                 : "This night couldn’t be saved. It isn’t in Apple Health and won’t survive a restart. Send a diagnostics export from Device Info if it keeps happening.")
+            Text(Self.unsavedNightCopy(sleepPersistOutcome))
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
+    }
+
+    /// The ring's live staging the card may show (review-224c S-3). When another device keeps the night
+    /// (decision 28a: `.ownedByOtherDevice`) or owns it with none stored (`.ownedByOtherDeviceNoRow`),
+    /// the ring's reading of it is not the night: the card shows the stored, kept night (and Edit and
+    /// the display agree), or the honest notice. Every other outcome passes the staging through, so a
+    /// ring-only install, which never gets either outcome, is unchanged.
+    static func liveSegments(_ staged: [SleepSegment], outcome: SleepPersistOutcome?) -> [SleepSegment] {
+        outcome == .ownedByOtherDevice || outcome == .ownedByOtherDeviceNoRow ? [] : staged
+    }
+
+    /// The unsaved-night warning's words. A night the Helio Strap owns (it was chosen when the night
+    /// began, decision 28a) but has no stored strap night is not a failure and syncing the ring again
+    /// can't store it, so it says exactly that (review-224b N-3, decision 25).
+    static func unsavedNightCopy(_ outcome: SleepPersistOutcome?) -> String {
+        if outcome == .ownedByOtherDeviceNoRow {
+            return "The ring’s latest night began while the Helio Strap was your chosen device, so it’s the strap’s night. The ring’s reading of it isn’t saved or sent to Apple Health, and no strap night is stored for it."
+        }
+        return outcome?.isRecoverableByRetry == true
+            ? "This night hasn’t been saved yet, so it isn’t in Apple Health and won’t survive a restart. Sync again near the ring — the epochs are still on it."
+            : "This night couldn’t be saved. It isn’t in Apple Health and won’t survive a restart. Send a diagnostics export from Device Info if it keeps happening."
     }
 
     /// The recency note to show above the stage details, if any: the unsaved-night warning, the
@@ -364,7 +394,9 @@ struct SleepCardView: View {
     /// anything about how recent it is.
     @ViewBuilder
     private var recencyNotice: some View {
-        if nightIsUnsaved {
+        // The strap owns the ring's latest night and stored none: the ring's reading isn't on screen
+        // (`liveSegments`), so say why last night is missing (review-224b N-3, review-224c S-3).
+        if nightIsUnsaved || sleepPersistOutcome == .ownedByOtherDeviceNoRow {
             unsavedNightNotice
         } else {
             switch recencyStatus {
@@ -382,7 +414,7 @@ struct SleepCardView: View {
     private var notSyncedYetNotice: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "arrow.triangle.2.circlepath").font(.caption2).foregroundStyle(.secondary)
-            Text("Last night hasn’t synced yet. Open OpenCircuit near the ring to pull it in — showing your most recent recorded night until then.")
+            Text("Last night hasn’t synced yet. Open OpenCircuit near your device to pull it in — showing your most recent recorded night until then.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(.vertical, 6).padding(.horizontal, 8)
@@ -396,7 +428,7 @@ struct SleepCardView: View {
     private var missedNightNotice: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "moon.zzz").font(.caption2).foregroundStyle(.orange)
-            Text("No sleep recorded for last night. Showing your most recent recorded night — wear the ring to bed and sync in the morning.")
+            Text("No sleep recorded for last night. Showing your most recent recorded night — wear your device to bed and sync in the morning.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(.vertical, 6).padding(.horizontal, 8)
@@ -433,6 +465,9 @@ struct SleepCardView: View {
                 recencyNotice
                 content(night)
             } else {
+                // Review-224d N-1: with no stored night at all, a night the strap owns but never stored
+                // still gets its notice, not only the generic empty state.
+                if sleepPersistOutcome == .ownedByOtherDeviceNoRow { unsavedNightNotice }
                 emptyState
             }
         }
@@ -985,7 +1020,8 @@ struct SleepCardView: View {
     /// Build a `SkinTempBaseline.NightReport` for the latest night from the trailing stored nights.
     private var tempReport: SkinTempBaseline.NightReport? {
         guard let latest, latest.skinTempC > 0 else { return nil }
-        let priorNights = storedSleep
+        // Decision 29: only the latest night's own device's nights (every night with an empty log).
+        let priorNights = LocalStore.sameDevice(storedSleep, as: latest)
             .filter { $0.skinTempC > 0 && $0.night != latest.night }
             .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }
         return SkinTempBaseline.report(tonight: latest.skinTempC, priorNights: priorNights)
@@ -1020,11 +1056,27 @@ struct SleepCardView: View {
             // as a defect.
             HStack(spacing: 6) {
                 Image(systemName: "thermometer.medium").font(.caption2).foregroundStyle(.tertiary)
-                Text("No skin temperature for this night — it's only recorded while the ring stays connected, and there weren't enough readings to compare.")
+                Text(Self.noSkinTempNote(nightOwner: latest.map {
+                    LocalStore.ownershipLog().owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd)
+                } ?? .ringConn))
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.top, 2)
+        }
+    }
+
+    /// Why a staged night has no skin temperature, for the device that keeps the night (decision 28a:
+    /// the device you went to bed with, `owner(ofNightFrom:to:)`; the ring for every ring-only
+    /// install). The
+    /// ring's reason is its live-only temperature above; the strap's temperature is in its history,
+    /// but only its worn minutes inside its own sleep window, 30–42 °C, count (decisions 12, 25).
+    static func noSkinTempNote(nightOwner: DeviceOwnershipLog.Family) -> String {
+        switch nightOwner {
+        case .zeppOS:
+            return "No skin temperature for this night — the strap recorded too few usable readings while worn during this sleep to compare."
+        case .ringConn:
+            return "No skin temperature for this night — it's only recorded while the ring stays connected, and there weren't enough readings to compare."
         }
     }
 
@@ -1060,7 +1112,8 @@ struct SleepCardView: View {
     /// bar above (warmer) / below (cooler) a center baseline line.
     @ViewBuilder
     private func tempChart() -> some View {
-        let nights = storedSleep.filter { $0.skinTempC > 0 }
+        // Decision 29: the latest night's device's nights only (every night with an empty log).
+        let nights = (latest.map { LocalStore.sameDevice(storedSleep, as: $0) } ?? storedSleep).filter { $0.skinTempC > 0 }
         if nights.count >= SkinTempBaseline.minBaselineNights,
            let baseline = SkinTempBaseline.baseline(
                 priorNights: nights.map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }) {
@@ -1563,7 +1616,7 @@ struct SleepCardView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Your sleep appears here after an overnight sync")
                     .font(.subheadline.weight(.medium))
-                Text("Wear the ring to bed and connect in the morning. Once it syncs, last night's sleep stays here all day.")
+                Text("Wear your device to bed and connect in the morning. Once it syncs, last night's sleep stays here all day.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

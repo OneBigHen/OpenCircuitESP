@@ -24,6 +24,15 @@ public enum MetricKind: String, Codable, CaseIterable, Sendable {
     /// ESTIMATE only — basic threshold model. Full 4-level intensity follows #93 decode.
     /// Written to HealthKit `.appleExerciseTime`.
     case exerciseMinutes
+    /// The Amazfit Helio Strap's all-day stress, one 0–100 value per minute (ZEPP_PROTOCOL.md §6.5
+    /// `0x13`, #239). Stored and charted in the app ONLY: Apple Health has no stress type (decision
+    /// 15). Not the ring's Overnight Stress score, which is a per-night summary field, not a sample.
+    case stress
+    /// The Amazfit Helio Strap's PAI, its 7-day rolling Personal Activity Intelligence total, one
+    /// value per `0x0d` record (ZEPP_PROTOCOL.md §6.5, about one a day; decision 45). Stored in the
+    /// app ONLY: Apple Health has no PAI type (decision 15). There is no chart and no Today tile for
+    /// it in v1 — only the strap card's number, which reads the newest stored row.
+    case pai
 
     /// Canonical unit each `QuantitySample.value` is expressed in, matching the
     /// HealthKit type it maps to in docs/HEALTHKIT_MAPPING.md.
@@ -38,6 +47,8 @@ public enum MetricKind: String, Codable, CaseIterable, Sendable {
         case .sleep: return "category"
         case .distance: return "m"           // meters
         case .exerciseMinutes: return "min"  // minutes
+        case .stress: return "score"         // 0–100, the strap's own scale; no physical unit
+        case .pai: return "points"           // PAI points, Amazfit's own score; no physical unit
         }
     }
 
@@ -55,6 +66,8 @@ public enum MetricKind: String, Codable, CaseIterable, Sendable {
         case .sleep: return "Sleep"
         case .distance: return "Distance (est.)"
         case .exerciseMinutes: return "Exercise Time (est.)"
+        case .stress: return "Stress"
+        case .pai: return "PAI"
         }
     }
 }
