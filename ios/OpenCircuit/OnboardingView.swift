@@ -32,22 +32,32 @@ struct OnboardingView: View {
     /// Onboarding-local: picking a card switches nothing (decision 51b).
     @State private var pick: ActiveDeviceChoice?
     @State private var showStrapSetup = false
+    /// The live read (UserDefaults + Keychain) has run. It runs once, on appear, not in `init`: the
+    /// presenter re-renders often (a live device streams), and each render re-runs `init` (review-256 F5).
+    @State private var readInstalled = false
 
     init(onDone: @escaping () -> Void) {
         self.onDone = onDone
-        let flow = OnboardingFlow(installed: .live())
-        var page = OnboardingFlow.Page.welcome
-        var pick = flow.preselection
+        _flow = State(initialValue: OnboardingFlow(installed: .unread))
+        _page = State(initialValue: .welcome)
+        _pick = State(initialValue: nil)
+    }
+
+    /// The one live read: what's in use, and the preselection unless the user has already picked.
+    private func readInstalledOnce() {
+        guard !readInstalled else { return }
+        readInstalled = true
+        let live = OnboardingFlow(installed: .live())
+        flow = live
 #if DEBUG && targetEnvironment(simulator)
         if let id = UserDefaults.standard.string(forKey: OnboardingFlow.debugPageArgumentKey),
-           let start = flow.debugStart(id) {
+           let start = live.debugStart(id) {
             page = start.page
             pick = start.pick
+            return
         }
 #endif
-        _flow = State(initialValue: flow)
-        _page = State(initialValue: page)
-        _pick = State(initialValue: pick)
+        if pick == nil { pick = live.preselection }
     }
 
     private var isLastPage: Bool { page == .finish }
@@ -95,6 +105,7 @@ struct OnboardingView: View {
                 .padding(.bottom)
             }
             .toolbar(.hidden, for: .navigationBar)
+            .onAppear(perform: readInstalledOnce)
             // The strap's existing setup screen, unchanged: its "Save key and use the Helio Strap"
             // is what switches. Done finishes onboarding from outside it.
             .navigationDestination(isPresented: $showStrapSetup) {

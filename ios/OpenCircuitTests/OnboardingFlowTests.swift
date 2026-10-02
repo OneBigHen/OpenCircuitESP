@@ -36,6 +36,14 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertEqual(flow(.ringConn, ring: true, key: true).preselection, .ringConn)
     }
 
+    func testTheViewsPlaceholderBeforeTheLiveReadClaimsNothing() {
+        // OnboardingView starts on this and reads the phone once, on appear (review-256 F5).
+        let unread = OnboardingFlow(installed: .unread)
+        XCTAssertNil(unread.preselection)
+        XCTAssertNil(unread.inUse)
+        XCTAssertNil(unread.switchNote(for: .helioStrap))
+    }
+
     func testASavedKeyAndNothingElsePreselectsNothing() {
         XCTAssertNil(flow(.ringConn, key: true).preselection, "a key alone doesn't make the strap the device in use")
         XCTAssertNil(flow(.ringConn, key: true).inUse)

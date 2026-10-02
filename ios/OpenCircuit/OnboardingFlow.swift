@@ -18,6 +18,9 @@ struct OnboardingFlow: Equatable {
         /// The strap's key is in the Keychain.
         var hasStrapKey: Bool
 
+        /// Before the live read: nothing in use, nothing picked. `OnboardingView` replaces it on appear.
+        static let unread = Installed(persistedChoice: .ringConn, hasSavedRing: false, hasStrapKey: false)
+
         @MainActor
         static func live(defaults: UserDefaults = .standard, keyStore: (any HelioKeyStoring)? = nil) -> Installed {
             Installed(persistedChoice: ActiveDeviceChoiceStore.persisted(defaults),
