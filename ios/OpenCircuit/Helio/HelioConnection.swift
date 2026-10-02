@@ -372,7 +372,7 @@ final class HelioConnection: NSObject {
     }
 
     /// The strap's Apple Health pass, shared by the post-sync hook and the background run (#215
-    /// phase 4): its timeline's pending samples (HRV withheld, decision 14) and `nights`. nil when
+    /// phase 4): its timeline's pending samples (`HelioHealthPolicy.healthMirroredKinds()`) and `nights`. nil when
     /// Health isn't available on this device, or when `mayFlush` says no. `nightsFinalized` is the
     /// time T Sleep Focus ended, if a Focus wake is behind this flush: the nights skip their 20-minute
     /// quiet margin (as the ring's do on that wake) only if this flush starts within 30 minutes of T.

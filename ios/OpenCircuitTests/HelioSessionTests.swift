@@ -302,7 +302,7 @@ final class HelioSessionTests: XCTestCase {
         let samples = try store.context.fetch(FetchDescriptor<StoredSample>())
         XCTAssertTrue(samples.allSatisfy { $0.deviceID == timeline.rawValue })
         XCTAssertEqual(samples.filter { $0.kindRaw == "heartRate" }.count, 50, "60 minutes minus 10 unworn/charging without HR")
-        XCTAssertEqual(samples.filter { $0.kindRaw == "hrvSDNN" }.map(\.value).sorted(), [41, 47], "HRV stored locally (decision 14)")
+        XCTAssertEqual(samples.filter { $0.kindRaw == "hrvSDNN" }.map(\.value).sorted(), [41, 47], "HRV stored locally")
         XCTAssertEqual(samples.filter { $0.kindRaw == "spo2" }.map(\.value), [0.96])
         // Temperature: worn, in the strap's sleep window, 30–42 °C: 60 − 5 unworn − 5 charging − 1 at 29 °C.
         XCTAssertEqual(samples.filter { $0.kindRaw == "temperature" }.count, 49)
@@ -321,12 +321,13 @@ final class HelioSessionTests: XCTestCase {
         XCTAssertNotNil(cursors[.temperature])
         XCTAssertNotNil(cursors[.sleepSession])
 
-        // The Health pass hands over the night and the timeline; HRV is not a Health kind for it.
+        // The Health pass hands over the night and the timeline; HRV is a Health kind for it (decision 44).
         for _ in 0..<200 where results.isEmpty { await Task.yield() }
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results.first?.nights.count, 1)
         let pending = try store.pendingHealthSamples(device: timeline, kinds: HelioHealthPolicy.healthMirroredKinds())
-        XCTAssertFalse(pending.contains { $0.kind == .hrvSDNN }, "decision 14: never written to Apple Health")
+        XCTAssertEqual(pending.filter { $0.kind == .hrvSDNN }.map(\.value).sorted(), [41, 47],
+                       "decision 44: the strap's HRV (RMSSD) goes to Apple Health")
         XCTAssertTrue(pending.contains { $0.kind == .heartRate })
         XCTAssertTrue(pending.contains { $0.kind == .temperature })
         XCTAssertTrue(try store.pendingHealthSamples().isEmpty, "the ring's timeline is untouched")

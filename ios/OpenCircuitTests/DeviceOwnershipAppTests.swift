@@ -1,3 +1,4 @@
+import HealthKit
 import SwiftData
 import XCTest
 import OpenCircuitKit
@@ -486,6 +487,79 @@ final class DeviceOwnershipAppTests: XCTestCase {
         _ = connect(device, store: store)          // the strap re-delivers the same history
         XCTAssertEqual(try store.pendingHealthSamples(device: timeline, kinds: kinds).count, 0)
         XCTAssertEqual(try store.pendingStepSamples().count, 0)
+    }
+
+    // MARK: Decision 44: the strap's HRV reaches Apple Health, its backlog included
+
+    /// The strap stored HRV all along while decision 14 kept it out of Health, and its other kinds were
+    /// mirrored, so their `hk:` watermarks sit ahead of every HRV row. With `HelioHealthPolicy.writesHRV`
+    /// on, the next flush offers the WHOLE backlog: the strap has no `hk:hrvSDNN` watermark, there is no
+    /// lookback cutoff, and nothing already written is offered again.
+    func testStrapHRVStoredWhileWithheldBackfillsInFullOnTheNextFlush() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        // Four made-up readings a night for 25 nights, the oldest 25 days back (inside retention).
+        let hrv = (0..<25).flatMap { night in
+            (0..<4).map { i in
+                QuantitySample(kind: .hrvSDNN, start: at(Double(-24 * night - 2 - i)), value: Double(40 + i))
+            }
+        }.sorted { $0.start < $1.start }
+        let heartRate = (0..<10).map { QuantitySample(kind: .heartRate, start: at(11 + Double($0) / 60), value: 60) }
+        _ = try store.ingest(hrv + heartRate, device: strapTimeline)
+
+        // Every flush before the switch: the old policy's kinds were written and their watermark advanced.
+        let before = try store.pendingHealthSamples(device: strapTimeline,
+                                                    kinds: HelioHealthPolicy.healthMirroredKinds(writesHRV: false))
+        XCTAssertEqual(before.map(\.kind), Array(repeating: .heartRate, count: 10))
+        try store.markHealthWritten(before, device: strapTimeline)
+        let healthCursors = try store.context.fetch(FetchDescriptor<StoredCursor>())
+            .filter { $0.deviceID == strapTimeline.rawValue }
+            .compactMap { SyncCursorKey.name(fromKey: $0.kindRaw, device: strapTimeline) }
+            .filter { $0.hasPrefix("hk:") }
+        XCTAssertEqual(healthCursors, ["hk:heartRate"], "no hk:hrvSDNN watermark for the strap")
+
+        // The default policy: every stored HRV row, oldest first, and nothing else.
+        let kinds = HelioHealthPolicy.healthMirroredKinds()
+        let pending = try store.pendingHealthSamples(device: strapTimeline, kinds: kinds)
+        XCTAssertEqual(pending.map(\.kind), Array(repeating: .hrvSDNN, count: 100))
+        XCTAssertEqual(pending.map(\.start), hrv.map(\.start))
+        XCTAssertEqual(pending.map(\.value), hrv.map(\.value))
+        XCTAssertTrue(pending.allSatisfy { $0.start < heartRate[0].start }, "all older than the strap's heart-rate watermark")
+        try store.markHealthWritten(pending, device: strapTimeline)
+        XCTAssertEqual(try store.pendingHealthSamples(device: strapTimeline, kinds: kinds), [], "written once")
+        XCTAssertTrue(try store.pendingHealthSamples().isEmpty, "the ring's timeline is untouched")
+    }
+
+    /// Decision 44: a strap HRV row is written as the ring's is, the RMSSD value in Health's SDNN type
+    /// tagged `OpenCircuitHRVStatistic = "RMSSD"`, and it names the strap.
+    func testAStrapHRVSampleIsWrittenTaggedRMSSDAndNamesTheStrap() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        let (session, _) = connect(makeStrap(), store: store)
+        let synced = try XCTUnwrap(session.lastSyncResult?.identity)
+        let active = ActiveWearable(session: { nil }, fallbackDeviceID: { nil }, identityStore: WearableIdentityStore(defaults),
+                                    ringFallbackID: { self.ringID }, strapFallbackID: { self.strapID },
+                                    ownership: { .strapOwnsAllTime })
+        active.recordIdentity(synced)
+        let strap = try XCTUnwrap(HealthKitWriter.wearableDevice(forTimeline: session.timeline, wearable: active))
+
+        let reading = QuantitySample(kind: .hrvSDNN, start: at(3), value: 47)
+        let sample = try XCTUnwrap(HealthKitWriter.quantitySample(reading, device: strap))
+        XCTAssertEqual(sample.quantityType, HKQuantityType(.heartRateVariabilitySDNN))
+        XCTAssertEqual(sample.quantity.doubleValue(for: .secondUnit(with: .milli)), 47)
+        XCTAssertEqual(sample.metadata?[HealthKitWriter.hrvStatisticMetadataKey] as? String, "RMSSD")
+        XCTAssertEqual(sample.device?.localIdentifier, session.timeline.rawValue)
+        XCTAssertEqual(sample.device?.manufacturer, "Amazfit")
+        // One statistic for every device: the tag doesn't depend on which device the row names.
+        let ring = try XCTUnwrap(HealthKitWriter.wearableDevice(forTimeline: .ringConn, wearable: ringOnly()))
+        XCTAssertEqual(HealthKitWriter.quantitySample(reading, device: ring)?.metadata?[HealthKitWriter.hrvStatisticMetadataKey]
+                       as? String, "RMSSD")
+    }
+
+    private func ringOnly() -> ActiveWearable {
+        let ring = WearableSeamTests.FakeWearable(identity: ringIdentity())
+        return ActiveWearable(session: { ring }, fallbackDeviceID: { self.ringID }, identityStore: WearableIdentityStore(defaults),
+                              ringFallbackID: { self.ringID }, strapFallbackID: { nil }, ownership: { DeviceOwnershipLog() })
     }
 
     // MARK: Review-224b S-A: a strap chosen before the log existed
