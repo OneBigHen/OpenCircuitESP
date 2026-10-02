@@ -83,11 +83,13 @@ struct OnboardingView: View {
                     .controlSize(.large)
                     .frame(maxWidth: .infinity)
 
-                    // Skip is redundant on the final page (its button finishes there).
-                    Button("Skip", action: onDone)
+                    // Skip, or "Set up later" when the last page ends on the strap's setup. Both finish
+                    // like Get Started. Hidden (its slot kept) when the primary button already finishes.
+                    let secondary = flow.secondary(on: page, pick: pick)
+                    Button(secondary?.title ?? OnboardingFlow.Secondary.skip.title, action: onDone)
                         .font(.footnote)
-                        .opacity(isLastPage ? 0 : 1)
-                        .disabled(isLastPage)
+                        .opacity(secondary == nil ? 0 : 1)
+                        .disabled(secondary == nil)
                 }
                 .padding(.horizontal)
                 .padding(.bottom)

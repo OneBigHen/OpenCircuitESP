@@ -64,6 +64,24 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertEqual(OnboardingFlow.Finish.getStarted.title, "Get Started")
     }
 
+    // MARK: the secondary button (steer 1 item 5)
+
+    func testSetUpLaterAppearsOnlyWhereTheLastPageEndsOnTheStrapsSetup() {
+        let fresh = flow()
+        XCTAssertEqual(fresh.secondary(on: .finish, pick: .helioStrap), .setUpLater)
+        XCTAssertEqual(OnboardingFlow.Secondary.setUpLater.title, "Set up later")
+        XCTAssertEqual(flow(.ringConn, ring: true, key: true).secondary(on: .finish, pick: .helioStrap), .setUpLater)
+        XCTAssertNil(fresh.secondary(on: .finish, pick: .ringConn), "Get Started already finishes")
+        XCTAssertNil(fresh.secondary(on: .finish, pick: nil))
+        XCTAssertNil(flow(.helioStrap, key: true).secondary(on: .finish, pick: .helioStrap), "the strap is set up")
+        for page in OnboardingFlow.Page.allCases where page != .finish {
+            for pick in [nil, ActiveDeviceChoice.ringConn, .helioStrap] {
+                XCTAssertEqual(fresh.secondary(on: page, pick: pick), .skip, "Skip as today on \(page)")
+            }
+        }
+        XCTAssertEqual(OnboardingFlow.Secondary.skip.title, "Skip")
+    }
+
     // MARK: "You're using X now"
 
     func testTheSwitchLineAppearsOnlyWhenThePickDiffersFromTheDeviceInUse() {
@@ -174,6 +192,7 @@ final class OnboardingFlowTests: XCTestCase {
             _ = live.finish(for: pick)
             _ = live.switchNote(for: pick)
             for device in ActiveDeviceChoice.allCases { _ = live.setupHint(for: device, pick: pick) }
+            for page in OnboardingFlow.Page.allCases { _ = live.secondary(on: page, pick: pick) }
         }
         _ = OnboardingFlow(installed: .live(keyStore: StubKeyStore(hasKey: false)))
 

@@ -44,6 +44,21 @@ struct OnboardingFlow: Equatable {
         }
     }
 
+    /// The quiet button under the primary one. Both finish onboarding exactly as Get Started does:
+    /// the flag is set, nothing switches and nothing is constructed.
+    enum Secondary: Equatable {
+        case skip
+        /// On the last page when it ends on the strap's setup, so finishing doesn't require opening it.
+        case setUpLater
+
+        var title: String {
+            switch self {
+            case .skip: return "Skip"
+            case .setUpLater: return "Set up later"
+            }
+        }
+    }
+
     let installed: Installed
 
     /// The device in use, if it's been set up (51d). A fresh install's ring default is not a ring in
@@ -63,6 +78,13 @@ struct OnboardingFlow: Equatable {
 
     func finish(for pick: ActiveDeviceChoice?) -> Finish {
         pick == .helioStrap && !strapIsSetUp ? .setUpStrap : .getStarted
+    }
+
+    /// Skip on every page but the last; on the last, "Set up later" only when it ends on the strap's
+    /// setup, and nothing otherwise (its primary button already finishes).
+    func secondary(on page: Page, pick: ActiveDeviceChoice?) -> Secondary? {
+        guard page == .finish else { return .skip }
+        return finish(for: pick) == .setUpStrap ? .setUpLater : nil
     }
 
     /// Shown on Getting started when the pick isn't the device in use.
