@@ -80,12 +80,14 @@ final class OnboardingFlowTests: XCTestCase {
     }
 
     func testTheStrapSetupHintSaysWhereTheStrapIsSetUp() {
-        XCTAssertEqual(flow().strapSetupHint(for: .helioStrap),
+        XCTAssertEqual(flow().setupHint(for: .helioStrap, pick: .helioStrap),
                        "Set up the strap at the end of this guide, or later in Profile ▸ Device.")
-        XCTAssertEqual(flow().strapSetupHint(for: nil), "Set it up in Profile ▸ Device.")
-        XCTAssertNil(flow(.helioStrap, key: true).strapSetupHint(for: .helioStrap), "already set up")
-        XCTAssertNil(flow(.helioStrap, key: true).strapSetupHint(for: nil))
-        XCTAssertNil(flow().strapSetupHint(for: .ringConn), "the strap's steps aren't shown")
+        XCTAssertEqual(flow().setupHint(for: .helioStrap, pick: nil), "Set it up in Profile ▸ Device.")
+        XCTAssertNil(flow(.helioStrap, key: true).setupHint(for: .helioStrap, pick: .helioStrap), "already set up")
+        XCTAssertNil(flow(.helioStrap, key: true).setupHint(for: .helioStrap, pick: nil))
+        for pick in [nil, ActiveDeviceChoice.ringConn] {
+            XCTAssertNil(flow().setupHint(for: .ringConn, pick: pick), "the ring is set up on Today")
+        }
     }
 
     // MARK: copy and constants
@@ -95,7 +97,7 @@ final class OnboardingFlowTests: XCTestCase {
     }
 
     func testTheSharedDisclaimerNamesEveryCompanyAndTrademark() {
-        let text = OnboardingCopy.disclaimer
+        let text = DeviceCopy.disclaimer
         for name in ["RingConn", "JZ_Tech", "Amazfit", "Zepp Health", "not a medical device",
                      "\"RingConn\"", "\"Amazfit\"", "\"Helio\"", "\"Zepp\"", "Gen 2 Air", "Gen 3", "Helio Strap"] {
             XCTAssertTrue(text.contains(name), "missing \(name)")
@@ -104,14 +106,20 @@ final class OnboardingFlowTests: XCTestCase {
     }
 
     func testTheStrapBulletsAreHelioStatussOwnCopy() {
-        XCTAssertEqual(OnboardingCopy.strapWarnings, [HelioStatus.dontUnpairCopy, HelioStatus.zeppBluetoothCopy])
-        XCTAssertEqual(OnboardingCopy.keyGuideURL, HelioStatus.keyGuideURL)
+        let steps = ActiveDeviceChoice.helioStrap.firstSteps
+        XCTAssertEqual(Array(steps.suffix(2)), [HelioStatus.dontUnpairCopy, HelioStatus.zeppBluetoothCopy])
+        XCTAssertEqual(steps.first, "The strap talks only to an app that knows its 16-byte key. The Zepp app creates "
+                       + "the key once, when you pair the strap. OpenCircuit never signs in to Zepp.")
+        XCTAssertEqual(ActiveDeviceChoice.helioStrap.setupGuide?.url, HelioStatus.keyGuideURL)
+        XCTAssertEqual(ActiveDeviceChoice.helioStrap.setupGuide?.title, "How to get the key")
+        XCTAssertNil(ActiveDeviceChoice.ringConn.setupGuide)
     }
 
     func testTheRingStepsAreTodaysFour() {
-        XCTAssertEqual(OnboardingCopy.ringSteps.count, 4)
-        XCTAssertTrue(OnboardingCopy.ringSteps[0].hasPrefix("No RingConn account and no official app needed"))
-        XCTAssertTrue(OnboardingCopy.ringSteps[3].hasPrefix("Charge the ring as usual"))
+        let steps = ActiveDeviceChoice.ringConn.firstSteps
+        XCTAssertEqual(steps.count, 4)
+        XCTAssertTrue(steps[0].hasPrefix("No RingConn account and no official app needed"))
+        XCTAssertTrue(steps[3].hasPrefix("Charge the ring as usual"))
     }
 
     func testEachCardReadsAsTheDeviceAndItsDetail() {
@@ -123,11 +131,11 @@ final class OnboardingFlowTests: XCTestCase {
     }
 
     func testTheSharedPagesHaveNoRingOnlyWording() {
-        for text in OnboardingCopy.welcome + [OnboardingCopy.bluetoothPermission] {
+        for text in OnboardingCopy.welcome + [DeviceCopy.bluetoothPermission] {
             XCTAssertNil(text.range(of: "your ring\\b(?! or)", options: .regularExpression), text)
             XCTAssertFalse(text.contains("RingConn Gen 2's"), text)
         }
-        XCTAssertTrue(OnboardingCopy.bluetoothPermission.contains("your ring or strap"))
+        XCTAssertTrue(DeviceCopy.bluetoothPermission.contains("your ring or strap"))
     }
 
 #if DEBUG && targetEnvironment(simulator)
@@ -165,7 +173,7 @@ final class OnboardingFlowTests: XCTestCase {
         for pick in [nil, ActiveDeviceChoice.ringConn, .helioStrap] {
             _ = live.finish(for: pick)
             _ = live.switchNote(for: pick)
-            _ = live.strapSetupHint(for: pick)
+            for device in ActiveDeviceChoice.allCases { _ = live.setupHint(for: device, pick: pick) }
         }
         _ = OnboardingFlow(installed: .live(keyStore: StubKeyStore(hasKey: false)))
 

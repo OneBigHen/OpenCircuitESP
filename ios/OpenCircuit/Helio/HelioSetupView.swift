@@ -10,17 +10,16 @@ struct DeviceChoiceView: View {
     var body: some View {
         List {
             Section {
-                row(.ringConn, detail: "RingConn Gen 2, Gen 2 Air or Gen 3. No account needed.") {
+                row(.ringConn, detail: ActiveDeviceChoice.ringConn.cardDetail) {
                     if !choice.isRing { confirmRing = true }
                 }
                 NavigationLink {
                     HelioSetupView()
                 } label: {
-                    rowLabel(.helioStrap, detail: "Needs a one-time key from the Zepp app (see setup).")
+                    rowLabel(.helioStrap, detail: ActiveDeviceChoice.helioStrap.cardDetail)
                 }
             } footer: {
-                Text("OpenCircuit uses one device at a time. Switching keeps both devices' history on this phone; "
-                     + "the other device isn't searched for or connected until you switch back.")
+                Text(DeviceCopy.oneAtATime)
             }
         }
         .navigationTitle("Device")

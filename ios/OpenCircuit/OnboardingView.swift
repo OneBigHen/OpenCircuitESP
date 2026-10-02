@@ -128,7 +128,7 @@ struct OnboardingView: View {
             Text("Which one do you wear? Pick one to see its first steps.")
                 .font(.body)
             ForEach(ActiveDeviceChoice.allCases, id: \.self) { card($0) }
-            Text(OnboardingCopy.oneAtATime)
+            Text(DeviceCopy.oneAtATime)
                 .font(.subheadline).foregroundStyle(.secondary)
             Text(OnboardingCopy.changeLater)
                 .font(.subheadline).foregroundStyle(.secondary)
@@ -142,17 +142,15 @@ struct OnboardingView: View {
             if let note = flow.switchNote(for: pick) {
                 Text(note).font(.subheadline.weight(.semibold))
             }
-            switch pick {
-            case .ringConn:
-                ringSteps
-            case .helioStrap:
-                strapSteps
-            case nil:
-                deviceHeading(.ringConn)
-                ringSteps
-                deviceHeading(.helioStrap)
-                    .padding(.top, 8)
-                strapSteps
+            if let pick {
+                steps(for: pick)
+            } else {
+                // Nothing picked: every device's steps, each under its own heading.
+                ForEach(ActiveDeviceChoice.allCases, id: \.self) { device in
+                    deviceHeading(device)
+                        .padding(.top, device == ActiveDeviceChoice.allCases.first ? 0 : 8)
+                    steps(for: device)
+                }
             }
         }
     }
@@ -161,7 +159,7 @@ struct OnboardingView: View {
         page(title: "Permissions") {
             headerIcon(Image(systemName: "lock.shield"), tint: .teal)
         } content: {
-            bullet(OnboardingCopy.bluetoothPermission, icon: "dot.radiowaves.left.and.right")
+            bullet(DeviceCopy.bluetoothPermission, icon: "dot.radiowaves.left.and.right")
             bullet("Apple Health — to save your metrics. You choose exactly what to share.",
                    icon: "heart.text.square")
             Text("You'll be asked for these the first time you connect and authorize Health.")
@@ -175,26 +173,26 @@ struct OnboardingView: View {
             headerIcon(Image(systemName: "info.circle"), tint: .orange)
         } content: {
             // The same constant as the About-section disclaimer in UserProfileSettingsView.
-            Text(OnboardingCopy.disclaimer)
+            Text(DeviceCopy.disclaimer)
                 .font(.subheadline).foregroundStyle(.secondary)
         }
     }
 
     // MARK: Device steps
 
+    /// A device's first steps, its guide link after the first one, and where it's set up.
     @ViewBuilder
-    private var ringSteps: some View {
-        ForEach(OnboardingCopy.ringSteps, id: \.self) { bullet($0) }
-    }
-
-    @ViewBuilder
-    private var strapSteps: some View {
-        bullet(OnboardingCopy.strapKey)
-        Link("How to get the key", destination: OnboardingCopy.keyGuideURL)
-            .font(.body)
-            .padding(.leading, 28)
-        ForEach(OnboardingCopy.strapWarnings, id: \.self) { bullet($0) }
-        if let hint = flow.strapSetupHint(for: pick) {
+    private func steps(for device: ActiveDeviceChoice) -> some View {
+        let steps = device.firstSteps
+        ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+            bullet(step)
+            if index == 0, let guide = device.setupGuide {
+                Link(guide.title, destination: guide.url)
+                    .font(.body)
+                    .padding(.leading, 28)
+            }
+        }
+        if let hint = flow.setupHint(for: device, pick: pick) {
             Text(hint).font(.subheadline).foregroundStyle(.secondary)
         }
     }
@@ -223,7 +221,7 @@ struct OnboardingView: View {
                             Text("In use").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
                         }
                     }
-                    Text(OnboardingCopy.cardDetail(device))
+                    Text(device.cardDetail)
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
             }

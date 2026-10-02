@@ -71,19 +71,22 @@ struct OnboardingFlow: Equatable {
         return "You're using the \(inUse.displayName) now. To switch, go to Profile ▸ Device."
     }
 
-    /// Where the strap is set up, while it isn't yet. Nil when the strap's steps aren't shown.
-    func strapSetupHint(for pick: ActiveDeviceChoice?) -> String? {
-        guard !strapIsSetUp else { return nil }
-        switch pick {
-        case .helioStrap: return "Set up the strap at the end of this guide, or later in Profile ▸ Device."
-        case nil: return "Set it up in Profile ▸ Device."
-        case .ringConn: return nil
+    /// Under a device's first steps: where it's set up, while it isn't yet. `pick` is nil when every
+    /// device's steps are shown.
+    func setupHint(for device: ActiveDeviceChoice, pick: ActiveDeviceChoice?) -> String? {
+        switch device {
+        case .ringConn:
+            return nil   // the ring sets itself up on Today (Scan & connect)
+        case .helioStrap:
+            guard !strapIsSetUp else { return nil }
+            return pick == .helioStrap ? "Set up the strap at the end of this guide, or later in Profile ▸ Device."
+                                       : "Set it up in Profile ▸ Device."
         }
     }
 
     /// What VoiceOver reads for a card: the device, then its detail.
     func cardAccessibilityLabel(_ device: ActiveDeviceChoice) -> String {
-        let base = "\(device.displayName). \(OnboardingCopy.cardDetail(device))"
+        let base = "\(device.displayName). \(device.cardDetail)"
         return inUse == device ? base + " In use" : base
     }
 
@@ -108,56 +111,19 @@ struct OnboardingFlow: Equatable {
 #endif
 }
 
-/// Onboarding's copy. Every device claim comes from copy already in the app or the README, and the
-/// strap's warnings are `HelioStatus`'s own constants, so the two screens can't drift apart.
+/// Onboarding's own copy. Device copy is the device's (`ActiveDeviceChoice` fields, `DeviceCopy`),
+/// so a new device needs no edit here.
 enum OnboardingCopy {
-    static let welcome = [
-        "OpenCircuit works with a RingConn ring (Gen 2, Gen 2 Air or Gen 3) or the Amazfit Helio Strap.",
-        "It reads your wearable's metrics over Bluetooth — heart rate, HRV, SpO₂, sleep, skin "
-            + "temperature and more.",
-        "It's local-first: your data stays on your device and is written only to Apple Health. "
-            + "Nothing is sent to any server.",
-        "No subscription, no cloud. The ring needs no account. The strap needs the Zepp app once, to "
-            + "create its key; after that, OpenCircuit talks only to the strap.",
-    ]
-
-    /// `DeviceChoiceView`'s row details and footer (Profile ▸ Device).
-    static func cardDetail(_ device: ActiveDeviceChoice) -> String {
-        switch device {
-        case .ringConn: return "RingConn Gen 2, Gen 2 Air or Gen 3. No account needed."
-        case .helioStrap: return "Needs a one-time key from the Zepp app (see setup)."
-        }
+    static var welcome: [String] {
+        [
+            DeviceCopy.worksWith,
+            "It reads your wearable's metrics over Bluetooth — heart rate, HRV, SpO₂, sleep, skin "
+                + "temperature and more.",
+            "It's local-first: your data stays on your device and is written only to Apple Health. "
+                + "Nothing is sent to any server.",
+            DeviceCopy.accounts,
+        ]
     }
-    static let oneAtATime = "OpenCircuit uses one device at a time. Switching keeps both devices' history on this "
-        + "phone; the other device isn't searched for or connected until you switch back."
+
     static let changeLater = "You can change it later in Profile ▸ Device."
-
-    /// The ring's first steps, unchanged since #106.
-    static let ringSteps = [
-        "No RingConn account and no official app needed — OpenCircuit connects to your ring on its own, "
-            + "even a brand-new ring straight out of the box.",
-        "If the official RingConn app is installed, fully close it (swipe it away) before using "
-            + "OpenCircuit — only one app can talk to the ring at a time.",
-        "Keep your phone nearby — especially overnight — so OpenCircuit can capture your full night of "
-            + "sleep and skin-temperature data.",
-        "Charge the ring as usual; OpenCircuit picks up where it left off.",
-    ]
-
-    /// `HelioSetupView`'s "Before you start" key bullet.
-    static let strapKey = "The strap talks only to an app that knows its 16-byte key. The Zepp app creates the "
-        + "key once, when you pair the strap. OpenCircuit never signs in to Zepp."
-    static var keyGuideURL: URL { HelioStatus.keyGuideURL }
-    /// Decision 6's warnings, by reference.
-    static var strapWarnings: [String] { [HelioStatus.dontUnpairCopy, HelioStatus.zeppBluetoothCopy] }
-
-    static let bluetoothPermission = "Bluetooth — to find and connect to your ring or strap."
-
-    /// The not-affiliated and not-a-medical-device text, shared by onboarding's last page and
-    /// Profile ▸ About so they can't drift apart again. Names match the README's (#225).
-    static let disclaimer = "OpenCircuit is an independent, local-first app compatible with RingConn Gen 2, "
-        + "Gen 2 Air and Gen 3 smart rings and the Amazfit Helio Strap. It is not affiliated with, "
-        + "authorized, or endorsed by RingConn, JZ_Tech, Amazfit or Zepp Health; \"RingConn\", "
-        + "\"Amazfit\", \"Helio\" and \"Zepp\" are trademarks of their respective owners. OpenCircuit "
-        + "is not a medical device. Its readings are estimates for personal insight, not diagnosis. "
-        + "Talk to a clinician about any health concern."
 }
