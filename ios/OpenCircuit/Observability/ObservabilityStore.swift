@@ -258,8 +258,8 @@ struct LocalAlertCenter {
         let content = UNMutableNotificationContent()
         switch alert {
         case .notSynced:
-            content.title = "Ring not synced"
-            content.body = "OpenCircuit hasn't synced your ring in a while. Open the app to refresh, and check Settings ▸ General ▸ Background App Refresh."
+            content.title = "Not synced lately"
+            content.body = "OpenCircuit hasn't synced your device in a while. Open the app to refresh, and check Settings ▸ General ▸ Background App Refresh."
         case .lowBattery:
             content.title = "Ring battery low"
             content.body = "Your RingConn battery is low — charge it soon to keep tracking."

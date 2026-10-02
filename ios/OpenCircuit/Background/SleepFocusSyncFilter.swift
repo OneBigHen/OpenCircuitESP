@@ -10,7 +10,7 @@ import Foundation
 struct SleepFocusSyncFilter: SetFocusFilterIntent {
     static let title: LocalizedStringResource = "Sync after Sleep Focus"
     static let description = IntentDescription(
-        "Sync your ring when the Sleep Focus this filter belongs to turns off."
+        "Sync your device when the Sleep Focus this filter belongs to turns off."
     )
     // iOS 26 replaced `openAppWhenRun` with explicit execution modes. This intent must launch the
     // containing app into a BACKGROUND process: its work depends on the app-owned CoreBluetooth
@@ -86,13 +86,14 @@ private enum SleepFocusSyncRunner {
             // Background work must never reach makeContainer()'s destructive recovery path. This
             // mirrors AppDelegate's BGTask invariant: reuse the launch container or attempt the
             // non-destructive builder and retry on a later trigger if protected data is unavailable.
-            let container = try OpenCircuitApp.sharedContainer ?? OpenCircuitApp.makeContainerOrThrow()
-            let store = LocalStore(container.mainContext)
-            // #215: this drains the RING. With the Helio Strap chosen the ring's scanner is never
-            // constructed; the strap's background sync is Phase 4.
-            guard ActiveDeviceChoiceStore.persisted() == .ringConn else {
-                observability.recordSyncOutcome(kind: .sleepFocus, success: false,
-                                                detail: "helio strap active: background sync not in this build")
+            // A fallback-built container is published for the next site, and `container:` keeps it
+            // alive for as long as the store (#222 review Q2 + U2).
+            let container = try OpenCircuitApp.sharedOrFallbackContainer()
+            let store = LocalStore(container: container)
+            // #215 phase 4, decision 1: the chosen device's drain only. With the Helio Strap chosen the
+            // ring's scanner is never constructed; the strap's drain runs instead.
+            if BackgroundDrain(ActiveDeviceChoiceStore.persisted()) == .strap {
+                await runStrap(store: store)
                 return
             }
             let service = RingBackgroundSyncService(store: store, health: HealthKitWriter())
@@ -149,6 +150,35 @@ private enum SleepFocusSyncRunner {
             scheduler.schedule()
             scheduler.scheduleProcessing()
         }
+    }
+
+    /// The Helio Strap's Focus-off run (#215 phase 4): the same bounded, short window as the ring's.
+    /// Focus ending is the authoritative "the night is over" signal, so the strap's nights skip the
+    /// 20-minute quiet margin, exactly as the ring's do on this wake (`sleepFinalized`). The run logs
+    /// itself ("helio strap: …", kind `sleepFocus`); the alert passes follow a finished sync.
+    private static func runStrap(store: LocalStore) async {
+        let scheduler = BackgroundRefreshScheduler()
+        // T, the moment Sleep Focus ended (now): its nights skip the margin only within 30 min of it
+        // (decision 31).
+        let run = await HelioBackgroundSyncService.live(store: store).run(
+            kind: .sleepFocus, timeout: RingBackgroundSyncService.defaultTimeout, nightsFinalized: Date())
+        guard !Task.isCancelled else { return }
+        await evaluateAlerts()
+        if run.ending == .synced {
+            let alerts = HealthNotificationCenter()
+            let restingHRDaily = UserDefaults.standard.bool(forKey: HeadacheDefaults.enabled)
+                ? alerts.restingHRDailySeries(store: store) : nil
+            if let restingHRDaily {
+                await HeadacheEngine().refreshToday(store: store, restingHR: restingHRDaily)
+            }
+            await alerts.evaluate(store: store, session: nil, restingHRDaily: restingHRDaily)
+        }
+        scheduler.schedule()
+        scheduler.scheduleProcessing()
+        // #233 item 5: a night this flush held back (it started over 30 min after Focus ended), and
+        // review-225e SF-3: one still pending survives the `schedule()` above.
+        if run.flushMS != nil { StrapNightRefresh.record(run.refreshAt, scheduler: scheduler) }
+        StrapNightRefresh.resubmit(scheduler, strapChosen: true)
     }
 
     private static func evaluateAlerts() async {

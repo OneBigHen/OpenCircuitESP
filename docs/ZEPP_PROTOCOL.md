@@ -510,8 +510,9 @@ UTF-8 then `00`. Reply `02 <status>`.
 
 The strap only records a metric if its monitoring setting is on. The Zepp app sets them;
 **read them after auth** and warn the user when one is off, rather than silently fetching
-nothing. Not every HEALTH switch is a recording switch: `0x04` only changes the sampling rate
-(table below).
+nothing. Not every HEALTH switch is a recording switch: `0x04` does not gate recording (🟢
+`HW:2026-09-30 13:35`, §10.1); per the vendor it raises the sampling rate during activity (🟡, the
+vendor's switch description, not measured; table below).
 
 **Commands** 🟡 `SVC/Config:104-111,283-388,938-960`
 
@@ -712,7 +713,7 @@ support, and the strap inherits all Zepp OS defaults except display-dependent on
 
 | Code | Name | Record layout (LE) | Rate / timestamps | Units / scaling | GB maps to | Helio in GB | Tag / source |
 |---|---|---|---|---|---|---|---|
-| `0x01` | **activity** | **8 bytes/min** on Zepp OS: `[0]` kind, `[1]` intensity, `[2]` steps, `[3]` HR, `[4]` unknown, `[5]` sleep, `[6]` deep-sleep, `[7]` REM (sleep bytes: use low 7 bits) | 1/min from *start* | steps = count in that minute; HR bpm, `ff` or `00` = no reading (HelioCore drops them; GB stores raw); intensity 0–255 (GB divides by 256). CRC is **not** checked by GB for this type; on the Helio it **matches** like every other type's (60 records / 480 B, and a full 12 h round of 720 records / 5760 B). | per-minute activity sample | yes (always) | 🟢 8 bytes/min, length in records `HW:2026-09-30 (hw 0.132.27.2)`; 🟢 CRC `HW:2026-09-30 13:35`; fields 🟡 `FOP/Activity:71-164`, `SUP:984-986`, `HC:1180-1193` |
+| `0x01` | **activity** | **8 bytes/min** on Zepp OS: `[0]` kind, `[1]` intensity, `[2]` steps, `[3]` HR, `[4]` unknown, `[5]` sleep, `[6]` deep-sleep, `[7]` REM (sleep bytes: use low 7 bits) | 1/min from *start* | steps = count in that minute; HR bpm, `ff` or `00` = no reading (HelioCore drops them; GB stores raw); intensity 0–255 (GB divides by 256). CRC is **not** checked by GB for this type; on the Helio it **matches** like every type that has delivered data (60 records / 480 B, and a full 12 h round of 720 records / 5760 B); manual HR `0x02`, manual stress `0x12` and max HR `0x3d` have only answered empty, so their CRC has never been observed. | per-minute activity sample | yes (always) | 🟢 8 bytes/min, length in records `HW:2026-09-30 (hw 0.132.27.2)`; 🟢 CRC `HW:2026-09-30 13:35`; fields 🟡 `FOP/Activity:71-164`, `SUP:984-986`, `HC:1180-1193` |
 | `0x02` | manual HR | 6 bytes: u32 ts, i8 tz (¼ h), u8 bpm | event | bpm | manual-HR sample | yes | 🟡 `FOP/HeartRateManual:63-90` (only empty replies on the Helio so far) |
 | `0x0d` | PAI | 102 bytes: u8 type (`05` valid, `00` pre-reset: skip), u32 ts, i8 tz, 31 unknown, f32 PAI low, f32 moderate, f32 high, u16 min low, u16 min moderate, u16 min high, f32 PAI today, f32 PAI total, 39 unknown | daily | PAI points, minutes | PAI sample | yes | 🟢 102-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Pai:62-129` |
 | `0x12` | stress (manual) | 5 bytes: u32 ts, u8 stress | event | 0–100 | stress, type manual | yes | 🟡 `FOP/StressManual:64-95` (only empty replies on the Helio so far) |
@@ -1599,3 +1600,7 @@ allowed values or min/max → write **one** arg, echoing the group version from 
   start/ack/stop and the 0.5 s buzz felt, alarm list and HEALTH alert args read and parsed, no
   config group `03`; the matching §11–§13 tags promoted to 🟢. Nothing was written (zepp-fix
   agent, #215).
+- 2026-09-30: wording only (review-223 N3; helio-bg agent, #215 Phase 4): §5.5's intro keeps 🟢 for
+  "`0x04` does not gate recording" and tags the sampling-rate meaning 🟡; §6.5's activity row says
+  the CRC matches "like every type that has delivered data" (never observed for `0x02`, `0x12`,
+  `0x3d`). No tag was promoted.

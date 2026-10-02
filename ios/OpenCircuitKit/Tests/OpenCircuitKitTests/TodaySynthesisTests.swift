@@ -26,20 +26,20 @@ final class TodaySynthesisTests: XCTestCase {
 
     func testNoDataAtAll() {
         XCTAssertEqual(say(.scored(score: 90, tier: .excellent, factorCount: 3), newest: .some(nil)),
-                       "There's no ring data yet, so connect and sync your ring to see today's summary.")
+                       "There's no data from your device yet, so connect and sync it to see today's summary.")
     }
 
     func testStaleDataOverridesEverything() {
         XCTAssertEqual(say(.scored(score: 90, tier: .excellent, factorCount: 3), hrv: .above,
                            newest: now.addingTimeInterval(-40 * 3600)),
-                       "Your newest ring data is over a day old, so sync your ring to bring today's summary up to date.")
+                       "Your newest data is over a day old, so sync your device to bring today's summary up to date.")
         XCTAssertEqual(say(newest: now.addingTimeInterval(-3.5 * 86_400)),
-                       "Your newest ring data is 3 days old, so sync your ring to bring today's summary up to date.")
+                       "Your newest data is 3 days old, so sync your device to bring today's summary up to date.")
     }
 
     func testBeyondTheLookbackIsNotCounted() {
         XCTAssertEqual(say(newest: now.addingTimeInterval(-14 * 86_400)),
-                       "Your newest ring data is more than two weeks old, so sync your ring to bring today's summary up to date.")
+                       "Your newest data is more than two weeks old, so sync your device to bring today's summary up to date.")
     }
 
     func testThirtyFiveHoursIsNotStale() {

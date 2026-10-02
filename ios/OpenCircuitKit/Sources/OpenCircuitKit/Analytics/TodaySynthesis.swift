@@ -7,7 +7,7 @@
 // missing rather than one that guesses around it.
 //
 // Rule order (first match wins, then clauses are composed):
-//   1. no ring data at all          → say so, point at connect + sync
+//   1. no data at all               → say so, point at connect + sync
 //   2. newest data older than 36 h  → say how old, point at sync
 //   3. readiness states             → lead with readiness (or why there is none), then the most
 //                                     notable vitals clause: concerns first, then positives, then
@@ -80,14 +80,14 @@ public enum TodaySynthesis {
 
     public static func sentence(_ input: Input) -> String {
         guard let newest = input.newestDataAt else {
-            return "There's no ring data yet, so connect and sync your ring to see today's summary."
+            return "There's no data from your device yet, so connect and sync it to see today's summary."
         }
         let age = input.now.timeIntervalSince(newest)
         if age > staleAfter {
             let days = Int(age / 86_400)
             // The app only looks back two weeks, so it can't honestly name an age past that.
             let howOld = days <= 1 ? "over a day old" : days >= 14 ? "more than two weeks old" : "\(days) days old"
-            return "Your newest ring data is \(howOld), so sync your ring to bring today's summary up to date."
+            return "Your newest data is \(howOld), so sync your device to bring today's summary up to date."
         }
 
         let concerns = concernClauses(input)

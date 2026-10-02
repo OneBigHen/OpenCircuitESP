@@ -44,7 +44,7 @@ struct SleepNightsBrowserView: View {
                 if usable.isEmpty {
                     OCCard {
                         Text("No nights yet").font(.headline)
-                        Text("Wear the ring overnight and sync in the morning; each night will appear here.")
+                        Text("Wear your device overnight and sync in the morning; each night will appear here.")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                 } else {

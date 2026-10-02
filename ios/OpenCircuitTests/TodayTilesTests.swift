@@ -183,6 +183,6 @@ final class TodayTilesTests: XCTestCase {
         let input = TodaySynthesis.input(trends: TrendsData(), tiles: [], readiness: nil,
                                          lastSyncAt: now.addingTimeInterval(-86_400 * 20), now: now)
         XCTAssertEqual(TodaySynthesis.sentence(input),
-                       "Your newest ring data is more than two weeks old, so sync your ring to bring today's summary up to date.")
+                       "Your newest data is more than two weeks old, so sync your device to bring today's summary up to date.")
     }
 }

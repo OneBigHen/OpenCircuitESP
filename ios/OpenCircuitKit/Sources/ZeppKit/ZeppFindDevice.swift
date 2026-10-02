@@ -179,8 +179,11 @@ public struct ZeppFindDevice {
     private var resendAt: Date?
 
     /// Keep one machine across reconnects: it carries the owed stop from one connection to the next.
-    public init(configuration: Configuration = Configuration()) {
+    /// `stopOwed` seeds that stop from outside this process: an app the system ended while a find
+    /// may have been running sends the `06` on its next connection (§11.4, §15.4).
+    public init(configuration: Configuration = Configuration(), stopOwed: Bool = false) {
         self.configuration = configuration
+        isStopOwed = stopOwed
     }
 
     /// The mode a find started now would use.

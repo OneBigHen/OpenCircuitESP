@@ -138,10 +138,29 @@ enum DeviceSwitcher {
             RingScanner.shared.disconnect()
             store.set(.helioStrap)
             HelioConnection.shared.reconnectKnown()
+            if HelioHealthWake.wasEverUsed() { Task { await HelioHealthWake.shared.deviceChanged() } }
         case .ringConn:
             HelioConnection.shared.disconnect()
             store.set(.ringConn)
             RingScanner.shared.reconnectKnownPeripheral()
+            // Decision 33: the step-count wake is the strap's; leaving it turns HealthKit delivery off.
+            if HelioHealthWake.wasEverUsed() { Task { await HelioHealthWake.shared.deviceChanged() } }
+        }
+    }
+}
+
+/// Which drain a background wake runs (decision 1): the chosen device's, never the other's. The BGTask
+/// handler and the Sleep Focus filter decide with it from the persisted choice (UserDefaults only)
+/// before touching either driver, so with the strap chosen the ring's scanner and central are never
+/// constructed, and with the ring chosen the strap's connection and central never are.
+enum BackgroundDrain: Equatable {
+    case ring
+    case strap
+
+    init(_ choice: ActiveDeviceChoice) {
+        switch choice {
+        case .ringConn: self = .ring
+        case .helioStrap: self = .strap
         }
     }
 }
