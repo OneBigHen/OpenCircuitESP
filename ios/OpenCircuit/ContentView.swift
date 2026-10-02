@@ -252,7 +252,8 @@ struct ContentView: View {
             // First-run onboarding (#103): full-screen on first launch only, until completed/skipped.
             .fullScreenCover(isPresented: Binding(
                 get: { !onboardingCompleted },
-                set: { if !$0 { onboardingCompleted = true } })) {
+                set: { _ in }),   // only onDone finishes: a forced dismissal never marks it seen (F2)
+                onDismiss: { resolveOrphanedWorkoutSnapshot() }) {   // the orphan check waited for it (F2)
                 OnboardingView { onboardingCompleted = true }
             }
             .task {
@@ -860,6 +861,10 @@ struct ContentView: View {
     /// nothing worth claiming, or when a workout is genuinely live in THIS process.
     @MainActor
     private func resolveOrphanedWorkoutSnapshot() {
+        // Not while onboarding is up (review-256 F2): an alert raised under the cover dismissed it
+        // through its binding and wrote the completion flag unseen. The cover's `onDismiss` runs this
+        // again once it has finished dismissing; the snapshot is untouched until then.
+        guard onboardingCompleted else { return }
         // A live session in this process owns the snapshot — never offer to "recover" a workout the
         // user is still recording. (`recordingState` is `.idle` at launch; this guard matters
         // because the snapshot outlives a Not-now answer and this runs on the launch task.)
