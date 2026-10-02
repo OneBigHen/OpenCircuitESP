@@ -1,0 +1,239 @@
+import Foundation
+import OpenCircuitKit
+import SwiftData
+
+// Scoring the Helio Strap's nights on the phone — #246, decision 48.
+//
+// THE DEFECT. `WellnessBalance.anchoredScore` returns nil without last night's Sleep Score, so
+// Readiness on Today is anchored on it. The ring's nights are scored as they are stored
+// (`RingSession.computeSleepExtras`), but `saveHelioNight` stored only the hypnogram and the nightly
+// skin temperature, so a strap night kept `sleepScore == 0` — this column's app-wide "never
+// computed" sentinel — and the Readiness card was permanently empty for a strap wearer while every
+// input for the score sat in the store. Measured on the owner's phone, build 62: the strap's night
+// had neither score, every earlier (ring) night had both, and the strap's heart rate, HRV and skin
+// temperature for that night were all stored.
+//
+// WHAT IS HERE. Two call sites' worth of input-gathering, plus the repair pass:
+//   • `applyHelioNightScores` fills a night's `extras` as it is saved;
+//   • `scoreUnscoredHelioNights` scores strap nights already stored with no score.
+// The arithmetic is `StoredNightScore` in the Kit, so the two cannot disagree about the number.
+//
+// ⚠️ DECISIONS 28 AND 29 ARE THE WHOLE REASON THIS IS NOT THREE LINES IN `LocalStore+Helio.swift`.
+// A night is only scored when the STRAP owns it, every input row must be the strap's own, and the
+// temperature baseline is the strap's own prior nights. A finger temperature and an arm temperature
+// are not one baseline (decision 29), so letting a ring night into the baseline would turn every
+// device switch into a fever signal. With an EMPTY ownership log (a ring-only install) nothing here
+// does anything at all: `owner(ofNightFrom:to:)` is `.ringConn` for every night.
+//
+// ⚠️ OVERNIGHT RECOVERY RESTS ON A 🟡 STATISTIC. The strap's HRV is taken as RMSSD on Amazfit's
+// product-line documentation (decision 44); no capture has compared the `0x49` byte with the vendor
+// app's number. `SleepStress.overnightScore` wants RMSSD, and the strap's HRV is stored as
+// `.hrvSDNN` (the only HRV column there is). If the statistic turns out to be SDNN, the stress
+// number is wrong and this is one of the two places to fix.
+//
+// NOT A HEALTHKIT PATH, and no schema change. `sleepScore` and `stressScore` are ours alone — Sleep
+// Score has no HealthKit type — so nothing here needs authorization or queues a reconcile.
+
+extension LocalStore {
+
+    /// Trailing nights the temperature baseline may look back over. The ring's own number
+    /// (`RingSession.computeSleepExtras`), so the two devices weigh "your usual" over the same span.
+    static let helioScoreBaselineNights = 40
+
+    // MARK: Scoring a night as it is stored
+
+    /// Fill `extras.sleepScore` / `extras.stressScore` for a strap night about to be stored, from
+    /// the strap's own stored rows inside the night's window.
+    ///
+    /// Called from `saveHelioNight`, which runs TWICE per night per sync: once when the sleep round
+    /// lands, and again from `finishSync` after the later rounds. `HelioFetchPlan.types` fetches
+    /// sleep sessions before temperature and HRV, so the first save has neither — it stores the
+    /// score it can compute, and the re-save rescores the night with the sync's HRV and
+    /// temperatures. `applyExtras` keeps a stored value when the new one is 0, so a round that adds
+    /// nothing can never wipe a score that is already there.
+    ///
+    /// A night the strap does not own is left alone (decision 28). Nothing is written as 0: a
+    /// `nil` from `StoredNightScore` stays 0 in `extras`, which `applyExtras` reads as "not computed
+    /// this pass".
+    func applyHelioNightScores(to extras: inout SleepNightExtras,
+                               window: DateInterval, segments: [SleepSegment],
+                               device: SyncDeviceID) {
+        let log = Self.ownershipLog()
+        let family = DeviceOwnershipLog.Family(timeline: device)
+        guard family == .zeppOS,
+              log.owner(ofNightFrom: window.start, to: window.end) == family else { return }
+        let scores = StoredNightScore.scores(.init(
+            segments: segments,
+            heartRate: helioHeartRate(in: window, device: device),
+            rmssd: helioRMSSD(in: window, device: device),
+            // The verdict the caller just reached for THIS night (0 = none or withheld), so the
+            // score and the stored temperature always describe the same judgement.
+            skinTempC: extras.skinTempC > 0 ? extras.skinTempC : nil,
+            priorNights: strapPriorNightTemperatures(excluding: SleepNightKey.night(inBedStart: window.start,
+                                                                                    inBedEnd: window.end),
+                                                     log: log)))
+        if let score = scores.sleepScore { extras.sleepScore = score }
+        if let stress = scores.stressScore { extras.stressScore = stress }
+    }
+
+    // MARK: The repair pass
+
+    /// Score every strap night stored with no Sleep Score. Returns the nights it scored, newest
+    /// first, or `[]`.
+    ///
+    /// WHY A PASS IS NEEDED AT ALL, when `saveHelioNight` now scores on the way in:
+    ///   • a re-sync that keeps the stored night returns `.keptFullerStoredNight` (or
+    ///     `.keptManualEdit`) BEFORE `applyExtras` runs — its own comment says so — so a night first
+    ///     stored by a build without this fix could never pick up a score from a later sync;
+    ///   • builds 59–62 stored strap nights with no score at all, and the wearer's Readiness for
+    ///     today is exactly the night those builds stored.
+    ///
+    /// ⚠️ WHAT IT WILL NOT TOUCH, and each clause is load-bearing:
+    ///   • a night the strap doesn't own — a ring night is the ring's to score (decision 28), and
+    ///     with an empty ownership log EVERY night is the ring's, so a ring-only install is
+    ///     byte-identical;
+    ///   • a manually edited night — the wearer's word stands, and `applySleepEdit` writes its own
+    ///     score (decision 13);
+    ///   • a night with an empty stored hypnogram — there is nothing to score at second precision,
+    ///     and the rounded minutes are not an acceptable substitute (`SleepScoreHeal`'s argument);
+    ///   • a night that already has a score — the predicate is `sleepScore == 0`, so a scored night
+    ///     is skipped for ever after, which is also what makes a second run a no-op;
+    ///   • `stressScore`, when it is already non-zero.
+    /// And it never writes a computed 0: `StoredNightScore` reports that as "no score", because
+    /// writing the sentinel back would claim a repair that changed nothing.
+    ///
+    /// ⚠️ `row.updatedAt` IS BUMPED on a row it scores, for the reason `healWithheldSleepScores`
+    /// records: the Sleep card and Readiness are `@Query`-backed and would otherwise keep showing
+    /// the empty badge until something else touched the row. Only the two score columns and
+    /// `updatedAt` change — the minutes, the window, the hypnogram and every provenance column are
+    /// left exactly as stored, so this turns a missing number into the number the night would have
+    /// been stored with and restates nothing about the night.
+    ///
+    /// IDEMPOTENT AND DELIBERATELY NOT LATCHED, like `healWithheldSleepScores` and for the same
+    /// reasons: it is cheap (one fetch over a table with one row per night), a scored row is skipped
+    /// by the predicate, and un-latched means a row that arrives LATER — from a restore, from a
+    /// night re-keyed after the first run, or from a sync that fills in the HRV — is still picked up.
+    @discardableResult
+    func scoreUnscoredHelioNights() throws -> [Date] {
+        let log = Self.ownershipLog()
+        // A ring-only install: every night is the ring's, so there is nothing this pass may touch.
+        guard !log.isEmpty else { return [] }
+        let rows = try context.fetch(FetchDescriptor<StoredSleepSummary>())
+        let strapNights = rows.filter {
+            $0.inBedEnd > $0.inBedStart
+                && log.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd) == .zeppOS
+        }
+        guard !strapNights.isEmpty else { return [] }
+        // The baseline pool is built ONCE from the strap's own nights, exactly as the save-time path
+        // builds it, and each night excludes its own key below.
+        let pool = strapNights.filter { $0.skinTempC > 0 }
+            .sorted { $0.night > $1.night }
+            .prefix(Self.helioScoreBaselineNights)
+            .map { (night: $0.night, celsius: $0.skinTempC) }
+
+        var scored: [(night: Date, score: Int)] = []
+        for row in strapNights where row.sleepScore == 0 && !row.isManuallyEdited {
+            guard !row.hypnogramData.isEmpty else { continue }
+            let segments = SleepHypnogramCodec.decode(row.hypnogramData)
+            let window = DateInterval(start: row.inBedStart, end: row.inBedEnd)
+            let tonight = Calendar.current.startOfDay(for: row.night)
+            let scores = StoredNightScore.scores(.init(
+                segments: segments,
+                heartRate: helioHeartRate(in: window, device: nil),
+                rmssd: helioRMSSD(in: window, device: nil),
+                skinTempC: row.skinTempC > 0 ? row.skinTempC : nil,
+                priorNights: pool.filter { Calendar.current.startOfDay(for: $0.night) != tonight }
+                    .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.celsius) }))
+            guard let score = scores.sleepScore else { continue }
+            row.sleepScore = score
+            // Never overwrite a stored recovery number, and never write a computed 0 over it.
+            if row.stressScore == 0, let stress = scores.stressScore { row.stressScore = stress }
+            row.updatedAt = Date()
+            scored.append((row.night, score))
+        }
+
+        if !scored.isEmpty { try context.save() }
+
+        for item in scored.sorted(by: { $0.night > $1.night }) {
+            // The night KEY and the score only — no clock time, no temperature, no HRV — matching
+            // the granularity of the sleep breadcrumbs around it.
+            ObservabilityStore().recordMetricEvent(
+                source: "sleep-score-strap",
+                detail: "night=\(Self.helioNightStamp(item.night)) SCORED strap night -> \(item.score) "
+                    + "(rebuilt from the stored hypnogram; builds 59-62 stored it unscored)")
+        }
+        return scored.map(\.night).sorted(by: >)
+    }
+
+    /// Compact local night stamp for the breadcrumb — never user-facing and never a health value,
+    /// just enough to identify a night in a diagnostics bundle. Its own formatter because
+    /// `LocalStore`'s is `private` and therefore file-scoped; the format matches it exactly so the
+    /// sleep breadcrumbs all read the same way.
+    private static let helioNightStampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm"
+        return f
+    }()
+
+    private static func helioNightStamp(_ date: Date) -> String { helioNightStampFormatter.string(from: date) }
+
+    // MARK: The strap's own rows
+
+    /// The strap's heart-rate readings inside `window`. `device` nil means any Zepp OS timeline,
+    /// which is what the repair pass has: `StoredSleepSummary` carries no device column, so a stored
+    /// night can only be attributed to a FAMILY (decision 28), and its baseline is family-wide too.
+    private func helioHeartRate(in window: DateInterval, device: SyncDeviceID?) -> [HRSample] {
+        helioRows(kind: .heartRate, in: window, device: device)
+            .map { HRSample(bpm: Int($0.value.rounded()), start: $0.start, end: $0.end) }
+    }
+
+    /// The strap's HRV readings inside `window`, in ms, taken as RMSSD (decision 44, 🟡 — see the
+    /// file header). Stored as `.hrvSDNN` because that is the app's only HRV kind.
+    private func helioRMSSD(in window: DateInterval, device: SyncDeviceID?) -> [Int] {
+        helioRows(kind: .hrvSDNN, in: window, device: device)
+            .map { Int($0.value.rounded()) }
+            .filter { $0 > 0 }
+    }
+
+    /// Rows of one kind inside `window` that a Zepp OS device recorded for time it owned
+    /// (decision 28: a device's catch-up of the other's time feeds nothing derived). `device` pins
+    /// it to one strap's timeline; nil accepts any.
+    ///
+    /// The ownership filter is a backstop — `HelioStoreSink.owned` already drops un-owned rows at
+    /// ingest — but it is the rule this value depends on, so it is stated rather than assumed.
+    private func helioRows(kind: MetricKind, in window: DateInterval,
+                           device: SyncDeviceID?) -> [QuantitySample] {
+        guard window.end > window.start else { return [] }
+        let kindRaw = kind.rawValue
+        let start = window.start
+        let end = window.end
+        var predicate = #Predicate<StoredSample> {
+            $0.kindRaw == kindRaw && $0.start >= start && $0.start < end && $0.value > 0
+        }
+        if let device {
+            let deviceID = device.rawValue
+            predicate = #Predicate<StoredSample> {
+                $0.kindRaw == kindRaw && $0.deviceID == deviceID
+                    && $0.start >= start && $0.start < end && $0.value > 0
+            }
+        }
+        let descriptor = FetchDescriptor<StoredSample>(predicate: predicate,
+                                                       sortBy: [SortDescriptor(\.start)])
+        let log = Self.ownershipLog()
+        return ((try? context.fetch(descriptor)) ?? [])
+            .filter { log.isOwn(recordedBy: SyncDeviceID(rawValue: $0.deviceID), at: $0.start, by: .zeppOS) }
+            .compactMap(\.sample)
+    }
+
+    /// PRIOR nights' mean skin temperatures from the STRAP's own nights (decision 29), newest first,
+    /// excluding `tonight`'s key. The ring's own shape (`RingSession.computeSleepExtras`), with the
+    /// family swapped: `only(.zeppOS, …, time: \.inBedStart)` is `owner(ofNightFrom:to:)` per row.
+    private func strapPriorNightTemperatures(excluding tonight: Date,
+                                             log: DeviceOwnershipLog) -> [SkinTempBaseline.NightlyTemp] {
+        let rows = (try? recentSleepSummaries(limit: Self.helioScoreBaselineNights)) ?? []
+        let tonightDay = Calendar.current.startOfDay(for: tonight)
+        return log.only(.zeppOS, rows, time: \.inBedStart)
+            .filter { $0.skinTempC > 0 && Calendar.current.startOfDay(for: $0.night) != tonightDay }
+            .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }
+    }
+}

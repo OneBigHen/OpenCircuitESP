@@ -1,12 +1,12 @@
 import SwiftUI
 
 /// The Today card while the Helio Strap is the chosen device (#215): connection and key state,
-/// battery, last sync, "Sync now", live heart rate when the strap sends it, and the in-app-only
-/// readings. It takes the place of the ring's connection card; nothing ring-only is shown.
+/// battery, last sync, "Sync now", and live heart rate when the strap sends it. It takes the place of
+/// the ring's connection card; nothing ring-only is shown. The strap's stress and PAI are Your Numbers
+/// tiles, not lines on this card (decision 49).
 struct HelioConnectionCard: View {
     let connection: HelioConnection
     var onSetUp: () -> Void = {}
-
     /// Cached like `HelioSetupView`'s (review-224 N8): `hasKey` is a Keychain query, so it is read on
     /// appear and whenever the link or session phase moves, not on every render.
     @State private var hasKey = HelioKeyStore.shared.hasKey
@@ -41,12 +41,14 @@ struct HelioConnectionCard: View {
             HelioStatusRow(status: status)
             actions
             liveHeartRate
-            appOnlyReadings
             if let warnings = session?.recordingWarnings, !warnings.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("The strap isn't recording everything").font(.caption.weight(.semibold))
                     ForEach(warnings, id: \.self) { Text($0).font(.caption2).foregroundStyle(.secondary) }
-                    Text("Turn these on in the Zepp app's health monitoring settings.").font(.caption2).foregroundStyle(.secondary)
+                    // Point at Measurement only when it can change them now (review-240 N3).
+                    Text(session?.canFixRecordingWarningsHere == true
+                         ? "Turn these on in Helio Strap ▸ Measurement."
+                         : "Turn these on in the Zepp app's health monitoring settings.").font(.caption2).foregroundStyle(.secondary)
                 }
             }
         }
@@ -100,33 +102,5 @@ struct HelioConnectionCard: View {
             }
             .accessibilityElement(children: .combine)
         }
-    }
-
-    /// Stress and PAI (decision 15): shown here, never written to Apple Health.
-    @ViewBuilder
-    private var appOnlyReadings: some View {
-        let result = session?.lastSyncResult
-        if result?.latestStress != nil || result?.latestPAI != nil {
-            HStack(spacing: 16) {
-                if let stress = result?.latestStress {
-                    reading("Stress", value: "\(Int(stress.value))", at: stress.at)
-                }
-                if let pai = result?.latestPAI {
-                    reading("PAI", value: "\(Int(pai.value.rounded()))", at: pai.at)
-                }
-                Spacer()
-            }
-            Text("Stress and PAI stay in the app: Apple Health has no type for them.")
-                .font(.caption2).foregroundStyle(.tertiary)
-        }
-    }
-
-    private func reading(_ title: String, value: String, at: Date) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption2).foregroundStyle(.secondary)
-            Text(value).font(.headline.monospacedDigit())
-            Text(at.formatted(date: .omitted, time: .shortened)).font(.caption2).foregroundStyle(.tertiary)
-        }
-        .accessibilityElement(children: .combine)
     }
 }

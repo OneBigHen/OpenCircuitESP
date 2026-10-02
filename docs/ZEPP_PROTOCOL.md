@@ -218,6 +218,7 @@ Gadgetbridge resets it to 0 on reconnect before re-auth overwrites it (`ENC:160-
 | `0x0016` | steps (realtime) | no | 🟡 `SVC/Steps:34,45` |
 | `0x0017` | user info | yes | 🟡 `SVC/UserInfo:45,51` |
 | `0x0018` | vibration patterns (§13.1) | yes | 🟡 `SVC/VibrationPatterns:44,50` |
+| `0x0019` | workout status, phone GPS (§16.2, §18) | yes | 🟡 `SVC/Workout:42,70` |
 | `0x001A` | find device / find phone (§11) | yes | 🟡 `SVC/FindDevice:34,60` |
 | `0x001D` | heart rate (realtime control) | no | 🟡 `SVC/HeartRate:36,59` |
 | `0x001E` | notifications: **not used for the strap** (§13.3) | yes | 🟡 `SVC/Notification:59,98` |
@@ -231,7 +232,7 @@ Gadgetbridge resets it to 0 on reconnect before re-auth overwrites it (`ENC:160-
 `0x0017`. They are unrelated namespaces.)
 
 The `0x000F`, `0x0018`, `0x001A` and `0x001E` rows were added by the device-controls addendum
-(§11–§15). As with every row, the services list (§5.2) decides whether the endpoint exists on
+(§11–§15). The `0x0019` row was added by the parity addendum (§16–§21). As with every row, the services list (§5.2) decides whether the endpoint exists on
 the connected strap and whether it is encrypted.
 
 **The Helio Strap's services list** (🟢 `HW:2026-09-30 (hw 0.132.27.2)`): 28 endpoints, `*` = encrypted:
@@ -715,7 +716,7 @@ support, and the strap inherits all Zepp OS defaults except display-dependent on
 |---|---|---|---|---|---|---|---|
 | `0x01` | **activity** | **8 bytes/min** on Zepp OS: `[0]` kind, `[1]` intensity, `[2]` steps, `[3]` HR, `[4]` unknown, `[5]` sleep, `[6]` deep-sleep, `[7]` REM (sleep bytes: use low 7 bits) | 1/min from *start* | steps = count in that minute; HR bpm, `ff` or `00` = no reading (HelioCore drops them; GB stores raw); intensity 0–255 (GB divides by 256). CRC is **not** checked by GB for this type; on the Helio it **matches** like every type that has delivered data (60 records / 480 B, and a full 12 h round of 720 records / 5760 B); manual HR `0x02`, manual stress `0x12` and max HR `0x3d` have only answered empty, so their CRC has never been observed. | per-minute activity sample | yes (always) | 🟢 8 bytes/min, length in records `HW:2026-09-30 (hw 0.132.27.2)`; 🟢 CRC `HW:2026-09-30 13:35`; fields 🟡 `FOP/Activity:71-164`, `SUP:984-986`, `HC:1180-1193` |
 | `0x02` | manual HR | 6 bytes: u32 ts, i8 tz (¼ h), u8 bpm | event | bpm | manual-HR sample | yes | 🟡 `FOP/HeartRateManual:63-90` (only empty replies on the Helio so far) |
-| `0x0d` | PAI | 102 bytes: u8 type (`05` valid, `00` pre-reset: skip), u32 ts, i8 tz, 31 unknown, f32 PAI low, f32 moderate, f32 high, u16 min low, u16 min moderate, u16 min high, f32 PAI today, f32 PAI total, 39 unknown | daily | PAI points, minutes | PAI sample | yes | 🟢 102-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Pai:62-129` |
+| `0x0d` | PAI | 102 bytes: u8 type (`05` valid, `00` pre-reset: skip), u32 ts, i8 tz, 31 unknown, f32 PAI low, f32 moderate, f32 high, u16 min low, u16 min moderate, u16 min high, f32 PAI today, f32 PAI total, 39 unknown. **We store** the f32 PAI **total** of each kept record as one phone-only `MetricKind.pai` row at the record's own time (`ZeppMetricMapping.paiSamples`, decision 45); the app's PAI tile shows the newest (decision 49). Never written to Apple Health (no PAI type) | daily | PAI points, minutes | PAI sample | yes | 🟢 102-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Pai:62-129` |
 | `0x12` | stress (manual) | 5 bytes: u32 ts, u8 stress | event | 0–100 | stress, type manual | yes | 🟡 `FOP/StressManual:64-95` (only empty replies on the Helio so far) |
 | `0x13` | **stress (auto)** | 1 byte/min, `ff` = none (the minute still advances) | 1/min from *start* | 0–100; bands 0–39 relaxed, 40–59 mild, 60–79 moderate, 80–100 high | stress, type automatic | yes | 🟢 1 byte/min, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/StressAuto:62-91`, `HC:1195-1199` |
 | `0x25` | **SpO₂** (normal: manual + auto) | one leading **version byte `02`** per round, then 65-byte records: u32 ts, u8 value (**bit 7 set = automatic**, value = low 7 bits), 60 unknown bytes. Other versions: reject. | event | % | SpO₂ sample, type auto/manual | yes | 🟢 version `02` + 65-byte records, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Spo2Normal:64-103`, `HC:1201-1212` |
@@ -725,7 +726,7 @@ support, and the strap inherits all Zepp OS defaults except display-dependent on
 | `0x3a` | **resting HR** | 6 bytes: u32 ts, i8 tz, u8 bpm | ~daily (Zepp shows it per day) | bpm | resting-HR sample | yes | 🟢 6-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/HeartRateResting:63-91`, `HC:1214-1222` |
 | `0x3d` | **max HR** | 6 bytes: u32 ts, i8 tz, u8 bpm | ~daily 🔴 | bpm | max-HR sample | yes | 🟡 `FOP/HeartRateMax:63-90` (only empty replies on the Helio so far) |
 | `0x48` | **sleep session** | **594-byte** records, see §6.6 | per night | minutes | sleep-session blob; stages overlaid on activity | yes | 🟢 594-byte record, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/SleepSession:59-85` |
-| `0x49` | **HRV** | 6 bytes: u32 ts, u8 unknown (🔴 probably the tz byte, as in the 6-byte HR records), u8 HRV | a few per day/night 🔴 | **ms**; statistic **unknown** (RMSSD vs SDNN, 🔴) | HRV value | yes (no display) | 🟢 6-byte records, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Hrv:59-85`, `HC:1236-1245` |
+| `0x49` | **HRV** | 6 bytes: u32 ts, u8 unknown (🔴 probably the tz byte, as in the 6-byte HR records), u8 HRV | a few per day/night 🔴 | **ms**; statistic **RMSSD** 🟡: Amazfit documents that "Amazfit devices measure HRV using the RMSSD method" (https://us.amazfit.com/pages/amazfit-technology-page-health-technology; a product-line statement, the Helio Strap is not named), and a third-party Helio review says the same. Not compared with Zepp's display on our strap (§10 item 9); a capture that contradicts it wins | HRV value | yes (no display) | 🟢 6-byte records, CRC `HW:2026-09-30 (hw 0.132.27.2)`; fields 🟡 `FOP/Hrv:59-85`, `HC:1236-1245`; statistic 🟡 Amazfit product-line documentation (2026-10-01) |
 | `0x2c` | statistics | opaque files; fetched only so the strap frees memory | — | — | discarded | yes | 🟡 `FOP/Statistics` |
 | `0x05` / `0x06` | workout summary / detail | binary summary + track; **out of scope for v1**, not specified here | per workout | — | workouts | yes | 🟡 `FOP/SportsSummary`, `FOP/SportsDetails` |
 | `0x07` | debug logs | — | — | — | — | no | 🟡 `GB/…/fetch/HuamiFetchDataType.java:24` |
@@ -919,7 +920,8 @@ Record firmware (DIS `0x2A26` or endpoint `0x0043`) with every run. The Helio ha
 9. **Fetch each type** in §6.5 over Path A for a 24 h window: record length rules, versions,
    first-record time vs *since*, and compare values against Gadgetbridge (or Zepp) for the
    same window. Specifically: HRV unknown byte (tz?), HRV statistic (compare to Zepp's
-   displayed HRV), temperature constants, sleep-session minute base (midnight vs noon).
+   displayed HRV; §6.5 holds RMSSD 🟡 on Amazfit's product-line documentation), temperature
+   constants, sleep-session minute base (midnight vs noon).
 10. **Ack semantics**: fetch a type, ack `09`, fetch again with the same *since*: same data
     re-delivered? Then (once, on a window already validated) ack `01` and fetch again.
 11. **Tier 0 live HR**: with Heart Rate Push on, connect **without** auth and subscribe to
@@ -959,6 +961,60 @@ as the Zepp app shows them, so they can be restored by hand.
     §13.4.
 21. **Strap-originated find phone**: is there any gesture (e.g. a multi-tap) that makes the strap
     send `11` on `0x001A`? Promotes §11.5.
+
+Parity addendum (§16–§21). Items 22–24 need nothing but an idle link; leave the Zepp app unable
+to connect (phone Bluetooth off) so that every message seen is the strap's.
+
+22. **Idle link**: after auth and the §5 setup, keep the link up and idle for at least 2 hours
+    (overnight is better), the Mac awake. Log every unsolicited chunked message (time, endpoint,
+    first byte, length, never the payload) and every disconnect (time, reason). Does the strap
+    drop an idle link, and after how long? Does it send pings (`03` on `0x0015`), and how often?
+    Promotes §16.2 rows 12–13 and §16.3.
+23. **Sleep events**: the same idle link through a night, and on another day through a nap.
+    Record the arrival time of any `06 01` / `06 00` on `0x001D`, then compare with that night's
+    `0x48` record (§6.6). Then on another night disconnect before sleep and reconnect after
+    waking: are the events delivered late (queued) or lost? Promotes §16.2 rows 1–2 and §16.4.
+24. **GATT extras and battery**: does `…0010` exist, and with which properties; does `0x2A19`
+    support notify? With the link idle, put the strap on its charger and take it off: does
+    anything arrive (on `…0017`, `0x2A19` or `…0010`)? Promotes §16.2 rows 6–7.
+25. **Config writes** (§17). First write down every HEALTH and WORKOUT setting as the Zepp app
+    shows it, and restore them all at the end. Read every listed group with constraints and arg
+    count `00` (`03 01 <group> 00`): record each group's version and the arg codes and type codes
+    present, not their values. Then one ordinary write (e.g. relax reminder `14` on, with stress
+    monitoring `13` already on): record the `06` reply bytes, then re-read. Then three rejection
+    probes, each followed by a re-read: (a) a high-HR alert value (`02`) outside the allowed
+    list; (b) relax reminder on while stress monitoring is off; (c) a write whose version byte is
+    one more than the version read. Record exactly what came back (an ack status, nothing, or a
+    value silently kept). Also record whether HEALTH arg `01` is present and its allowed values.
+    Promotes §17.1, §17.3, §17.4, §17.7 and §17.9.
+26. **Workouts** (§18). No capture can reveal the phone's start/pause/resume/end commands:
+    `0x0019` is encrypted with a session key that only the two ends can derive (§18.1). What can
+    be observed: (a) with an idle link held as in item 22 and workout detection on, walk briskly
+    until the strap auto-detects a workout: does anything arrive on `0x0019` (`11 01`, `11 04`,
+    something else) when it starts and ends? (b) Start a workout in the Zepp app, then turn the
+    phone's Bluetooth off and connect HelioVerify: does the strap send anything on `0x0019`?
+    Later, reconnect Zepp and record how long the workout kept running and whether Zepp could
+    still end it. Promotes §16.2 rows 8–9, §18.3 and §18.4.
+27. **Workout detection switch** (§19). In the Zepp app, turn Workout Detection **off**, let Zepp
+    release the strap, and read WORKOUT group `09` with constraints and arg count `00`. Then turn
+    it **on** in Zepp (note the sensitivity Zepp shows) and read again. Diff the two replies: which
+    arg changed (an empty `40` list, or an arg not in §19.1)? Record the group version, the args
+    present with their type codes, and the allowed lists of `40` and `42`. Restore Zepp's original
+    setting. Promotes §19.1 and §19.2.
+28. **Strap alerts** (§20). During the idle-link sessions of items 22–23, note the time of every
+    buzz the wearer feels (an alarm, an HR, SpO₂ or relax alert) and check the log for any message
+    within a minute of it. The one alert that needs no setting change and can be provoked: hold an
+    idle link while the strap's battery drains past 20 %; it buzzes there (§13.4). Does anything
+    arrive on `…0017`, `0x2A19` or `…0010`? Promotes §20.1.
+29. **Naps** (§21). On a day with a normal night, take a 30–60 minute nap in the afternoon, more
+    than an hour after waking, and check that the Zepp app shows it as a nap. Then fetch `0x48`
+    over the last 24 h (ack `09`). Record the number of 594-byte records and, for each, only its
+    structure: the bytes at `0x008` and `0x009`, whether the "midnight" field (`0x004`) is the same
+    for the nap and the night, and whether any other byte outside the stage table and the HR /
+    score fields differs systematically. Don't record times or values. Separately, on one night,
+    fetch `0x48` while asleep (from an automated run) and again after waking with the same *since*:
+    is a partial record delivered, and does it come back later with the same session timestamp
+    and different content? Promotes §21.3 and §21.4.
 
 ### 10.1 Results from a real strap (2026-09-30)
 
@@ -1036,7 +1092,8 @@ sampling switch, recorded to settle §5.5).
 
 **Still untested** (keep their tags): wrong-key auth (`10 05 25`); ack `01` (delete); Tier 0
 live HR without auth; Zepp-app coexistence; time set (`0x0047`, `06 01`); the HRV statistic
-(RMSSD vs SDNN). Also not yet observed: the width of the device-info bit-0 prefix (§5.3; not
+(RMSSD vs SDNN; §6.5 holds RMSSD 🟡 on Amazfit's product-line documentation, which doesn't name
+the strap, and no value has been compared with Zepp's). Also not yet observed: the width of the device-info bit-0 prefix (§5.3; not
 recorded in the re-test); the advertisement; chunk acks; write types;
 Path B (`0x004B`); arg `0x05` vs "Heart Rate Push"; the device's sequence numbers; any value
 compared against Zepp (HRV unknown byte, temperature constants, sleep-session minute base);
@@ -1584,6 +1641,727 @@ allowed values or min/max → write **one** arg, echoing the group version from 
 
 ---
 
+## 16. What the strap sends on its own
+
+This section and §17–§21 are the **parity addendum** (2026-10-01). §16 lists every message
+the strap may send on an **authenticated, idle link**: after the §5 setup, with no fetch and no
+command of ours in flight. It is written for the background-sync work (#233). New sources
+here are `SVC/Workout` (endpoint `0x0019`), Gadgetbridge's Bluetooth-Classic transport, cited
+only for contrast as `GB/service/devices/huami/zeppos/ZeppOsBtbrSupport.java`, and the legacy
+(pre-Zepp OS) Huami device-event list `GB/service/devices/huami/HuamiDeviceEvent.java`.
+
+### 16.1 What Gadgetbridge subscribes to, and when
+
+| Characteristic | Subscribed | Carries | Tag / source |
+|---|---|---|---|
+| `…0017` chunked-read | **at connect, before auth, for the whole connection** | every chunked message from the strap, on every endpoint (§3) | 🟡 `BTLE:128-147`, `SUP:1069-1074,1131-1142,1167-1181` |
+| `…0004` / `…0005` | around a history-fetch batch only, then disabled | fetch control and data (§6) | 🟡 `SUP:959-965`, `GB/service/devices/huami/HuamiFetcher.java:170-202` |
+| `0x2A37` | only while live HR is on: the user's live-HR screen, a one-shot HR test, or a Sleep as Android session | live HR (§7.1) | 🟡 `SVC/HeartRate:112-149`, `SUP:731-740` |
+| `…0002` raw sensor | only while raw-sensor streaming is on (a Sleep as Android feature) | accelerometer | 🟡 `SUP:998-1012` |
+| `…0023` / `…0024` | only during a file transfer | files (not needed) | 🟡 `GB/service/devices/huami/zeppos/services/filetransfer/ZeppOsFileTransferImpl.java:118-119` |
+| `…0016` chunked-write | **never**. Gadgetbridge has a handler for chunk acks arriving there (§3.4) but no code path enables notifications on it | — | 🟡 `SUP:1074-1076,1144-1156` (no `notify` call for it anywhere in the Zepp OS code) |
+| `0x2A19` battery, `…0010` legacy device events | **never** | — | 🟡 (no subscription in the Zepp OS code) |
+
+So on an idle Gadgetbridge link, the strap can reach the phone **only through chunked messages
+on `…0017`** (plus `0x2A37` while live HR is on). Everything in §16.2 arrives that way.
+
+At session setup (§5), only one of Gadgetbridge's service initialisers changes what the strap
+sends unprompted: it **turns realtime steps off** (`05 00` on `0x0016`), because that stream stays
+enabled across connections. 🟡 `SVC/Steps:53-57`. The others send requests (battery, config,
+alarms, find-device capabilities) or write state (time, user info, vibration patterns, fitness
+goals; §15.1), and none of them subscribes to anything.
+
+### 16.2 Catalogue of unsolicited messages
+
+"Queued" asks whether the strap holds the message while no phone is connected and delivers it
+on the next connection. **Neither reference says so for any message**, and none of these
+messages carries a timestamp, so a late delivery could not be told from a live one. Every
+"queued" cell is therefore 🔴 unknown.
+
+| # | Message | Endpoint (Helio encryption) | When the strap sends it | Needs | What Gadgetbridge does | Tag / source |
+|---|---|---|---|---|---|---|
+| 1 | **fell asleep** `06 01` | `0x001D` heart rate (plaintext) | 🔴 when the strap's own sleep detection decides you fell asleep. Latency, and whether naps (§21) also trigger it, are unknown | the `…0017` subscription. No known setting or subscription; 🔴 whether it depends on a HEALTH sleep switch (`0x11`, §5.5) | raises a "fell asleep" device event. That runs only the user's configured device actions (e.g. an Android broadcast) and **never starts a fetch** | 🟡 format `SVC/HeartRate:40-43,74-88`; event handling `GB/deviceevents/GBDeviceEventSleepStateDetection.java:53-89` (fetched from the pinned commit); 🔴 whether the Helio sends it at all |
+| 2 | **woke up** `06 00` | `0x001D` (plaintext) | 🔴 as row 1, on waking | as row 1 | "woke up" device event, as row 1 | as row 1 |
+| 3 | other `06 xx` | `0x001D` | — | — | logged as unexpected | 🟡 `SVC/HeartRate:84-86` |
+| 4 | **live HR** (standard HRS frames) | `0x2A37` notification | about once a second, only after `04 01` on `0x001D` **and** while the phone keeps sending `04 02` (§7.1). 🔴 whether "Heart Rate Push" (a persistent setting, §5.5 arg `0x05`) makes the strap stream to any subscriber without `04 01` | the `0x2A37` subscription plus the 1 s keep-alive | if a frame arrives while Gadgetbridge did not ask for live HR, it sends `04 00` and unsubscribes (a fail-safe) | 🟢 1/s with the keep-alive `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `SVC/HeartRate:151-172` |
+| 5 | **realtime steps** `07` + 13 bytes (steps = u16 LE at offset 1 of the 13) | `0x0016` steps (plaintext) | 🔴 on step changes, only while enabled | `05 01` on `0x0016`, which **persists across connections** (ack `06 <status> <enabled>`) | normally off: Gadgetbridge sends `05 00` at every connect and `05 01` only for its live-activity screen | 🟡 `SVC/Steps:36-40,53-57,73-80,98-110` |
+| 6 | **battery** `04` + 20 bytes (§5.3) | `0x0029` (plaintext) | 🔴 **no unsolicited battery message is known**. Gadgetbridge only ever sees it as the reply to its `03` request at session setup; its handler would accept one at any time | — | updates the battery level and charging flag | 🟡 `SVC/Battery:46-70` |
+| 7 | **charging / not worn** | — | **no message known.** The strap's own state shows up only in history: activity minutes of kind `0x76` (charging) and `0x73` (not worn), §6.5 | — | — | 🟡 (absent from both references); the legacy Huami bands had a device-event characteristic `…0010` with events "fell asleep" `01`, "woke up" `02` and "start non-wear" `06` (`GB/service/devices/huami/HuamiDeviceEvent.java:20-25`, `GB/devices/huami/HuamiService.java:52`), but the Zepp OS code never subscribes to it. 🔴 whether the Helio exposes `…0010` |
+| 8 | **workout opened on the device** `20 <b1> <gps> <type> …` | `0x0019` workout (**encrypted**) | when a workout is opened on the device's own screen. Byte `[2]` = `01` if the workout needs GPS, byte `[3]` = the workout type code (§18.2); byte `[1]` is not read | — | if GPS is needed: sends a phone-GPS status, then locations while the user allows it (§18.5) | 🟡 `SVC/Workout:46,86-103,152-166`; 🔴 for the Helio, which has no screen (§18.1) |
+| 9 | **workout started** `11 01` / **ended** `11 04` | `0x0019` (encrypted) | when a workout starts / ends | — | optional: starts / stops a recording in the OpenTracks app; on end, stops sending GPS | 🟡 `SVC/Workout:45-49,104-118,168-187`; 🔴 whether the Helio sends them for phone-started (§18) or auto-detected (§19) workouts; other status bytes are logged as unexpected |
+| 10 | **alarms changed** `0f` | `0x000F` alarms (plaintext) | §12.5 | — | re-reads the alarm list | 🟡 §12.5 |
+| 11 | **find stopped on the strap** `07`; **find phone** `11`, `13`, `15 <mode>` | `0x001A` (encrypted) | §11.3, §11.5 | — | §11.5 | 🟡 §11.3, §11.5 |
+| 12 | **connection ping** `03` | `0x0015` connection (plaintext) | 🔴 "sometimes"; no interval is documented | — | answers `04` on the same endpoint | 🟡 `SVC/Connection:34-35,54-58` |
+| 13 | **MTU announce** `02` + u16 LE (= MTU − 3) | `0x0015` (plaintext) | 🔴 unknown trigger | — | adopts the new MTU for its own chunking (if high MTU is allowed and the value is ≥ 23) | 🟡 `SVC/Connection:49-53`, `SUP:1113-1128` |
+| 14 | config reply / ack `04 …` / `06 …` | `0x000A` (encrypted) | as replies only. 🔴 whether the strap pushes a `04` when a setting changes on its side (e.g. from the Zepp app) | — | stores whatever arrives; no special unsolicited handling | 🟡 `SVC/Config:124-146` |
+| 15 | chunk ack `04 …` | `…0016` | §3.4 | an `…0016` subscription, which Gadgetbridge never makes (§16.1) | logged only | 🟡 §3.4 |
+| 16 | **"new data available"** | — | **no such message exists in either reference.** No strap message makes Gadgetbridge fetch; every fetch starts on the phone. HelioCore fetches when its app opens. | — | — | 🟡 (absent from every Zepp OS service handler and from `HC:1115-1131`) |
+| 17 | anything on an endpoint no reference knows | the Helio lists 12: `0x000C*`, `0x0022`, `0x0025`, `0x0028`, `0x0030*`, `0x0031`, `0x0032`, `0x0036*`, `0x0048`, `0x0049`, `0x004D*`, `0x0081*` (`*` = encrypted) | 🔴 | — | Gadgetbridge logs "unhandled" | 🟢 the list `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `SUP:1174-1180` |
+
+Endpoints `0x0048` and `0x0049` coincide numerically with fetch types `0x48`/`0x49` (§6.5).
+They are unrelated namespaces, like the characteristic/endpoint coincidence in §3.5.
+
+### 16.3 Idle links: does the strap drop them, and how do the references keep them?
+
+| Fact | Tag / source |
+|---|---|
+| **No reference documents an idle timeout for the BLE link.** | 🔴 (§10 item 22) |
+| Gadgetbridge's BLE path sends **nothing periodic**: no keep-alive and no ping of its own. It only answers the strap's ping (row 12). | 🟡 `SVC/Connection:68-70` (`sendPing` is never called on the BLE path) |
+| Gadgetbridge's **Bluetooth-Classic** transport (not usable on iOS) does keep its link alive: it writes a ping whenever 24 minutes have passed without a write, and notes that the strap's pong alone is not enough and that the official app re-requests data now and then. Evidence that Zepp OS devices can drop a silent link; 🔴 whether the BLE link behaves the same. | 🟡 `GB/service/devices/huami/zeppos/ZeppOsBtbrSupport.java:367-369,394-408` |
+| Gadgetbridge re-establishes the BLE link with Android's **auto-connect** (the OS reconnects whenever the strap is in range). Every reconnect re-runs the whole setup: chunk encoder/decoder and fetcher reset, MTU back to 23, fresh auth (§4), services list, init (§5). | 🟡 `BTLE:115-118,128-147`, `SUP:292-305` |
+| A Gadgetbridge contributor used a Helio Strap for about two weeks with Sleep as Android, where a running sleep session makes Gadgetbridge fetch SpO₂ (`0x25`) every 60 s. Sleep sessions normally run all night, so the Helio appears to tolerate a link held for hours with periodic traffic (🔴 inference: the report doesn't mention disconnects either way). | 🟡 `GB#6488` (2026-07-29) |
+| HelioCore connects when its app opens and does nothing on a disconnect but update its UI: no reconnect, no keep-alive. | 🟡 `HC:644-720,1086-1088` |
+| Amazfit asks the user to keep the device connected during a workout and says the end of a workout cannot reach the strap without the link (§18.4). It also documents "Heart rate push" to other devices (§7.1). Both need long-lived links. | 🟡 `AMZ-M p.4,10,12` |
+
+**OpenCircuit mapping** (🔴 recommendation): the iOS equivalent of auto-connect is a pending
+`connect(_:options:)`, which never times out, plus CoreBluetooth state restoration; that is what
+the background-sync branch already does (`BACKGROUND_SYNC.md` §B.5 on `feat/helio-background`).
+Re-run §4–§5 after every reconnect. Never reuse a session key, handle counter or sequence
+number (§9).
+
+### 16.4 Wake sources for a suspended iOS app
+
+An iOS app with the `bluetooth-central` background mode is woken for **any notification on a
+characteristic it subscribed to** while the link is up, and for a pending connect that
+completes. That is Apple's CoreBluetooth behaviour, not something the references show. So
+every row of §16.2 that arrives on `…0017` *would* wake the app. The question is whether the
+strap sends it, and whether we must change a persistent strap setting to make it send.
+
+| Message (§16.2 row) | Arrives without changing any persistent strap setting? | Reliable enough to schedule work on? | Verdict |
+|---|---|---|---|
+| sleep events `06 01` / `06 00` (1, 2) | **yes**: nothing is written to the strap; only the `…0017` subscription that every session already has | 🔴 not shown to be sent by the Helio; timing, nap behaviour and queuing unknown | **opportunistic hint only.** On `06 00`, schedule a short sleep fetch (`0x48` + activity). The night's session record may not exist yet (§21.4), so keep the per-type cursor and fetch again later. Never write a sleep sample to Health from the event itself: it carries no time |
+| live HR `0x2A37` (4) | the stream itself needs `04 01` plus a `04 02` from the phone **every second**. That isn't a persistent setting, but a suspended app can't keep sending it. The "Heart Rate Push" route would need a persistent setting | n/a | **no** |
+| realtime steps `07` (5) | **no**: needs `05 01`, which persists across connections | n/a | **no** (never send `05 01` in the background) |
+| battery (6) | no unsolicited form known | — | **no** |
+| charging / not worn (7) | no message known | — | **no** |
+| workout `20` / `11 01` / `11 04` (8, 9) | yes, if sent at all | 🔴 unknown whether the Helio sends them | **no** (rare and unproven) |
+| alarms changed `0f` (10), find `07`/`11` (11) | yes | rare, user-driven | **no** (handle them when they come) |
+| connection ping `03` (12) | yes | 🔴 cadence unknown | **no**, but always answer `04` |
+| MTU announce (13) | yes | rare | **no** |
+| "new data available" (16) | does not exist | — | **no**: the strap never says it has data |
+
+**Bottom line:** no strap message is a dependable wake source. Background sync must rest on
+BGTasks and on the reconnect event (pending connect / restoration), and must fetch on a phone
+schedule. Sleep events are worth handling as a hint once §10 item 23 shows that the Helio sends
+them.
+
+### 16.5 Handling rules (🔴 recommendation)
+
+- Subscribe to `…0017` before auth (§2) and keep it for the whole connection. Don't subscribe to
+  `…0016`, `0x2A19`, `…0010` or `0x2A37` for background work.
+- Dispatch by endpoint, then by first byte. Handle rows 1–2 and 8–15 of §16.2. Answer a ping `03`
+  on `0x0015` with `04`. On an MTU announce, chunk at the smaller of the announced size and
+  `maximumWriteValueLength(for:)`.
+- An unsolicited message must **never** trigger a write that changes strap state. The only
+  replies allowed are the ping answer, the find-phone ack `12 01` (§11.5) and chunk acks (§3.4).
+- If `0x2A37` frames arrive that we did not ask for, do what Gadgetbridge does: send `04 00` on
+  `0x001D` and unsubscribe.
+- Never send `05 01` on `0x0016`. If a session finds realtime steps flowing (row 5 arriving
+  unasked), send `05 00` once: it only undoes a state someone else set and records nothing.
+- Unknown endpoint or first byte: log the endpoint, the first byte and the length, **never the
+  payload** (it may hold health data). Reply nothing.
+- Timestamp every event on arrival, and treat it as "at or before now", never as "now": queuing
+  is unknown.
+
+---
+
+## 17. Config writes (#228, #229, #230)
+
+§5.5 gives the config transport and §15.3 a one-line write recommendation. This section makes the
+write path complete: the message, the version echo, the ack, what a rejection may look like, the
+re-read, validation against the strap's constraints, and the dependencies between settings.
+Every write here is **persistent** (§15.1), and some change what the strap records (§5.5).
+
+### 17.1 Channel and groups
+
+| Fact | Tag / source |
+|---|---|
+| Endpoint `0x000A`, **encrypted** on the Helio (and by default). | 🟢 `HW:2026-09-30 (hw 0.132.27.2)`; 🟡 `SVC/Config:104,116` |
+| The Helio's config capabilities list groups `00` AGPS, `0b` BLUETOOTH, `08` HEALTH, `09` WORKOUT and `0a` SYSTEM. There is no SOUND & VIBRATION group `03`. | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` |
+| Gadgetbridge sends the capabilities request at session setup, then **reads every listed group it knows**, with constraints, asking for the args it knows in that group. | 🟡 `SVC/Config:148-151,283-307,363-371` |
+| A read with **arg count `00`** asks for every arg in the group. Gadgetbridge sends it only behind a debug switch, because the reply may contain types it can't parse. | 🟡 `SVC/Config:364-367` (this settles the 🔴 on "arg count `00`" in §5.5's read row) |
+| Gadgetbridge offers a setting only if its arg came back in a read reply **with the expected type code**. So a strap that lacks an arg is expected to leave it out of the reply. 🔴 whether the strap omits it silently or answers with an error status. | 🟡 `SVC/Config:1147-1148`, `GB/devices/huami/zeppos/ZeppOsSettingsCustomizer.java:198-205` |
+
+### 17.2 The write message
+
+```
+ +------+-------+---------+------+-------+--------------------------------------+
+ | 0x05 | group | version | 0x00 | count | count × entry (arg, type, value) ... |
+ +------+-------+---------+------+-------+--------------------------------------+
+   [0]    [1]      [2]       [3]    [4]     [5..]
+```
+
+| Field | Meaning | Tag / source |
+|---|---|---|
+| `[0]` = `05` | write ("set") | 🟡 `SVC/Config:110,944` |
+| `[1]` group | one group per message. To change args in two groups, send two messages. | 🟡 `SVC/Config:938-967` |
+| `[2]` version | the group's version. Gadgetbridge puts its own constant here; OpenCircuit echoes the read reply (§17.3) | 🟡 `SVC/Config:946` |
+| `[3]` = `00` | unexplained; always `00` | 🟡 `SVC/Config:947` |
+| `[4]` count | number of entries that follow | 🟡 `SVC/Config:948` |
+| entry | u8 arg code, u8 type code (§5.5), then the **value only**. A write never carries constraint bytes. | 🟡 `SVC/Config:949-954` |
+
+**Value encodings in a write** (little-endian), as Gadgetbridge's setter builds them. 🟡
+`SVC/Config:856-924`
+
+| Type | Code | Bytes written |
+|---|---|---|
+| bool | `0b` | `00` or `01` |
+| byte | `10` | 1 byte |
+| byte list | `11` | u8 n, then n bytes |
+| short | `01` | i16 |
+| int | `03` | i32 |
+| string | `20` | UTF-8, then `00` |
+| string list | `21` | **one** UTF-8 string (the chosen value), then `00` |
+| hh:mm | `30` | u8 hour, u8 minute |
+| short list `02`, timestamp `40`, unbounded int `50` | — | Gadgetbridge has no setter for these: **never write them** |
+
+Gadgetbridge sometimes puts several args of one group in one message (its fitness goals write
+six HEALTH args at once, `SVC/Config:233-263`). OpenCircuit writes **one arg per message**: one
+user action, one arg, one ack (§17.8).
+
+### 17.3 Group-version echo
+
+| Fact | Tag / source |
+|---|---|
+| Gadgetbridge always writes **its own constant** for the group (HEALTH `03`, WORKOUT `01`, SYSTEM `01`, BLUETOOTH `01`, AGPS `01`), never the version the strap reported. | 🟡 `SVC/Config:390-402,946` |
+| Gadgetbridge drops a read reply whose version differs from its constant, except HEALTH, where any version ≤ 3 is accepted and remembered. Since it only offers settings it parsed, it writes a non-HEALTH group only when the strap's version equals its constant. For a HEALTH v1 or v2 strap it writes `03`. 🔴 whether such a strap accepts that. | 🟡 `SVC/Config:318-327`, §9 |
+| Some **type codes depend on the group version**: the HEALTH steps goal (`52`) is a short at version 1 and an int from 2; the weight goal (`54`) is a short below 3 and an int from 3. | 🟡 `SVC/Config:595-625` |
+| The Helio's HEALTH group is version **3**, so for HEALTH the echo and Gadgetbridge's constant agree. The Helio's WORKOUT, SYSTEM, BLUETOOTH and AGPS versions were not recorded. | 🟢 HEALTH `HW:2026-09-30 (hw 0.132.27.2)`; 🔴 the others (§10 item 25) |
+
+**OpenCircuit rule** (🔴 recommendation, stricter than Gadgetbridge):
+- Write byte `[2]` = the version from **the latest read reply for that group in this connection**.
+  No read in this connection → read first.
+- Write each entry's type code **as the read reply reported it for that arg**, never a hard-coded
+  one. If it differs from the type this spec gives for the arg, the setting is unsupported.
+- Write only to group versions whose args this spec describes: HEALTH 1–3, WORKOUT 1, SYSTEM 1.
+  For any other version, show the value read-only.
+
+### 17.4 The ack, and what a rejected write looks like
+
+| Fact | Tag / source |
+|---|---|
+| The strap answers a write with `06 <status>`. Gadgetbridge **only logs** the status; it never checks it and never re-reads. | 🟡 `SVC/Config:111,131-133` |
+| The ack carries no group and no arg, so it can only be matched to a write by order. | 🟡 (layout) |
+| Status `01` = success. | 🔴 by analogy with every other Zepp OS ack in this document; never observed for config on the Helio (§10.1: nothing was written) |
+| **A rejected write is not described by either reference.** Three outcomes are possible: (a) `06` with a status other than `01`; (b) no `06` at all; (c) `06 01`, but the re-read shows the old value. | 🔴 (§10 item 25) |
+| A read reply with a status other than `01` is dropped by Gadgetbridge. | 🟡 `SVC/Config:135-139` |
+
+**OpenCircuit rule** (🔴): allow **one config write in flight** on `0x000A`, and don't interleave
+reads of other groups with it. Wait up to 5 s for `06`. Treat (a), (b) and (c) alike as
+**"the strap did not take the change"**: show the strap's re-read value and an error, and never
+retry by itself. A late `06` that arrives after the timeout is ignored.
+
+### 17.5 Re-read
+
+After the ack (or the timeout), read the same arg again with constraints:
+`03 01 <group> 01 <arg>`. 🔴 recommendation; the read itself is 🟡 (§5.5).
+
+- The entry is present, with the expected type, and holds the written value → success. Refresh
+  the allowed values from the reply's constraints.
+- It holds the old value → rejected (§17.4 c).
+- It is missing, or its type changed → treat the setting as **unsupported for this connection**
+  and hide it (§14).
+- The reply's version differs from the version just written → stop writing to that group for this
+  connection, and re-read the whole group.
+
+### 17.6 Constraint validation
+
+Read with constraints on (`03 01 …`). The constraint layouts are those of §5.5's type table, and
+they sit after the value (§13.4). 🟡 `GB/service/devices/huami/zeppos/services/config/*.java`.
+Gadgetbridge does **not** check a value against them when it writes. It only uses them to build
+its pick lists and min/max fields (`SVC/Config:1246-1282,1302-1440`), so validation is
+OpenCircuit's own rule (🔴):
+
+| Type | Valid write | Notes |
+|---|---|---|
+| bool | `00` or `01` | no constraints are sent |
+| byte | a member of the allowed list | an **empty** allowed list (n = 0) gives no basis for a value: don't write |
+| byte list | every element a member of the allowed list; no duplicates | no count limit is sent; 🔴 whether the strap has one |
+| short / int | min ≤ value ≤ max | |
+| string | UTF-8 length ≤ max length, no `00` inside | 🔴 whether the max length counts the terminator: stay one byte under it |
+| string list | one of the possible values (when the list is non-empty), length ≤ max | |
+| hh:mm | hour 0–23, minute 0–59 | no constraints are sent |
+| short list, timestamp, unbounded int | — | never written (§17.2) |
+
+A value that fails these checks is refused on the phone and never sent (as in §13.4).
+
+### 17.7 Dependencies between settings
+
+| Child setting | Needs | Evidence | Tag |
+|---|---|---|---|
+| relax reminder HEALTH `14` | stress monitoring HEALTH `13` on | Amazfit: the relax reminder can be enabled only after automatic stress monitoring is on (`AMZ-M p.11`). Gadgetbridge greys out the relax switch while stress monitoring is off (`GB-res/xml/devicesettings_heartrate_sleep_alert_activity_stress_spo2.xml:94-108`) | 🟡 |
+| low-SpO₂ alert HEALTH `32` | all-day SpO₂ HEALTH `31` on | Amazfit: the low-SpO₂ alert can be enabled only after automatic SpO₂ is on (`AMZ-M p.10`). Gadgetbridge greys out the threshold while all-day SpO₂ is off (same XML, `:116-132`) | 🟡 |
+| high / low HR alerts HEALTH `02` / `03` | all-day HR at **1 minute or "smart"**, on Zepp OS devices with a display. Gadgetbridge treats a device **without** a display (the Helio) as measuring HR continuously and never greys the alerts out there | `GB/capabilities/HeartRateCapability.java:97-114,144-151`. Amazfit says the Helio measures HR continuously all day (`AMZ-M p.10`) | 🟡 |
+| "activity monitoring" HEALTH `04` and the HR-alert switch | all-day HR not `00` (off) | `HeartRateCapability.java:136-143,161-168` | 🟡 |
+| stress monitoring HEALTH `13` | on these newer devices, **not** on the HR interval | `HeartRateCapability.java:152-155,169-172` | 🟡 |
+| sleep SpO₂ (fetch type `0x26`) | sleep breathing quality HEALTH `12` on | §5.5 | 🟡 |
+| inactivity window and quiet window HEALTH `42`–`46` | inactivity alert HEALTH `41` on | grouped on one screen by Gadgetbridge, with no explicit dependency (`ZeppOsSettingsCustomizer.java:152-158`) | 🔴 |
+| workout detection args WORKOUT `40` / `42` | workout detection on | §19 | 🔴 |
+
+**What the strap does** when a child is set while its parent is off, or when a parent is turned
+off under an enabled child, is in neither reference. Gadgetbridge's dependencies are UI-only: it
+never writes the child when the parent changes, so the child keeps its stored value. 🔴 (§10 item
+25 tests one case.)
+
+**OpenCircuit rule** (🔴):
+- Offer to enable a child only when the parent read **on** in this connection. Otherwise show it
+  as unavailable, with the reason ("turn on stress monitoring first").
+- Never write the parent as a side effect of a child edit. One user action, one arg.
+- When the user turns a parent off, write only the parent. Show the child as inactive while
+  keeping its stored value visible.
+
+### 17.8 Write sequence (🔴 recommendation; replaces §15.3's one-liner)
+
+1. **Preconditions**: authenticated; `0x000A` in the services list; the group listed in this
+   connection's config capabilities; no other config traffic in flight. Don't write during a
+   history fetch: there is no evidence of a conflict, but serialising costs little.
+2. **Read** the arg, and every parent from §17.7, with constraints: `03 01 <group> <n> <args…>`.
+3. **Validate**: the arg is present with the expected type code; the group version is known
+   (§17.3); the new value passes §17.6; the dependencies of §17.7 hold. Any failure → don't send;
+   say why.
+4. **Write** one entry: `05 <group> <version as read> 00 01 <arg> <type as read> <value>`.
+5. **Wait** for `06` (§17.4).
+6. **Re-read** (§17.5) and show the strap's value as the truth.
+7. **Log** the group, arg, old value, new value and the ack status. These are settings, not health
+   data, but they are still personal: keep them on the device.
+
+### 17.9 HEALTH arg `01`: the all-day HR interval byte
+
+| Value | Meaning | Tag / source |
+|---|---|---|
+| `00` | off | 🟡 `SVC/Config:1508-1523`, `GB/capabilities/HeartRateCapability.java:42-53` |
+| `ff` (−1) | "smart" (automatic) | same |
+| `fe` (−2) | continuous | same (Gadgetbridge's interval list has it; written as the signed byte) |
+| `01`–`78` | every N minutes, N = 1–120. Gadgetbridge offers 1, 5, 10, 15, 20, 30, 45 and 60 | same; `SUP:370-386` caps at 120 |
+
+The strap's allowed list (constraints, §17.6) decides what is valid on a given strap. Gadgetbridge
+**hides this setting for display-less devices**, the Helio included, because their HR is always on
+(`ZeppOsSettingsCustomizer.java:266-280`, `GB#5796`, `GB#5804`). 🔴 whether the Helio reports arg
+`01` at all and which values it allows (§10 item 25).
+
+**Gadgetbridge pitfall (don't copy):** its interval-change handler converts seconds to minutes
+with integer division and clamps at 0. "Continuous" (−2 s) therefore becomes `00`, which turns HR
+monitoring **off**. 🟡 `SUP:370-386` with `HeartRateCapability.java:45,134`. Encode `fe`.
+
+### 17.10 Worked example I: all-day HR every 10 minutes (constructed)
+
+The strap's reply and its allowed list are invented for this example. `OC-vec` for the framing.
+
+```
+→ 03 01 08 01 01                              read, constraints on, HEALTH, 1 arg: 01
+← 04 01 08 03 01 01                           ok, HEALTH v3, constraints included, 1 entry
+     01 10 ff 09 00 ff fe 01 05 0a 0f 1e 3c   HR interval: byte, value ff (smart);
+                                              9 allowed: off, smart, continuous, 1, 5, 10, 15, 30, 60 min
+   check: 0x0a (10) is in the allowed list ✓; no dependency
+→ 05 08 03 00 01 01 10 0a                     write HEALTH v3 (echoed), 1 entry: arg 01, byte, 10 min
+← 06 01                                       ack, success
+→ 03 01 08 01 01                              re-read
+← 04 01 08 03 01 01 01 10 0a 09 00 ff fe 01 05 0a 0f 1e 3c     value 0a ✓
+```
+
+The write is encrypted on `0x000A`. Using the session of worked example C, with the connection's
+7th message (handle `0x07`) and sequence number `0x2933d235`: `OC-vec`
+
+| Step | Bytes |
+|---|---|
+| message key = session key XOR `0x07` | `8b 42 69 01 24 95 28 ac 74 c9 06 a7 ca da e9 f8` |
+| `P ‖ S` | `05 08 03 00 01 01 10 0a` `35 d2 33 29` |
+| CRC-32 over those 12 bytes | `0x6e18eeb8` → `b8 ee 18 6e` |
+| padded plaintext (8 + 4 + 4 = 16: no padding) | `05 08 03 00 01 01 10 0a 35 d2 33 29 b8 ee 18 6e` |
+| AES-128-ECB(message key) | `4f 4a df 2a 4a 15 fd 33 64 35 03 94 64 75 56 75` |
+| next sequence number | `0x2933d236` |
+
+```
+MTU 247 (27 B): 03 0f 00 07 00 | 08 00 00 00 | 0a 00 | 4f 4a df 2a 4a 15 fd 33 64 35 03 94 64 75 56 75
+
+MTU 23:  chunk 0 (20 B): 03 09 00 07 00 | 08 00 00 00 | 0a 00 | 4f 4a df 2a 4a 15 fd 33 64
+         chunk 1 (12 B): 03 0e 00 07 01 | 35 03 94 64 75 56 75
+```
+
+### 17.11 Worked example J: all-day SpO₂ on, then the low-SpO₂ alert (constructed)
+
+```
+→ 03 01 08 02 31 32                     read HEALTH args 31 and 32 with constraints
+← 04 01 08 03 01 02
+     31 0b 00                           all-day SpO₂: bool, off
+     32 10 00 04 00 50 55 5a            low-SpO₂ alert: byte, 00 (off); 4 allowed: off, 80, 85, 90 %
+   the user asks for a 90 % alert → refused: needs arg 31 on (§17.7)
+   the user turns all-day SpO₂ on:
+→ 05 08 03 00 01 31 0b 01               write HEALTH v3, arg 31, bool, on
+← 06 01
+→ 03 01 08 02 31 32                     re-read the arg and its child
+← 04 01 08 03 01 02 31 0b 01 32 10 00 04 00 50 55 5a
+   now the 90 % alert may be offered, as a separate user action:
+→ 05 08 03 00 01 32 10 5a               arg 32, byte, 0x5a = 90 (in the allowed list ✓)
+← 06 01
+```
+
+### 17.12 Worked example K: the high-HR alert threshold (constructed)
+
+This complements worked example H (§13.4), which set 120 bpm.
+
+```
+→ 03 01 08 01 02
+← 04 01 08 03 01 01 02 10 78 07 00 64 6e 78 82 8c 96     high HR: 0x78 = 120; allowed off, 100–150 step 10
+   the user picks 125 → refused on the phone: 0x7d is not in the allowed list; nothing is sent
+   the user picks 130:
+→ 05 08 03 00 01 02 10 82               arg 02, byte, 0x82 = 130 ✓
+← 06 02                                 (a constructed non-01 status: §17.4 (a))
+   → treated as rejected: re-read
+→ 03 01 08 01 02
+← 04 01 08 03 01 01 02 10 78 07 00 64 6e 78 82 8c 96     still 120 → show "the strap kept 120 bpm"
+   to turn the alert off: 05 08 03 00 01 02 10 00
+```
+
+No dependency applies on the Helio (§17.7: display-less, HR always on). On a Zepp OS device with
+a display, first check that HEALTH arg `01` reads `01` or `ff`.
+
+---
+
+## 18. Workouts (#227)
+
+Scope: **controlling a workout from the phone** and what flows over the link while one runs. The
+strap's own workout records (fetch types `0x05` summary and `0x06` detail, §6.5) exist but are
+**out of scope** (#226 closed: OpenCircuit doesn't import the strap's workout data). This section
+doesn't specify them.
+
+### 18.1 How a Helio workout is controlled, and what is unknown
+
+| Fact | Tag / source |
+|---|---|
+| The Helio has no screen or button, so **every workout is started from the Zepp app**: Workout › Start Workout › pick the sport › "Start". The app's sports page then pauses, resumes and (with a long press) ends it. | 🟡 `AMZ-M p.3-4`, `AMZ-S` |
+| Amazfit says the strap supports "more than 27 sports modes", including running, walking, cycling, indoor sports and HYROX. | 🟡 `AMZ-M p.3` |
+| A workout can also start **without** the phone, by automatic workout detection (§19). | 🟡 `AMZ-M p.5` |
+| **Neither reference can start, pause, resume or end a workout from the phone.** Gadgetbridge's workout service only *reacts* to workouts the device starts on its own screen (`20`, `11 01`, `11 04`, §16.2 rows 8–9). It has no command in the other direction except phone GPS (§18.5). Its predecessor for pre-Zepp OS bands is the same. HelioCore has no workout code at all. | 🟡 `SVC/Workout:44-49,86-123`, `GB/service/devices/huami/HuamiSupport.java:1925-1945`; `HC` (no match for workout or sport) |
+| Gadgetbridge's maintainer confirms this for the Helio: it reads VO₂ max only from workouts, and a Helio user can't start one without the Zepp app. | 🟡 `GB#5986` (comments of 2026-04-17) |
+| So **the start, pause, resume and end commands are unknown** 🔴. The workout endpoint `0x0019` is encrypted on the Helio (§3.5), with a session key that needs one side's ECDH private key (§4.4). A passive capture of the Zepp app's traffic (a BLE sniffer or an Android HCI snoop log) therefore shows only ciphertext and **cannot reveal them**. | 🟢 encryption `HW:2026-09-30 (hw 0.132.27.2)`; 🔴 the commands |
+| Gadgetbridge can upload **workout templates** (structured intervals with pace, cadence, HR, speed or stroke-rate alerts) as a file to a watch's sport app, through the file-transfer endpoint `0x000D`. The user then starts them on the watch's screen. The Helio lists `0x000D`. 🔴 whether it accepts templates at all; a template doesn't start a workout either way. | 🟡 `GB/service/devices/huami/zeppos/workouts/ZeppOsWorkoutTemplateUploader.kt`, `ZeppOsWorkoutCodes.kt:62-68`; 🟢 `0x000D` listed `HW:2026-09-30 (hw 0.132.27.2)` |
+
+**Consequence for #227 (decision for Juan).** Starting the strap's own workout mode from
+OpenCircuit can't be built from this spec, because the commands aren't in any source we may
+read. Two routes exist:
+1. **A phone-side workout** (buildable now, 🔴 recommendation): OpenCircuit runs the workout
+   itself. Live HR comes from §7.1 at 1 Hz (🟢 on the Helio), with the phone's own location for
+   outdoor sports, and the result is written to HealthKit as a workout. The strap stays in normal
+   all-day mode. It records its usual per-minute activity, but makes no workout record, no
+   strap-side training effect or VO₂ max, and no per-workout buzz alerts.
+2. **The strap's workout mode**: needs a new source for the commands (§10 item 26 lists what can
+   and can't be observed). Until then, §18.2–§18.6 give what is known around it.
+
+### 18.2 Sport type codes
+
+One byte, the same code space in the `20` message (§16.2 row 8), in the workout-detection
+categories (§19) and in the strap's workout records. 🟡 `GB/service/devices/huami/zeppos/ZeppOsActivityType.java:24-150`
+(125 codes; the names here are plain-English descriptions):
+
+`01` outdoor running · `02` treadmill · `03` walking · `04` outdoor cycling · `05` free training ·
+`06` pool swimming · `07` open-water swimming · `08` indoor cycling · `09` elliptical ·
+`0a` outdoor cycling (a second code) · `0f` hiking · `11` tennis · `15` jump rope ·
+`17` rowing machine · `18` indoor fitness · `28` indoor walking · `29` curling · `2c` ice skating ·
+`2d` indoor ice skating · `30` BMX · `31` HIIT · `32` core training · `33` aerobic combo ·
+`34` strength training · `35` stretching · `36` stair climber · `37` flexibility · `39` stepper ·
+`3b` gymnastics · `3c` yoga · `3d` pilates · `40` fishing · `41` sailing · `42` rowing (on water) ·
+`43` skateboarding · `45` roller skating · `46` rock climbing · `47` ballet · `48` belly dance ·
+`49` square dance · `4a` street dance · `4b` ballroom dance · `4c` dance · `4d` zumba ·
+`4e` cricket · `4f` baseball · `50` bowling · `51` squash · `55` basketball · `56` softball ·
+`57` gateball · `58` volleyball · `59` table tennis · `5b` handball · `5c` badminton ·
+`5d` archery · `5e` horse riding · `5f` kendo · `60` karate · `61` boxing · `62` judo ·
+`63` wrestling · `64` tai chi · `65` muay thai · `66` taekwondo · `67` martial arts ·
+`68` kickboxing · `6d` aerobics · `6f` mass gymnastics · `70` latin dance · `71` jazz dance ·
+`72` cardio combat · `73` hula hoop · `74` frisbee · `75` darts · `76` kite flying ·
+`77` tug of war · `7a` beach volleyball · `81` parkour · `82` cross training · `83` race walking ·
+`84` driving · `8a` dragon boat · `8c` kayaking · `8f` spinning · `90` air walker · `91` wall ball ·
+`92` folk dance · `93` jujitsu · `94` fencing · `95` horizontal bar · `96` parallel bars ·
+`97` billiards · `98` sepak takraw · `99` dodgeball · `9a` water polo · `9b` finswimming ·
+`9c` artistic swimming · `9d` snorkeling · `9e` ice hockey · `9f` swing · `a0` shuffleboard ·
+`a1` table football · `a2` shuttlecock · `a3` motion-sensing game · `a4` futsal · `a5` hip hop ·
+`a6` pole dance · `a7` battle rope · `a8` breaking · `a9` hacky sack · `aa` bocce · `ab` jai alai ·
+`ac` flowriding · `ad` chess · `ae` checkers · `af` weiqi (go) · `b0` bridge · `b1` board game ·
+`b8` bouldering · `b9` modern dance · `bc` floorball · `bd` esports · `bf` soccer · `ce` e-bike.
+
+| Fact | Tag / source |
+|---|---|
+| **Which of these the Helio supports is not listed anywhere.** A Helio user's Zepp-started workouts included outdoor running, a "floor climbing machine" and yoga, and Gadgetbridge met an **unmapped code `0xdf`** in that sync: so the list above is incomplete for the Helio (HYROX and the climbing machine are plausible candidates for codes missing from it, 🔴). | 🟡 `GB#6218` (2026-05-31) |
+| Treat an unknown code as "other workout"; never drop it. | 🔴 recommendation |
+| **Pitfall:** pre-Zepp OS bands used a different status numbering on their workout characteristic (start `02`, pause `03`, resume `04`, end `05`, `GB/service/devices/huami/HuamiWorkoutStatus.java:20-23`). On Zepp OS `11 04` means **end**. Don't mix the two. | 🟡 |
+
+### 18.3 What the link carries during a workout
+
+| Flow | What is known | Tag / source |
+|---|---|---|
+| strap → phone, workout status | `11 01` started, `11 04` ended on `0x0019`, when the device runs the workout itself (§16.2 row 9). 🔴 whether the Helio sends them for a phone-started or auto-detected workout; no pause/resume status is known | 🟡 `SVC/Workout:45-49,104-118` |
+| strap → phone, live values | The Zepp app shows and speaks live metrics (it announces "whole kilometers, pace, and heart rate") and switches itself to paused when "auto pause" detects a stop. So the strap streams *something* during a workout. **Its format is unknown.** | 🟡 `AMZ-M p.4`; 🔴 the format |
+| live HR, independent of workouts | the §7.1 stream (`04 01`, then `04 02` every second) works whether or not a workout runs. That is all route 1 of §18.1 needs | 🟢 `HW:2026-09-30 (hw 0.132.27.2)` |
+| strap's own record | the strap records the workout at about 1 Hz (an exported Zepp file shows one HR value per second) and keeps it for a later fetch (`0x05`/`0x06`, out of scope) | 🟡 `GB#5617` (comment of 2025-12-14) |
+
+### 18.4 When the link drops mid-workout
+
+| Fact | Tag / source |
+|---|---|
+| Amazfit tells the user to keep the device connected during the workout. It adds that the workout's detailed metrics are computed in real time **on the device**, so the link must be up **when the workout is ended**: "Otherwise, the device cannot be notified to end the workout." | 🟡 `AMZ-M p.4` |
+| So a dropped link does **not** end the workout: the strap keeps recording until it is told to end. 🔴 whether it ends on its own after some time, or when its battery runs low. | 🟡 (inference from the above); 🔴 the timeout |
+| Gadgetbridge has no handling: it reacts to `11 04` when (if) it arrives. | 🟡 `SVC/Workout:178-187` |
+
+**OpenCircuit rule** (🔴 recommendation, for route 2): persist "a strap workout may be running"
+across process deaths, like the find-stop flag of the background branch. On every reconnect while
+it is set, ask the user whether to end the workout or keep it running. Never assume it ended.
+Route 1 has no such state: the strap isn't in workout mode.
+
+### 18.5 Must the phone send GPS or anything else?
+
+| Fact | Tag / source |
+|---|---|
+| The Helio has no GPS of its own (no GPS feature or setting in Amazfit's documents). It does compute VO₂ max, which needs an **outdoor** run or cross-country run of at least 10 minutes and uses "heart rate and speed". So for outdoor sports the strap must get speed or position from the phone during the workout. | 🟡 `AMZ-M p.3-8`; 🔴 the inference about speed from the phone |
+| The only phone → strap workout message in any reference is **phone GPS** on `0x0019`. Gadgetbridge sends it after a device-started workout announced that it needs GPS (`20` with byte `[2]` = `01`), and only if the user allowed it. | 🟡 `SVC/Workout:44,125-166` |
+| Layout: `04`, `00` (unexplained), then a u32 LE **flags** word, then the optional parts in this order: bit `0x00000001` → a 1-byte **GPS status**: `01` acquired, `02` searching, `04` disabled; bit `0x00040000` → a 31-byte **position**. | 🟡 `SVC/Workout:140-150`, `GB/service/devices/huami/HuamiUtils.java:103-150`, `GB/service/devices/huami/HuamiPhoneGpsStatus.java:23-25` |
+| Position (31 bytes, LE): i32 longitude × 3 000 000; i32 latitude × 3 000 000; i32 speed (Gadgetbridge writes whole m/s × 10, i.e. it truncates to whole m/s first; 🔴 the unit is probably 0.1 m/s); i32 altitude in cm; i64 fix time in Unix **milliseconds**; i32 `ff ff ff ff` (always); i16 `00 00` (🔴 perhaps bearing); u8 `00`. | 🟡 `HuamiUtils.java:130-147` |
+| Gadgetbridge's sequence: on "needs GPS" it sends status **searching** (no position) and starts phone location at 1 s. It then sends each fix; the first fix after a gap of more than 5 s also carries status **acquired**. If phone GPS is disabled, it sends status **disabled** once. It stops location when the workout ends. | 🟡 `SVC/Workout:125-138,152-166,178-187` |
+| 🔴 whether the Helio uses this message at all, and whether the Zepp app sends it (or speed only) for a Helio outdoor run. | 🔴 |
+
+Nothing else is known to be required: the profile (§5.4, user info) feeds the strap's maths
+(TE and VO₂ max use "personal information", `AMZ-M p.6-7`) and is already sent at setup.
+
+### 18.6 Who computes the final metrics
+
+The strap does. Amazfit says the detailed workout metrics, training effect, training load, recovery
+time and VO₂ max are calculated by the device (`AMZ-M p.4-8`). The strap keeps its own record, and
+the Zepp app syncs it. OpenCircuit doesn't fetch it (#226). With route 1 of §18.1, OpenCircuit
+computes its own workout totals from the live HR and phone location, and must label them as its
+own.
+
+### 18.7 Per-workout alerts
+
+| Alert | Who acts | Configured | Tag / source |
+|---|---|---|---|
+| **High heart rate**: the strap vibrates when HR exceeds the maximum set for this workout | strap | per workout, on the Zepp app's exercise preparation page; the settings vary by sport | 🟡 `AMZ-M p.4-5` |
+| **Pace alert** and **speed reminder**: the strap vibrates when the speed is below the set minimum | strap | same | 🟡 `AMZ-M p.4-5` |
+| voice announcements, metronome, auto-pause | **the app**, not the strap | same | 🟡 `AMZ-M p.4` |
+
+🔴 **How these settings reach the strap is unknown**: probably inside the unknown start command, or
+as a workout-group setting. The WORKOUT config group (`09`) args Gadgetbridge knows are GPS,
+workout detection (§19), pool length and HR zones; none is a per-workout alert (`SVC/Config:541-552`).
+For route 1, OpenCircuit can still buzz on its own HR limit with the find-device pulse (§13.2).
+That fires only while the link is up and the app is running, and needs no persistent setting.
+
+### 18.8 Worked example L: an outdoor run, as far as it can be constructed
+
+What can be built today is route 1 (§18.1) plus, for reference, the phone-GPS message that a
+strap-mode outdoor run would use. **No start command appears below, because none is known; no
+bytes have been invented for it.** `OC-vec` for the GPS framing.
+
+```
+(route 1: phone-side outdoor run)
+→ [0x001D] 04 01                     start live HR (§7.1); enable notify on 0x2A37 first
+→ [0x001D] 04 02                     every second while the run lasts
+← [0x2A37] 00 8f                     HRS frame, u8 HR = 143 bpm (made-up)
+   … phone location from the phone's own GPS …
+→ [0x001D] 04 00                     run ended: stop live HR, unsubscribe 0x2A37
+   → write an HKWorkout (running, outdoor) with OpenCircuit's own totals
+
+(route 2, for reference only: phone GPS to a strap that asked for it)
+   START COMMAND: UNKNOWN (§10 item 26)
+→ [0x0019] 04 00 01 00 00 00 02      flags 0x00000001 (status only), status 02 = searching
+→ [0x0019] 04 00 01 00 04 00 01  18 74 56 ff  60 22 3a 07  1e 00 00 00  e8 fd 00 00
+           c0 c0 5e f6 a0 01 00 00  ff ff ff ff  00 00  00
+                                     flags 0x00040001 (status + position), status 01 = acquired;
+                                     lon −3.703800° (−11 111 400), lat 40.416800° (121 250 400),
+                                     speed 30 (3 m/s), altitude 65 000 cm,
+                                     fix time 1 790 839 800 000 ms = 2026-10-01T07:30:00Z
+← [0x0019] 11 01                     workout started (only if the Helio sends it, §18.3)
+   END COMMAND: UNKNOWN
+← [0x0019] 11 04                     workout ended
+```
+
+The 38-byte position message, encrypted on `0x0019` with the session of worked example C, as the
+connection's 8th message (handle `0x08`), sequence number `0x2933d236`: `OC-vec`
+
+| Step | Bytes |
+|---|---|
+| message key = session key XOR `0x08` | `84 4d 66 0e 2b 9a 27 a3 7b c6 09 a8 c5 d5 e6 f7` |
+| CRC-32 over `P ‖ S` (`P` = the 38 bytes above, `S` = `36 d2 33 29`) | `0x3370b66e` → `6e b6 70 33` |
+| padded plaintext (38 + 4 + 4 = 46 → 48) | `P`, `36 d2 33 29`, `6e b6 70 33`, `00 00` |
+| AES-128-ECB(message key) | `88 54 5c 90 c5 6b 79 b8 aa bc 1a 6a 8b 74 d9 5c dd cd 04 84 ce c7 15 fe 8a 67 69 60 69 1d 29 89 5f 3d 07 75 38 ba bf 17 e5 01 a5 f5 c2 c4 39 30` |
+| one chunk at MTU 247 (59 B) | `03 0f 00 08 00 26 00 00 00 19 00` + the 48 ciphertext bytes |
+| next sequence number | `0x2933d237` |
+
+---
+
+## 19. Workout detection (#229)
+
+Amazfit: with **Workout Detection** on (Zepp › Device › Helio Strap › Workout Detection), the
+strap recognises activity "by continuously monitoring the high heart rate", so a workout no longer
+needs to be started in the app. Its **sensitivity** is adjustable: higher detects faster, lower
+takes longer. Amazfit warns that detection "will greatly reduce the battery life". 🟡 `AMZ-M p.5`
+
+### 19.1 The WORKOUT group (`09`) args
+
+All are written through §17 (endpoint `0x000A`, encrypted). Gadgetbridge knows WORKOUT **version
+1** only (`SVC/Config:400`). The Helio lists group `09` (🟢 `HW:2026-09-30 (hw 0.132.27.2)`), but its
+version wasn't recorded (🔴, §10 item 25).
+
+| Arg | Type | Meaning | Values | Tag / source |
+|---|---|---|---|---|
+| `40` | byte list `11` | **detection categories**: the sports the strap may auto-detect | sport codes from §18.2. Gadgetbridge knows `03` walking, `28` indoor walking, `01` outdoor running, `02` treadmill, `04` outdoor cycling, `06` pool swimming, `09` elliptical, `17` rowing machine. The constraints' allowed list is the authority | 🟡 `SVC/Config:548,1302-1329,1617-1626` |
+| **`41`** | bool `0b` | **detection alert**: Gadgetbridge's label is "Alert: notify when a workout is detected". On a watch that is an on-screen prompt; on the Helio 🔴 probably a buzz when detection starts a workout | `00` off, `01` on | 🟡 `SVC/Config:549`, `GB-res/xml/devicesettings_workout_detection.xml:21-27` (the label is in Gadgetbridge's `values/strings.xml:661-662`, fetched from the pinned commit) |
+| `42` | byte `10` | **detection sensitivity** | `00` high, `01` standard, `02` low (only these three are mapped; the constraints decide what the strap accepts) | 🟡 `SVC/Config:550,1417-1418,1628-1632` |
+| `05` | short list `02` | HR zones (6 bpm bounds; a watch reported count 6–6 and range 30–220) | Gadgetbridge parses it and never writes it | 🟡 `SVC/Config:552`, `GB/service/devices/huami/zeppos/services/config/ConfigShortList.java` |
+| `20`–`23`, `30`, `31` | byte / bool / hh:mm | GPS and AGPS settings | watch features with no meaning on the Helio | 🟡 `SVC/Config:542-547` |
+| `51` | byte | pool length | unexplained ("TODO") in Gadgetbridge | 🔴 `SVC/Config:551` |
+
+### 19.2 What Gadgetbridge does on the Helio
+
+| Fact | Tag / source |
+|---|---|
+| Since `GB@9c85d599` (2026-01-04, "Enable workout detection sensitivity for Helio Strap"), Gadgetbridge shows a workout-detection screen for the Helio with **only the alert (`41`) and the sensitivity (`42`)**. It deliberately hides the categories (`40`) for the strap. | 🟡 `GB/devices/huami/zeppos/straps/AmazfitHelioStrapCoordinator.java:52-65`, `GB/devices/huami/zeppos/ZeppOsCoordinator.java:464-480,659-665`, `GB/devices/huami/zeppos/ZeppOsSettingsCustomizer.java:207-214` |
+| As for every config setting, each of the two is shown only if the strap's read reply contained it with the expected type (§17.1), so the Helio presumably reports `41` and `42` (🔴 until §10 item 25). | 🟡 `ZeppOsSettingsCustomizer.java:181-185,198-205` |
+| **There is no detection on/off arg in Gadgetbridge.** Zepp's single "Workout Detection" switch therefore maps to something Gadgetbridge doesn't model: an empty category list (`40` with n = 0), or a WORKOUT arg it doesn't know. 🔴 (§10 item 27 decides) | 🟡 (absent from `SVC/Config:541-552`) |
+
+### 19.3 Constraints and rules
+
+- Read group `09` with constraints (§17.8 step 2). Offer only the args present with the type codes
+  above. For `40` and `42`, offer only values in the reply's allowed lists (§17.6).
+- **Detection on/off** (🔴 recommendation): don't offer a switch until §10 item 27 identifies the
+  arg. Until then, show the alert and the sensitivity only, as Gadgetbridge does.
+- Don't write `40` on the Helio, even if the strap reports it: Gadgetbridge hides it on purpose, and
+  an incomplete list could silently turn detection off for a sport. Show it read-only.
+- Detection costs battery (Amazfit). Say so next to the setting.
+- An auto-detected workout probably makes the strap enter its workout mode (🔴 whether it sends
+  `11 01`/`11 04`, §16.2 row 9, §10 item 26). OpenCircuit doesn't import the strap's workout
+  records (#226), so detection only affects what the strap and the Zepp app record. The per-minute
+  activity samples (§6.5) are recorded either way.
+
+### 19.4 Worked example M: sensitivity to "standard", alert on (constructed)
+
+The values and allowed lists are invented. The group version echoed is the one read (here 1).
+
+```
+→ 03 01 09 03 40 41 42                    read WORKOUT, constraints on, 3 args
+← 04 01 09 01 01 02                       ok, WORKOUT v1, constraints included, 2 entries (no 40)
+     41 0b 00                             detection alert: bool, off
+     42 10 00 03 00 01 02                 sensitivity: byte, 00 (high); allowed high, standard, low
+→ 05 09 01 00 01 42 10 01                 write WORKOUT v1, arg 42, byte, 01 = standard ✓
+← 06 01
+→ 05 09 01 00 01 41 0b 01                 a separate user action: alert on
+← 06 01
+→ 03 01 09 02 41 42                       re-read
+← 04 01 09 01 01 02 41 0b 01 42 10 01 03 00 01 02
+```
+
+---
+
+## 20. Strap alert events (#230)
+
+The strap evaluates these alerts **on its own** and vibrates without the phone (§13.4):
+
+| Alert | Fires when (Amazfit) | Configured by | Tag / source |
+|---|---|---|---|
+| high / low HR | HR above / below the limit for 10 consecutive minutes **at rest**, not during sleep | HEALTH `02` / `03` (§13.4, §17) | 🟡 `AMZ-M p.10` |
+| low SpO₂ | SpO₂ below the value for 10 minutes in a row, not during sleep; needs all-day SpO₂ | HEALTH `32` (needs `31`) | 🟡 `AMZ-M p.10` |
+| relax reminder | stress above the limit for 10 minutes in a quiet state, not during sleep; needs stress monitoring | HEALTH `14` (needs `13`) | 🟡 `AMZ-M p.11` |
+| inactivity, goal reached | not in Amazfit's Helio documents | HEALTH `41`–`46`, `51` | 🔴 (§13.4) |
+| workout high HR, pace, speed | during a workout only (§18.7) | per workout, unknown path | 🟡 `AMZ-M p.4-5` |
+| low battery (20 %, 10 %, 5 %) | always | none | 🟡 `AMZ-M p.2` |
+
+### 20.1 Does the strap tell the phone?
+
+**No message is known for any of them.** 🔴 (§10 item 28)
+
+| Evidence | Tag / source |
+|---|---|
+| No Zepp OS service in Gadgetbridge handles anything that could be an alert event. The only unsolicited messages it knows are those of §16.2. None of them names an alert, and none carries a threshold, a value or a time. | 🟡 `SVC/HeartRate:67-92`, `SVC/Config:124-146`, the rest of §16.2's sources |
+| Asked by a Helio user whether it could send a phone notification when the strap's sedentary reminder fires, Gadgetbridge's maintainer answered "Unfortunately no, Gadgetbridge is currently not able to do this." | 🟡 `GB#5799` (comment of 2026-02-17) |
+| The pre-Zepp OS device-event list (`…0010`) has no HR, SpO₂ or stress alert event either. Its events are fell asleep, woke up, goal reached `03`, non-wear, buttons, calls, alarms, find phone, silent mode, a 30-minute tick, MTU, workout and music control. | 🟡 `GB/service/devices/huami/HuamiDeviceEvent.java:20-37` |
+| Amazfit describes every one of these alerts as "the device will alert/remind you" and mentions no phone notification. | 🟡 `AMZ-M p.10-11` |
+| HelioCore has no alert code. | 🟡 `HC` (no match) |
+
+The message format therefore can't be given. If the strap does send something, it would arrive as
+a chunked message on `…0017` (§16.1), so the logging rule of §16.5 (endpoint, first byte and
+length of anything unknown) is how it would be found.
+
+### 20.2 What OpenCircuit can do instead (🔴 recommendation)
+
+- **Don't promise "the strap told us".** The phone doesn't know when the strap buzzed.
+- To show the user "your strap probably alerted you", **re-derive the condition from fetched
+  history** with the strap's rule and the threshold read from config. For example: high-HR alert
+  `02` = 120 and ten consecutive activity minutes (§6.5) with HR > 120, no sleep stage and low
+  intensity. Label it as inferred. The same works for low SpO₂ (`0x25` samples) and stress
+  (`0x13` minutes) with the thresholds above. Sleep exclusion uses §6.6 and §21.
+- **Phone-side alerts** need no strap alert at all. While the link is up and live HR runs (§7.1),
+  OpenCircuit can evaluate its own rule and buzz with the find-device pulse (§13.2). That's
+  transient and persistent-setting-free, but only works while the app is running.
+
+---
+
+## 21. Naps (#231)
+
+### 21.1 What Amazfit says
+
+The Helio records **night sleep and naps**. Sleep that overlaps the user's **sleep plan** (set in
+the Zepp app) is the day's **main sleep**; with no plan, the window is **00:00–08:00**. Sleep
+**more than 60 minutes apart** from the main sleep is recorded as a **nap**. Sleep **shorter than
+20 minutes** is not recorded. 🟡 `AMZ-M p.9`
+
+### 21.2 What the references say
+
+| Fact | Tag / source |
+|---|---|
+| **Neither reference mentions naps.** Gadgetbridge's Huami and Zepp OS code has no nap concept; HelioCore doesn't fetch sleep sessions (`0x48`) at all. | 🟡 `GB/devices/huami/HuamiSleepSessionSampleProvider.java` (whole file), `FOP/SleepSession:45-106`; `HC:908,1156-1163` (its fetch list has no `0x48`) |
+| A `0x48` round may hold **several 594-byte records**. Gadgetbridge splits them and stores each one keyed by its own session timestamp (offset `0x000`), so any number of sessions per day fits its storage. | 🟡 `FOP/SleepSession:59-84` |
+| Gadgetbridge overlays the stages of **every** session record in the requested window onto the activity minutes, the same way for each record. Nothing in the record is read as "nap" or "main sleep". | 🟡 `HuamiSleepSessionSampleProvider.java:70-95` |
+| Nothing else about naps appears in either source: no nap fetch type in Gadgetbridge's list of types (§6.5), and no nap arg in its config groups. | 🟡 `GB/service/devices/huami/operations/fetch/HuamiFetchDataType.java`, `SVC/Config:467-577` |
+
+### 21.3 How a nap probably appears (🔴 until §10 item 29)
+
+- **As its own `0x48` record** (🔴 most likely): the record format holds one sleep span (start and
+  end minutes, §6.6) with its own stages. A day with a nap would then deliver two records, possibly
+  with the **same "midnight" reference** (`0x004`), because both belong to the same day.
+- **Candidate flag bytes**: `0x008` and `0x009` are "both `01` in observed data, unexplained"
+  (§6.6). A main-sleep / nap marker is one plausible meaning. 🔴 pure hypothesis: compare a nap
+  record with a night record.
+- **In the activity minutes** (`0x01`, §6.5): the per-minute sleep bytes and the "sleep" kind `0x78`
+  carry no nap marker that any reference knows. A nap shows up there as sleep minutes in the
+  daytime.
+- The hardware run of 2026-09-30 got exactly one 594-byte record in a 12-hour window (§10.1). That
+  says nothing about naps.
+
+### 21.4 When a session record exists, and re-fetching it
+
+- 🔴 Whether the strap writes a session record only after the session ends, or also while it is
+  in progress, is unknown for Zepp OS. On another vendor's band, Gadgetbridge has fetched an
+  in-progress sleep file at 04:25 and never received the completed night. Its maintainer's fix
+  idea was to stop marking such a file synced (`GB#6484`, Xiaomi, 2026-07-28 to 2026-08-26). Also, a nap can
+  only be told apart from a main sleep once the main sleep is known (§21.1).
+- Gadgetbridge's cursor for `0x48` moves past each round's last record (§6.4). A record the strap
+  later **rewrites with the same session timestamp** would therefore never be fetched again.
+  🔴 whether the strap ever does that.
+
+**OpenCircuit rule** (🔴 recommendation):
+- Keep acking `0x48` rounds with `09` (keep, §6.3). Start each sleep fetch from the start of the
+  **latest session that ended less than 24 h ago**, not from after it: with `09`, overlapping data
+  is re-delivered (🟢 for temperature, §6.3).
+- Store sessions keyed by their session timestamp (`0x000`), and **replace** a stored session when a
+  record with the same key arrives with different content.
+- After a `06 00` wake event (§16.2), expect the night's record to be late or partial. Fetch again
+  later.
+
+### 21.5 Telling a nap from the night (🔴 recommendation)
+
+Until §10 item 29 finds a marker in the record, apply Amazfit's rule on the phone:
+
+1. Take every session of the local day, in strap-local time (§6.4).
+2. The **main sleep** is the session that overlaps the sleep-plan window. OpenCircuit can't read
+   Zepp's sleep plan (no known config arg), so use **00:00–08:00**, as the strap does without a
+   plan, and let the user change it. If several overlap, take the longest.
+3. Any other session that starts or ends **more than 60 minutes** from the main sleep is a **nap**.
+   One within 60 minutes belongs to the main sleep (merge the two).
+4. Drop sessions under 20 minutes. The strap shouldn't send them; if one arrives, it's a sign that
+   the rule above is wrong. Log it.
+5. HealthKit has no nap type: write a nap's stages as ordinary `sleepAnalysis` samples
+   (`HEALTHKIT_MAPPING.md`, `0x48` row). Mark the nap as such only in OpenCircuit's own model,
+   e.g. to keep it out of "last night".
+
+---
+
 ## Changelog
 
 - 2026-09-30: first version (zepp-spec agent, #215 Phase 0). All claims 🟡/🔴.
@@ -1604,3 +2382,24 @@ allowed values or min/max → write **one** arg, echoing the group version from 
   "`0x04` does not gate recording" and tags the sampling-rate meaning 🟡; §6.5's activity row says
   the CRC matches "like every type that has delivered data" (never observed for `0x02`, `0x12`,
   `0x3d`). No tag was promoted.
+- 2026-10-01: parity addendum, part 1 (zepp-parity-spec agent, #233): §16, what the strap sends
+  on its own, the subscriptions Gadgetbridge holds, idle links and iOS wake sources; endpoint
+  `0x0019` added to §3.5; capture items 22–24 in §10. Existing sections are unchanged. All new
+  claims are 🟡/🔴 except those already confirmed in §10.1.
+- 2026-10-01: parity addendum, part 2 (zepp-parity-spec agent, #228 #229 #230): §17, config
+  writes: message, version echo, ack, rejected writes, re-read, constraint validation, setting
+  dependencies; worked examples I–K; capture item 25.
+- 2026-10-01: parity addendum, part 3 (zepp-parity-spec agent, #227): §18, workout control:
+  how Helio workouts are started (the phone-side commands are in no source we may read, so they
+  stay unknown), sport type codes, the link during a workout and when it drops, phone GPS,
+  per-workout alerts; worked example L; capture item 26. The workout record fetch types
+  `0x05`/`0x06` stay out of scope (#226).
+- 2026-10-01: parity addendum, part 4 (zepp-parity-spec agent, #229): §19, workout detection:
+  the WORKOUT group args (`40` categories, `41` detection alert, `42` sensitivity), what
+  Gadgetbridge exposes for the Helio, the missing on/off arg; worked example M; capture item 27.
+- 2026-10-01: parity addendum, part 5 (zepp-parity-spec agent, #230): §20, strap alert events:
+  no message is known for any strap-side alert; how to infer them from history instead; capture
+  item 28.
+- 2026-10-01: parity addendum, part 6 (zepp-parity-spec agent, #231): §21, naps: Amazfit's nap
+  rule, what the references say (nothing), how a nap probably appears in `0x48`, re-fetching
+  sessions, the phone-side nap rule; capture item 29.

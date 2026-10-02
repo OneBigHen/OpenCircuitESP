@@ -134,9 +134,9 @@ public struct RingActivityEventLedger: Codable, Equatable, Sendable {
         public let seenAt: Date
     }
 
-    /// How long a marker is kept. The alert engine looks back at most ~24 h
-    /// (`HealthNotificationCenter.instantLookback`), so 48 h keeps every marker it can ask about
-    /// with a day of margin, and bounds the blob.
+    /// How long a marker is kept. The alert engine looks back 2 h
+    /// (`LiveHealthAlerts.contextWindow`), so 48 h keeps every marker it can ask about with ample
+    /// margin, and bounds the blob.
     public static let retention: TimeInterval = 48 * 3600
 
     public init(events: [String: [RingEvent]] = [:], overflow: [String: Overflow] = [:]) {

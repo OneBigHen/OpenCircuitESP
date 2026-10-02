@@ -165,6 +165,8 @@ struct RecentWorkoutsCard: View {
                 Text("No workouts recorded yet. Ones you record here are saved to Apple Health and listed back here.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
+                // The last 7 days' training load against the 4 weeks before (#232).
+                WeeklyTrainingLoadLine(reloadToken: reloadToken)
                 VStack(spacing: 10) {
                     ForEach(items) { item in
                         row(item)

@@ -155,23 +155,6 @@ final class HealthAlertsTests: XCTestCase {
                                                     since: at(3, 0))?.percent, 88)
     }
 
-    // MARK: Quiet hours must delay, never destroy
-
-    /// A quiet-hours window DROPS candidates rather than queueing them, so anything deriving its
-    /// candidates from a rolling lookback must outlast the window or the suppression becomes
-    /// permanent. `suppressedSpan` is what the lookback is widened by.
-    func testQuietHoursSuppressedSpanIsTheWindowLength() {
-        XCTAssertEqual(QuietHours(enabled: true, startMinutes: 22 * 60,
-                                  endMinutes: 7 * 60).suppressedSpan, 9 * 3600, accuracy: 1e-9)
-        XCTAssertEqual(QuietHours(enabled: true, startMinutes: 1 * 60,
-                                  endMinutes: 6 * 60).suppressedSpan, 5 * 3600, accuracy: 1e-9)
-        XCTAssertEqual(QuietHours(enabled: false, startMinutes: 22 * 60,
-                                  endMinutes: 7 * 60).suppressedSpan, 0, accuracy: 1e-9)
-        XCTAssertEqual(QuietHours(enabled: true, startMinutes: 300,
-                                  endMinutes: 300).suppressedSpan, 0, accuracy: 1e-9,
-                       "a degenerate window suppresses nothing")
-    }
-
     /// The gate is wired into `evaluate`, not just callable in isolation.
     func testEvaluateAppliesThePersistenceGate() {
         let artifact = [spo2(97, 6, 54), spo2(89, 7, 4), spo2(96, 7, 14)]
@@ -254,14 +237,14 @@ final class HealthAlertsTests: XCTestCase {
         XCTAssertEqual(hits.first?.value, 112)
     }
 
-    // MARK: Background-drain latency (30–60 min old timestamps) — de-dupe is the ONLY gate
+    // MARK: The threshold layer is age-blind
 
-    func testDrainLatencyOldHighHRCrossingFiresOnFirstSight() {
-        // All-day HR arrives via an ~hourly background drain: the phone evaluates ONCE, right after
-        // the drain, and the crossing's device timestamp is already ~45 min old on arrival. With the
-        // 30-min device-timestamp freshness window removed, a not-yet-fired crossing must still alert
-        // once — otherwise every legitimate background high-HR event in the older half of a drain is
-        // permanently silenced.
+    // `HealthAlertEvaluator` only answers "did a reading cross?". Whether an old crossing may NOTIFY
+    // is `LiveHealthAlerts`' call (decision 32, #234: it may not), pinned in
+    // `LiveHealthAlertsScenarioTests`.
+
+    func testThresholdLayerReportsAnOldHighHRCrossing() {
+        // A crossing ~45 min old on arrival, as an hourly background drain delivers it.
         let thresholds = HealthAlertThresholds(highHRBpm: 120,
                                                lowSpO2Enabled: false,
                                                elevatedHREnabled: false)
@@ -275,10 +258,8 @@ final class HealthAlertsTests: XCTestCase {
         XCTAssertEqual(hits.first?.value, 145)
     }
 
-    func testDrainLatencyOldSustainedRunFiresOnFirstSight() {
+    func testThresholdLayerReportsAnOldSustainedRun() {
         // A sustained elevated-while-inactive run whose 10-min completion is ~40 min old on arrival.
-        // The previous 40-min fetch window collapsed the 24h lookback to now-40min and silenced
-        // exactly this run; over the restored wide window it must alert once.
         let thresholds = HealthAlertThresholds(highHREnabled: false,
                                                lowSpO2Enabled: false,
                                                elevatedHRBpm: 100,
@@ -294,10 +275,9 @@ final class HealthAlertsTests: XCTestCase {
         XCTAssertEqual(hits.first?.value, 112)
     }
 
-    func testDrainLatencyFiredCrossingDoesNotReplayOnNextDrain() {
+    func testLastFiredCutDropsAnAlreadyFiredCrossing() {
         // Once a crossing has fired (its time recorded in `lastFired`), the next hourly drain
-        // re-delivers the SAME hours-old samples. The per-notification `lastFired` filter — now the
-        // entire stale-replay guard — must drop them so they don't post a second phone alert.
+        // re-delivers the SAME samples. The evaluator's own `lastFired` cut drops them.
         let thresholds = HealthAlertThresholds(highHRBpm: 120,
                                                lowSpO2Enabled: false,
                                                elevatedHRBpm: 100,

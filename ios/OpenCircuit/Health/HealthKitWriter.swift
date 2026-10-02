@@ -39,6 +39,19 @@ final class HealthKitWriter {
 
     static var isAvailable: Bool { HKHealthStore.isHealthDataAvailable() }
 
+#if DEBUG
+    /// Tests only, and DEBUG only: stands in for the HealthKit save in `write(_:timeline:)`, so a
+    /// fake can record exactly what would have reached Apple Health.
+    ///
+    /// ⚠️ NEVER make this available in Release. It is a plain internal `var` on the production
+    /// writer, so anything in the app module could replace the HealthKit save with it — and the
+    /// writer would still report those samples in `outcome.written`, which ADVANCES the mirror
+    /// watermark. A single accidental setter would therefore stop every metric reaching Apple Health
+    /// while the app believed it had written them (review-242 SF-1). The test target builds Debug,
+    /// so the seam keeps working where it is needed and cannot exist where it is not.
+    var quantitySaveOverride: (([HKQuantitySample]) async throws -> Void)?
+#endif
+
     /// HKQuantityType for a scalar metric, or nil for non-quantity kinds (sleep).
     static func quantityType(for kind: MetricKind) -> HKQuantityType? {
         let id: HKQuantityTypeIdentifier
@@ -71,6 +84,13 @@ final class HealthKitWriter {
         // Apps contribute exercise time only via HKWorkout (the #93 path), so there is no writable
         // quantity type for it — return nil so it is excluded from BOTH the auth set and writes.
         case .exerciseMinutes: return nil
+        // The Helio Strap's all-day stress (#239, decision 15): Apple Health has no stress type, so
+        // nil keeps it out of BOTH the auth set and every write. It is stored and charted in the app only.
+        case .stress: return nil
+        // The Helio Strap's PAI (decision 45, decision 15): Apple Health has no PAI type either, so
+        // nil keeps it out of BOTH the auth set and every write — the authorization prompt is exactly
+        // what it was before the kind existed. It is stored and shown in the app only.
+        case .pai: return nil
         }
         return HKQuantityType(id)
     }
@@ -88,6 +108,8 @@ final class HealthKitWriter {
         case .sleep: return .count()                  // unused
         case .distance: return .meter()              // ESTIMATE — steps × RingConn's per-step constant
         case .exerciseMinutes: return .minute()      // ESTIMATE — elevated HR minutes
+        case .stress: return .count()                // unused: no Health type (#239)
+        case .pai: return .count()                   // unused: no Health type (decision 45)
         }
     }
 
@@ -408,6 +430,17 @@ final class HealthKitWriter {
     /// timeline's pending samples (minus the kinds its policy withholds, `HelioHealthPolicy`) and the
     /// nights it staged. Their defaults are exactly the ring's pass, unchanged. `strapNightsFinalized`
     /// is `sleepFinalized` for those nights (the Sleep Focus wake, #215 phase 4).
+    /// What a `flushToHealth` call was asked to mirror: the timeline and the kinds (nil = every
+    /// mirrored kind, the ring's pass).
+    struct FlushRequest: Equatable {
+        let device: SyncDeviceID
+        let mirroredKinds: [MetricKind]?
+    }
+
+    /// The last `flushToHealth` request on this writer, recorded before any gate, so a test pins what
+    /// a call site passes without Health access (review-244 SF-2). Nothing in the app reads it.
+    private(set) var lastFlushRequest: FlushRequest?
+
     @discardableResult
     func flushToHealth(store: LocalStore, sleepSegments: [SleepSegment] = [],
                        sleepFinalized: Bool = false,
@@ -415,6 +448,7 @@ final class HealthKitWriter {
                        mirroredKinds: [MetricKind]? = nil,
                        strapNights: [[SleepSegment]] = [],
                        strapNightsFinalized: Bool = false) async -> FlushResult {
+        lastFlushRequest = FlushRequest(device: device, mirroredKinds: mirroredKinds)
         var result = FlushResult()
         guard isShareAuthorized, !Self.isFlushing else { return result }
         Self.isFlushing = true
@@ -1102,6 +1136,9 @@ final class HealthKitWriter {
     /// THE app's only HealthKit authorization request. Adding a second one is the defect fixed on
     /// this branch — see `authorizationReadTypes`. A new type belongs in `allTypes` (to write) or in
     /// `authorizationReadTypes` (to read), never in a request of its own.
+    ///
+    /// The one exception is `vo2Max` (#232), asked lazily by `VO2MaxHealthWriter` when the first
+    /// estimate is written. It is safe only because this request never names it — see that file.
     func requestAuthorization() async throws {
         // `authorizationReadTypes` is passed BY NAME at every call site here and in
         // `authorizationPromptAvailable()` — never bound to a local first. A local is how the probe
@@ -1157,15 +1194,15 @@ final class HealthKitWriter {
         var owners = OwnerDeviceCache()
         for (kind, group) in byKind {
             let hk: [HKQuantitySample] = group.compactMap { s in
-                guard let type = Self.quantityType(for: s.kind) else { return nil }
-                let q = HKQuantity(unit: Self.unit(for: s.kind), doubleValue: s.value)
-                let device = timeline == nil ? owners.device(at: s.start, writer: self) : tagged
-                return HKQuantitySample(type: type, quantity: q, start: s.start, end: s.end,
-                                        device: device, metadata: Self.metadata(for: s.kind))
+                Self.quantitySample(s, device: timeline == nil ? owners.device(at: s.start, writer: self) : tagged)
             }
             guard !hk.isEmpty else { continue }   // no writable HK type for this kind — nothing to save
             do {
+#if DEBUG
+                if let quantitySaveOverride { try await quantitySaveOverride(hk) } else { try await store.save(hk) }
+#else
                 try await store.save(hk)
+#endif
                 outcome.written.append(contentsOf: group)
             } catch {
                 outcome.failed.insert(kind)   // this metric is denied/failing; others still land
@@ -1174,13 +1211,25 @@ final class HealthKitWriter {
         return outcome
     }
 
+    /// One scalar row as the `HKQuantitySample` `write` saves (its device and `metadata(for:)`), or nil
+    /// for a kind with no Health quantity type. Static so tests check what a write carries without a
+    /// live `HKHealthStore`.
+    static func quantitySample(_ s: QuantitySample, device: HKDevice?) -> HKQuantitySample? {
+        guard let type = quantityType(for: s.kind) else { return nil }
+        let q = HKQuantity(unit: unit(for: s.kind), doubleValue: s.value)
+        return HKQuantitySample(type: type, quantity: q, start: s.start, end: s.end,
+                                device: device, metadata: metadata(for: s.kind))
+    }
+
     /// Metadata key on HRV samples flagging which statistic the value actually is.
     static let hrvStatisticMetadataKey = "OpenCircuitHRVStatistic"
 
-    /// Per-kind sample metadata. The ring reports HRV as **RMSSD**, but HealthKit only offers
-    /// an **SDNN** field — so we store the RMSSD value in `.heartRateVariabilitySDNN` and tag it
-    /// honestly here rather than invent an RMSSD→SDNN conversion constant (the two are not a
-    /// fixed ratio; see docs/HEALTHKIT_MAPPING.md). Readers can distinguish via this key.
+    /// Per-kind sample metadata. The ring and the Helio Strap both report HRV as **RMSSD** (the
+    /// strap 🟡, on Amazfit's product-line documentation, decision 44), but HealthKit only offers an **SDNN**
+    /// field — so we store the RMSSD value in `.heartRateVariabilitySDNN` and tag it honestly here
+    /// rather than invent an RMSSD→SDNN conversion constant (the two are not a fixed ratio; see
+    /// docs/HEALTHKIT_MAPPING.md). Readers can distinguish via this key. One statistic for every
+    /// device, so no per-device branch: a device with another statistic would need one.
     static func metadata(for kind: MetricKind) -> [String: Any]? {
         switch kind {
         case .hrvSDNN: return [hrvStatisticMetadataKey: "RMSSD"]

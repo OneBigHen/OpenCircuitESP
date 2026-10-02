@@ -50,6 +50,19 @@ final class HealthKitShareTypesTests: XCTestCase {
                        + "second request.")
     }
 
+    /// VO₂ max (#232) is shared through its OWN lazy request (`VO2MaxHealthWriter`), so it must
+    /// appear in neither half of the main request: a type named by two requests is the build-50
+    /// shape, and a type in `allTypes` would also make the #129 probe prompt every install at launch.
+    func testVO2MaxStaysOutOfTheMainRequest() {
+        let writer = HealthKitWriter()
+        let vo2 = HKQuantityType(.vo2Max)
+        XCTAssertFalse(writer.allTypes.contains(vo2),
+                       "vo2Max is requested lazily by VO2MaxHealthWriter, never at launch")
+        XCTAssertFalse(writer.authorizationReadTypes.contains(vo2),
+                       "no type may be named by both authorization requests")
+        XCTAssertEqual(VO2MaxHealthWriter.vo2MaxType, vo2)
+    }
+
     /// The read half must stay clear of the same crash class the share half is pinned against.
     func testAuthorizationReadSetContainsNoCorrelationTypes() {
         XCTAssertFalse(HealthKitWriter().authorizationReadTypes.contains { $0 is HKCorrelationType },
@@ -87,6 +100,47 @@ final class HealthKitShareTypesTests: XCTestCase {
     /// write path. Guard against it silently creeping back in.
     func testExerciseMinutesHasNoWritableHealthKitType() {
         XCTAssertNil(HealthKitWriter.quantityType(for: .exerciseMinutes))
+    }
+
+    /// #239: the strap's all-day stress is stored in the app only. Apple Health has no stress type
+    /// (decision 15), so `.stress` maps to none and can't enter the auth request or a write.
+    func testStressHasNoHealthKitType() {
+        XCTAssertNil(HealthKitWriter.quantityType(for: .stress))
+    }
+
+    /// Decision 45: the strap's PAI is stored in the app only. Apple Health has no PAI type
+    /// (decision 15), so `.pai` maps to none and can't enter the auth request or a write.
+    func testPAIHasNoHealthKitType() {
+        XCTAssertNil(HealthKitWriter.quantityType(for: .pai))
+    }
+
+    /// #239 added `MetricKind.stress` and decision 45 `MetricKind.pai`, and `allTypes` loops
+    /// `MetricKind.allCases`. Pinned as an
+    /// EQUALITY of identifiers, so a new kind can't silently add a type to the share request (which
+    /// would put a fresh Health sheet in front of every existing install).
+    func testTheShareTypeSetIsExactlyTheShippedOne() {
+        let shipped: Set<String> = [
+            HKQuantityTypeIdentifier.heartRate.rawValue,
+            HKQuantityTypeIdentifier.restingHeartRate.rawValue,
+            HKQuantityTypeIdentifier.heartRateVariabilitySDNN.rawValue,
+            HKQuantityTypeIdentifier.oxygenSaturation.rawValue,
+            HKQuantityTypeIdentifier.bodyTemperature.rawValue,
+            HKQuantityTypeIdentifier.respiratoryRate.rawValue,
+            HKQuantityTypeIdentifier.stepCount.rawValue,
+            HKQuantityTypeIdentifier.activeEnergyBurned.rawValue,
+            HKQuantityTypeIdentifier.distanceWalkingRunning.rawValue,
+            HKQuantityTypeIdentifier.basalEnergyBurned.rawValue,
+            HKQuantityTypeIdentifier.distanceCycling.rawValue,
+            HKQuantityTypeIdentifier.bloodPressureSystolic.rawValue,
+            HKQuantityTypeIdentifier.bloodPressureDiastolic.rawValue,
+            HKCategoryTypeIdentifier.sleepAnalysis.rawValue,
+            HKCategoryTypeIdentifier.menstrualFlow.rawValue,
+            HKCategoryTypeIdentifier.headache.rawValue,
+            HKWorkoutType.workoutType().identifier,
+            HKSeriesType.workoutRoute().identifier,
+        ]
+        XCTAssertEqual(Set(HealthKitWriter().allTypes.map(\.identifier)), shipped)
+        XCTAssertEqual(HealthKitWriter().allTypes.count, shipped.count)
     }
 
     /// Sanity: the genuinely writable ring metrics still map to a quantity type, so the fix
