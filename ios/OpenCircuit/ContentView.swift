@@ -103,12 +103,14 @@ struct ContentView: View {
     /// True once a trends load has LANDED (`trendsLoadedAt` is stamped before the await, so it
     /// can't say that) — the Today header and tiles show a loading state until then (#216).
     @State private var trendsHaveLoaded = false
-    /// The Helio Strap's newest stored stress and today's readings, for its card and the Stress tile
-    /// (#239, steer 3). nil when there is no strap reading in the last 24 h (always, ring-only).
+    /// The Helio Strap's newest stored stress and today's readings, for the Stress tile (#239, steer 3).
+    /// nil when there is no strap reading in the last 24 h (always, ring-only).
     @State private var strapStress: StrapStressTile?
-    /// The Helio Strap's newest stored PAI, for its card (decision 45). nil when there is no strap
-    /// PAI reading in the last 48 h (always, ring-only).
+    /// The Helio Strap's newest stored PAI, for its Your Numbers tile (decisions 45, 49). nil when there
+    /// is no strap PAI reading in the last 48 h (always, ring-only).
     @State private var strapPAI: StrapPAIReading?
+    /// The PAI tile's explanation sheet (decision 49).
+    @State private var showPAIInfo = false
     /// Rolling buffer of recent live readings feeding the liveline live chart during an on-demand
     /// measurement (HR or SpO₂). Accumulated from `session.liveHR`/`liveSpO2` onChange, reset when
     /// monitoring stops. Display units: bpm for HR, whole-percent for SpO₂.
@@ -453,10 +455,7 @@ struct ContentView: View {
                     if ringActive {
                         connectionCard
                     } else {
-                        HelioConnectionCard(connection: helio, onSetUp: { showHelioSetup = true },
-                                            latestStress: strapStress?.currentReading(now: Date()),
-                                            onStress: { path.append(.strapStress) },
-                                            latestPAI: strapPAI?.currentReading(now: Date()))
+                        HelioConnectionCard(connection: helio, onSetUp: { showHelioSetup = true })
                     }
                     // First-run Health authorization banner (#143) — right under the connection card.
                     if !healthAuthorized, HealthKitWriter.isAvailable {
@@ -480,6 +479,8 @@ struct ContentView: View {
             .navigationTitle("Today")
             .navigationDestination(for: Route.self) { route in destination(for: route) }
         }
+        // What PAI is, from the strap's PAI tile (decision 49): a sheet, as there is nothing to chart.
+        .sheet(isPresented: $showPAIInfo) { StrapPAIInfoSheet() }
     }
 
     /// The liveline live-vitals hero — shown ONLY during an on-demand HR/SpO₂ measurement, when the
@@ -722,7 +723,7 @@ struct ContentView: View {
         // completion would let the second one pass this guard while the first is still in flight —
         // which is the exact double-load being fixed.
         trendsLoadedAt = Date()
-        // The strap's stress for its card and tile (#239, steer 3), on the same triggers as the tiles —
+        // The strap's stress for its tile (#239, steer 3), on the same triggers as the tiles —
         // launch, foreground return, every finished sync, a device switch — and from the store, so it
         // survives a sync without a stress round, a relaunch and a background wake. Loaded alongside
         // the trends, not after them, so it adds nothing before `trendsHaveLoaded` (review-242c NIT 2).
@@ -732,9 +733,9 @@ struct ContentView: View {
         let unitRaw = tempUnitRaw
         async let loadedTrends = TrendsData.loadAsync(container: container, tempUnitRaw: unitRaw)
         async let loadedStress = StrapStressTile.loadAsync(container: container)
-        // The strap's PAI for its card (decision 45), on the same triggers and off the main actor for
-        // the same reasons — `0x0d` arrives about daily, so reading it from the store is what keeps
-        // the number on the card after a sync that brought no record, and after a relaunch.
+        // The strap's PAI for its tile (decisions 45, 49), on the same triggers and off the main actor
+        // for the same reasons — `0x0d` arrives about daily, so reading it from the store is what keeps
+        // the number on the tile after a sync that brought no record, and after a relaunch.
         async let loadedPAI = StrapPAIReading.loadAsync(container: container)
         trends = await loadedTrends
         strapStress = await loadedStress
@@ -846,7 +847,9 @@ struct ContentView: View {
                                                onSelect: { path.append(.metric($0)) },
                                                onTimeline: { path.append(.timeline) },
                                                strapStress: strapStress,
-                                               onStress: { path.append(.strapStress) })
+                                               onStress: { path.append(.strapStress) },
+                                               strapPAI: strapPAI,
+                                               onPAI: { showPAIInfo = true })
         case .vitals:       vitalsCard
         case .vitalsStatus: vitalsStatusCard
         case .calories:     caloriesCard

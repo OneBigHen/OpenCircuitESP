@@ -1,24 +1,12 @@
 import SwiftUI
 
 /// The Today card while the Helio Strap is the chosen device (#215): connection and key state,
-/// battery, last sync, "Sync now", live heart rate when the strap sends it, and the in-app-only
-/// readings. It takes the place of the ring's connection card; nothing ring-only is shown.
+/// battery, last sync, "Sync now", and live heart rate when the strap sends it. It takes the place of
+/// the ring's connection card; nothing ring-only is shown. The strap's stress and PAI are Your Numbers
+/// tiles, not lines on this card (decision 49).
 struct HelioConnectionCard: View {
     let connection: HelioConnection
     var onSetUp: () -> Void = {}
-    /// The strap's newest STORED stress reading, under 24 h old (`StrapStressTile.currentReading`), or
-    /// nil. Read from the store by ContentView, not from `lastSyncResult`: that is reset at the start of
-    /// every sync and set only by that sync's own stress round, so the number used to vanish after any
-    /// sync without one and after every relaunch or background wake (#239, steer 3).
-    var latestStress: HelioReading?
-    /// Opens today's stress chart (#239). The stress reading is a button only when this is set.
-    var onStress: (() -> Void)?
-    /// The strap's newest STORED PAI reading, under 48 h old (`StrapPAIReading.currentReading`), or
-    /// nil. Read from the store by ContentView for exactly the reason stress is: `0x0d` arrives about
-    /// once a day, so `lastSyncResult.latestPAI` was blank after almost every sync and after every
-    /// relaunch (decision 45).
-    var latestPAI: HelioReading?
-
     /// Cached like `HelioSetupView`'s (review-224 N8): `hasKey` is a Keychain query, so it is read on
     /// appear and whenever the link or session phase moves, not on every render.
     @State private var hasKey = HelioKeyStore.shared.hasKey
@@ -53,7 +41,6 @@ struct HelioConnectionCard: View {
             HelioStatusRow(status: status)
             actions
             liveHeartRate
-            appOnlyReadings
             if let warnings = session?.recordingWarnings, !warnings.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("The strap isn't recording everything").font(.caption.weight(.semibold))
@@ -112,52 +99,5 @@ struct HelioConnectionCard: View {
             }
             .accessibilityElement(children: .combine)
         }
-    }
-
-    /// Stress and PAI (decision 15): shown here, never written to Apple Health. Both numbers come
-    /// from the store, with their own day-qualified time, so neither depends on what this particular
-    /// sync happened to bring.
-    @ViewBuilder
-    private var appOnlyReadings: some View {
-        if latestStress != nil || latestPAI != nil {
-            HStack(spacing: 16) {
-                if let stress = latestStress {
-                    if let onStress {
-                        Button(action: onStress) {
-                            HStack(alignment: .center, spacing: 4) {
-                                reading("Stress", value: "\(Int(stress.value))", at: stress.at,
-                                        timeLabel: StrapStressTile.timeLabel(stress.at, now: Date()))
-                                KeylineGlyph(.chevronRight, size: 12, relativeTo: .caption2).foregroundStyle(.tertiary)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityHint("Opens today's stress chart")
-                    } else {
-                        reading("Stress", value: "\(Int(stress.value))", at: stress.at,
-                                timeLabel: StrapStressTile.timeLabel(stress.at, now: Date()))
-                    }
-                }
-                if let pai = latestPAI {
-                    reading("PAI", value: "\(Int(pai.value.rounded()))", at: pai.at,
-                            timeLabel: StrapStressTile.timeLabel(pai.at, now: Date()))
-                }
-                Spacer()
-            }
-            Text("Stress and PAI stay in the app: Apple Health has no type for them.")
-                .font(.caption2).foregroundStyle(.tertiary)
-        }
-    }
-
-    /// `timeLabel` overrides the bare clock time. Stress and PAI both pass the day-qualified label
-    /// they share with the Stress tile (`StrapStressTile.timeLabel`), so last night's reading reads
-    /// "Yesterday 11:59 PM" instead of a bare clock time under today's date.
-    private func reading(_ title: String, value: String, at: Date, timeLabel: String? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption2).foregroundStyle(.secondary)
-            Text(value).font(.headline.monospacedDigit())
-            Text(timeLabel ?? at.formatted(date: .omitted, time: .shortened)).font(.caption2).foregroundStyle(.tertiary)
-        }
-        .accessibilityElement(children: .combine)
     }
 }
