@@ -1,4 +1,5 @@
 import XCTest
+import ZeppKit
 @testable import OpenCircuit
 
 /// #255 (decision 51): the first run's decisions, which device is preselected and marked "In use",
@@ -157,14 +158,8 @@ final class OnboardingFlowTests: XCTestCase {
         let centralBefore = HelioConnection.shared.hasCentral
         XCTAssertFalse(centralBefore, "the test host has the ring chosen, so the strap has no central")
 
-        let suite = "test.OnboardingFlowTests.keys"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { UserDefaults().removePersistentDomain(forName: suite) }
-        let keys = HelioKeyStore(service: "test.OnboardingFlowTests", defaults: defaults)
-        XCTAssertTrue(try keys.save(pasted: "00112233445566778899aabbccddeeff"))
-        defer { keys.forget() }
-
-        let live = OnboardingFlow(installed: .live(keyStore: keys))
+        // A stub, never the real keychain: the orchestrator's unsigned runs fail every SecItem call.
+        let live = OnboardingFlow(installed: .live(keyStore: StubKeyStore(hasKey: true)))
         XCTAssertTrue(live.installed.hasStrapKey)
         _ = live.preselection
         for pick in [nil, ActiveDeviceChoice.ringConn, .helioStrap] {
@@ -172,7 +167,7 @@ final class OnboardingFlowTests: XCTestCase {
             _ = live.switchNote(for: pick)
             _ = live.strapSetupHint(for: pick)
         }
-        _ = OnboardingFlow(installed: .live())
+        _ = OnboardingFlow(installed: .live(keyStore: StubKeyStore(hasKey: false)))
 
         XCTAssertEqual(HelioConnection.shared.hasCentral, centralBefore, "no central was created")
         XCTAssertFalse(HelioConnection.shared.hasCentral)
@@ -181,13 +176,17 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertEqual(standard.data(forKey: DeviceOwnershipStore.key), logBefore, "the ownership log is untouched")
     }
 
+    func testTheLiveReadAsksTheKeyStoreAndNothingElse() {
+        XCTAssertTrue(Installed.live(keyStore: StubKeyStore(hasKey: true)).hasStrapKey)
+        XCTAssertFalse(Installed.live(keyStore: StubKeyStore(hasKey: false)).hasStrapKey)
+    }
+
     func testTheLiveReadUsesThePersistedChoiceFromItsDefaults() throws {
         let suite = "test.OnboardingFlowTests.choice"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defaults.removePersistentDomain(forName: suite)
         defer { UserDefaults().removePersistentDomain(forName: suite) }
-        let keys = HelioKeyStore(service: "test.OnboardingFlowTests.none", defaults: defaults)
-        keys.forget()
+        let keys = StubKeyStore(hasKey: false)
 
         XCTAssertEqual(Installed.live(defaults: defaults, keyStore: keys).persistedChoice, .ringConn)
         defaults.set(ActiveDeviceChoice.helioStrap.rawValue, forKey: ActiveDeviceChoiceStore.key)
@@ -196,4 +195,19 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertFalse(strap.hasStrapKey)
         XCTAssertNil(defaults.data(forKey: DeviceOwnershipStore.key), "a read records no ownership entry")
     }
+}
+
+/// A key store with no keychain behind it (shared rules: no test may need the real keychain to reach
+/// its assertions). `hasKey` comes from `load()` through the protocol extension.
+@MainActor
+private final class StubKeyStore: HelioKeyStoring {
+    private let key: ZeppAuthKey?
+    init(hasKey: Bool) {
+        key = hasKey ? HelioKeyText.parse("00112233445566778899aabbccddeeff") : nil
+    }
+    func load() -> ZeppAuthKey? { key }
+    func save(pasted text: String) throws -> Bool { false }
+    func forget() {}
+    var isRejected: Bool { false }
+    func markRejected() {}
 }
