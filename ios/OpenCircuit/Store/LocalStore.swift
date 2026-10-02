@@ -1241,8 +1241,18 @@ struct LocalStore {
     /// minutes), so a catch-up recorded for the other device's time never feeds them. Equal to
     /// `samples(kind:from:to:)` for a ring-only install.
     func ownedSamples(kind: MetricKind, from start: Date, to end: Date) throws -> [QuantitySample] {
-        let log = Self.ownershipLog()
-        let rows = try context.fetch(Self.samplesDescriptor(kind: kind, from: start, to: end))
+        try Self.ownedSamples(in: context, kind: kind, from: start, to: end, log: Self.ownershipLog())
+    }
+
+    /// The nonisolated core of `ownedSamples(kind:from:to:)`, taking its context and its ownership log.
+    ///
+    /// `DayTimeline` reads a day off the main actor through a second `ModelContext` (#239, review-242
+    /// SF-2), exactly as `TrendsData.loadAsync` does. It calls THIS, so the background reader and the
+    /// main-actor method can never drift into filtering different rows — the same reason the fetch
+    /// descriptors are `nonisolated static` builders rather than hand-copied at each call site.
+    nonisolated static func ownedSamples(in context: ModelContext, kind: MetricKind, from start: Date,
+                                         to end: Date, log: DeviceOwnershipLog) throws -> [QuantitySample] {
+        let rows = try context.fetch(samplesDescriptor(kind: kind, from: start, to: end))
         guard !log.isEmpty else { return rows.compactMap(\.sample) }
         return rows.filter { log.owns(SyncDeviceID(rawValue: $0.deviceID), at: $0.start) }.compactMap(\.sample)
     }
@@ -1262,9 +1272,16 @@ struct LocalStore {
     /// `samples(kind:from:to:)` with an empty log).
     func ownSamples(kind: MetricKind, from start: Date, to end: Date,
                     of family: DeviceOwnershipLog.Family) throws -> [QuantitySample] {
-        let log = Self.ownershipLog()
-        guard !log.isEmpty else { return try samples(kind: kind, from: start, to: end) }
-        return try context.fetch(Self.samplesDescriptor(kind: kind, from: start, to: end))
+        try Self.ownSamples(in: context, kind: kind, from: start, to: end, of: family, log: Self.ownershipLog())
+    }
+
+    /// The nonisolated core of `ownSamples(kind:from:to:of:)` — see `ownedSamples(in:…)`.
+    nonisolated static func ownSamples(in context: ModelContext, kind: MetricKind, from start: Date, to end: Date,
+                                       of family: DeviceOwnershipLog.Family,
+                                       log: DeviceOwnershipLog) throws -> [QuantitySample] {
+        let rows = try context.fetch(samplesDescriptor(kind: kind, from: start, to: end))
+        guard !log.isEmpty else { return rows.compactMap(\.sample) }
+        return rows
             .filter { log.isOwn(recordedBy: SyncDeviceID(rawValue: $0.deviceID), at: $0.start, by: family) }
             .compactMap(\.sample)
     }
@@ -1352,6 +1369,11 @@ struct LocalStore {
         let log = Self.ownershipLog()
         if !(log.isEmpty && device == .ringConn) {
             out = out.filter { log.owns(device, at: $0.start) }
+        }
+        // #227 (review-238 SF1): a strap workout's own readings are already in Health inside its
+        // HKWorkout; they stay out of this flush without the watermark moving. Never the ring's.
+        if device != .ringConn {
+            out = StrapWorkoutHealthExclusions().filter(out, device: device, healthWatermark: cursor.last(.heartRate))
         }
         return out.sorted { $0.start < $1.start }
     }

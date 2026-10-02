@@ -129,6 +129,11 @@ final class HelioConnection: NSObject {
     /// A strap was connected before. Reads UserDefaults only: it never creates the central.
     nonisolated static var hasSavedStrap: Bool { savedPeripheralID != nil }
 
+    /// The saved strap's timeline (`zeppos:<id>`), or nil when none was ever connected.
+    nonisolated static var savedTimeline: SyncDeviceID? {
+        savedPeripheralID.map { SyncDeviceID.timeline(for: .zeppOS(model: HelioSession.displayName), identityID: $0) }
+    }
+
     func setLocalStore(_ store: LocalStore) {
         localStore = store
     }
@@ -240,6 +245,9 @@ final class HelioConnection: NSObject {
     func forgetStrap() {
         disconnect()
         peripheral = nil
+        // Its timeline is retired: nothing will flush it again, so its workout exclusions go too
+        // (review-238b N-1). Its stored rows stay, as every other forget leaves them.
+        if let timeline = Self.savedTimeline { StrapWorkoutHealthExclusions.retire(timeline: timeline) }
         UserDefaults.standard.removeObject(forKey: Self.savedPeripheralKey)
     }
 
@@ -320,7 +328,9 @@ final class HelioConnection: NSObject {
                     alertPass: { if let store { await HelioConnection.bodyAlertPass?(store) } })
             },
             onEvent: { [weak self] event in self?.handle(event) },
-            autoSyncOnConnect: syncOnConnect)
+            autoSyncOnConnect: syncOnConnect,
+            // A strap workout holds the link (#227): syncs wait until it ends.
+            workoutHoldsLink: { StrapWorkoutRecorder.holdsStrapLink })
         session.backgroundRunOwnsSyncs = backgroundRunAdoptsNewSessions
         session.appInBackground = !Self.appIsActive
         made.session = session
@@ -452,9 +462,11 @@ struct HelioActivationSync {
     /// Sync now: the session is `.ready` and idle (no sync, no find, no live heart rate), and neither
     /// this throttle's last start nor the last completed strap sync (persisted, so a relaunch counts
     /// it) is younger than `ForegroundAutoSync.interval`.
+    /// `workoutHoldsStrap` (#227, review-238 B1): a strap workout holds the link; nothing is started and
+    /// the throttle doesn't count it. The workout's own End runs the sync it held back.
     mutating func shouldSync(phase: HelioSession.Phase, syncing: Bool, finding: Bool, liveHeartRate: Bool,
-                             lastCompletedSync: Date?, now: Date) -> Bool {
-        guard phase == .ready, !syncing, !finding, !liveHeartRate else { return false }
+                             lastCompletedSync: Date?, now: Date, workoutHoldsStrap: Bool = false) -> Bool {
+        guard phase == .ready, !syncing, !finding, !liveHeartRate, !workoutHoldsStrap else { return false }
         if let last = [lastStarted, lastCompletedSync].compactMap({ $0 }).max(),
            now >= last, now.timeIntervalSince(last) < ForegroundAutoSync.interval { return false }
         lastStarted = now
@@ -469,7 +481,8 @@ extension HelioConnection {
     static func becameActive(_ session: HelioSession, gate: inout HelioActivationSync, lastCompletedSync: Date?, now: Date) {
         session.appDidBecomeActive()
         if gate.shouldSync(phase: session.phase, syncing: session.syncing, finding: session.isFinding,
-                           liveHeartRate: session.liveHeartRateRunning, lastCompletedSync: lastCompletedSync, now: now) {
+                           liveHeartRate: session.liveHeartRateRunning, lastCompletedSync: lastCompletedSync, now: now,
+                           workoutHoldsStrap: StrapWorkoutRecorder.holdsStrapLink) {
             session.syncHistory(manual: false)
         }
     }
@@ -530,7 +543,8 @@ extension HelioConnection {
     /// background and no sync running, is a wake gated like a reconnect (`HelioWakePolicy`).
     private func idleTrafficArrived() {
         guard idleTraffic.shouldCheck(now: Date(), appIsActive: Self.appIsActive, syncing: session?.syncing == true,
-                                      runActive: activeBackgroundRuns > 0) else { return }
+                                      runActive: activeBackgroundRuns > 0,
+                                      workoutHoldsStrap: StrapWorkoutRecorder.holdsStrapLink) else { return }
         Self.wakeHandler(.idleTraffic)
     }
 
@@ -632,35 +646,49 @@ extension HelioConnection: HelioTransport {
 
 extension HelioConnection: CBCentralManagerDelegate {
     nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        MainActor.assumeIsolated {
-            switch central.state {
-            case .poweredOn:
-                if state == .bluetoothOff || state == .bluetoothDenied { state = .idle }
-                switch pendingAction {
-                case .scan?: scan()
-                case .reconnect?: reconnectKnown()
-                case .resumeRestored?: resumeRestored()
-                case nil: break
-                }
-            case .poweredOff:
-                // Decision 33: the link is gone (CoreBluetooth may not report the disconnect). Keep the
-                // wish to be connected: power-on reconnects (`pendingAction`), and that can wake the app.
-                if session != nil || wantConnection {
-                    session?.linkLost()
-                    session = nil
-                    characteristics = [:]
-                    writeQueue = []
-                    if wantConnection { pendingAction = .reconnect }
-                    breadcrumbs.bluetoothOff(standingConnectArmed: wantConnection,
-                                             upFor: linkUpAt.map { Date().timeIntervalSince($0) })
-                    linkUpAt = nil
-                }
-                state = .bluetoothOff
-            case .unauthorized:
-                state = .bluetoothDenied
-            default:
-                break
+        MainActor.assumeIsolated { centralStateChanged(central.state) }
+    }
+
+    /// Tests only: a session as if this connection had made it, so the Bluetooth-state handling can be
+    /// driven without CoreBluetooth (review-238 S1).
+    func installSessionForTesting(_ session: HelioSession, wantConnection: Bool = true) {
+        self.session = session
+        self.wantConnection = wantConnection
+        state = .connected
+    }
+
+    /// A reconnect to the saved strap waits for Bluetooth to come back on (review-238 S1).
+    var reconnectArmedForPowerOn: Bool { pendingAction == .reconnect }
+
+    /// The central's state, apart from CoreBluetooth so a test can deliver it (review-238 S1).
+    func centralStateChanged(_ newState: CBManagerState) {
+        switch newState {
+        case .poweredOn:
+            if state == .bluetoothOff || state == .bluetoothDenied { state = .idle }
+            switch pendingAction {
+            case .scan?: scan()
+            case .reconnect?: reconnectKnown()
+            case .resumeRestored?: resumeRestored()
+            case nil: break
             }
+        case .poweredOff:
+            // Decision 33: the link is gone (CoreBluetooth may not report the disconnect). Keep the
+            // wish to be connected: power-on reconnects (`pendingAction`), and that can wake the app.
+            if session != nil || wantConnection {
+                session?.linkLost()
+                session = nil
+                characteristics = [:]
+                writeQueue = []
+                if wantConnection { pendingAction = .reconnect }
+                breadcrumbs.bluetoothOff(standingConnectArmed: wantConnection,
+                                         upFor: linkUpAt.map { Date().timeIntervalSince($0) })
+                linkUpAt = nil
+            }
+            state = .bluetoothOff
+        case .unauthorized:
+            state = .bluetoothDenied
+        default:
+            break
         }
     }
 
@@ -724,6 +752,11 @@ extension HelioConnection: CBCentralManagerDelegate {
             linkUpAt = Date()
             breadcrumbs.linkUp(restoredThisLaunch ? "connected after a restoration relaunch" : "connected",
                                appActive: Self.appIsActive)
+            // A different strap (or the same one re-added, which gets a new identity): the old
+            // timeline is retired, so its workout exclusions go (review-238b N-1).
+            if let previous = Self.savedTimeline, previous != peripheral.strapTimeline {
+                StrapWorkoutHealthExclusions.retire(timeline: previous)
+            }
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
             characteristics = [:]
             peripheral.discoverServices(nil)
@@ -842,5 +875,12 @@ extension HelioConnection: CBPeripheralDelegate {
             guard error == nil, rssiTask != nil else { return }
             rssi = RSSI.intValue
         }
+    }
+}
+
+extension CBPeripheral {
+    /// This peripheral's strap timeline (`zeppos:<identifier>`), the id every strap row is stored under.
+    var strapTimeline: SyncDeviceID {
+        SyncDeviceID.timeline(for: .zeppOS(model: HelioSession.displayName), identityID: identifier.uuidString)
     }
 }

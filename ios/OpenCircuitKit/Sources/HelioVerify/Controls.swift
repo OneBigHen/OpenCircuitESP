@@ -14,6 +14,7 @@ import ZeppKit
 enum ControlTask: Equatable {
     case findCapabilities
     case alerts
+    case settings
     case alarms
     case find(seconds: Double)
     case buzz
@@ -24,6 +25,7 @@ enum ControlWait: Equatable {
     case findCapabilities
     case configCapabilities
     case configRead(group: UInt8)
+    case settings
     case alarms
     case find
     case buzz
@@ -74,6 +76,7 @@ extension HelioVerifier {
         var tasks = [ControlTask]()
         if options.findSeconds != nil || options.vibrate { tasks.append(.findCapabilities) }
         if options.alerts { tasks.append(.alerts) }
+        if options.settings || options.writesConfig { tasks.append(.settings) }
         if options.listAlarms || options.writesAlarms { tasks.append(.alarms) }
         if let seconds = options.findSeconds { tasks.append(.find(seconds: seconds)) }
         if options.vibrate { tasks.append(.buzz) }
@@ -96,6 +99,7 @@ extension HelioVerifier {
         switch controlTasks.removeFirst() {
         case .findCapabilities: startFindCapabilities()
         case .alerts: startAlerts()
+        case .settings: startSettings()
         case .alarms: startAlarms()
         case .find(let seconds): startFind(seconds: seconds)
         case .buzz: startBuzz()
@@ -134,6 +138,7 @@ extension HelioVerifier {
             alarmEditor = editor
             performAlarm(out)
         }
+        tickSettings()
     }
 
     func sendControl(_ messages: [ZeppControlMessage]) {
@@ -349,6 +354,8 @@ extension HelioVerifier {
     }
 
     func receiveAlertsMessage(_ payload: [UInt8]) {
+        // Settings print their own summaries (Settings.swift).
+        if controlWait == .settings { return receiveSettingsMessage(payload) }
         log("  0x000a ← \(spaced(payload))")
         switch controlWait {
         case .configCapabilities?:

@@ -61,8 +61,10 @@ public enum ZeppMetricMapping {
             return "RMSSD in the .hrvSDNN slot: mapped by storedSamples(from:) and mirrored by HelioHealthPolicy.writesHRV (decision 44), not here"
         case .maxHeartRate:
             return "no HealthKit type for max HR"
-        case .autoStress, .manualStress:
-            return "no metric kind for stress"
+        case .autoStress:
+            return "no Apple Health type for stress; stored in the app only as .stress (storedSamples)"
+        case .manualStress:
+            return "no Apple Health type for stress; not fetched (only ever empty on the Helio)"
         case .pai:
             return "no metric kind for PAI"
         case .sleepSpO2:

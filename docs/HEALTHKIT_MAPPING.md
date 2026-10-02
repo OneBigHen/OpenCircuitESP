@@ -61,7 +61,8 @@ rules are in `ZeppKit/HelioSyncPolicy.swift`, tested by `HelioSyncPolicyTests`.
 | Resting HR (`0x3a`, strap-reported) | `.restingHeartRate` (local only) | no: the ring's derived daily writer already writes one per day, and writing both would double it |
 | HRV (`0x49`, RMSSD 🟡) | `.hrvSDNN` | yes, per reading (`HelioHealthPolicy.writesHRV`, decision 44): the RMSSD value in the SDNN field, tagged `OpenCircuitHRVStatistic = "RMSSD"` like the ring's. Readings stored before this shipped backfill on the next flush (the strap's `hk:hrvSDNN` watermark was never advanced), back to the 30-day raw-sample retention |
 | Sleep (`0x48`) | the strap's own stages → Sleep summary + hypnogram; no invented in-bed span | yes, through `mirrorSettledNight`; a manually edited night is never overwritten. No `SleepStaging` fallback yet (DECISION-GAP, see `HelioSleepSelection`) |
-| Stress (`0x13`), PAI (`0x0d`) | shown in the app only | no Health type |
+| Stress (`0x13`) | `.stress`, one 0–100 sample per minute (`ff` skipped), charted through the day (#239). A backfill moves only its fetch watermark back, up to 7 days and never before the strap's ownership start, and only when another build advanced that watermark without storing the minutes (builds 59/60) | **no**: no Health type (`HealthKitWriter.quantityType(for: .stress)` is nil; not in any mirrored-kind list; not exported) |
+| PAI (`0x0d`) | shown in the app only (latest value) | no Health type |
 | Walking + running distance | — | **no**: the ring's distance is its own per-step estimate, so it is derived only from step rows the RING owned (decision 28). The strap sends no distance history and its steps get none. The ring's day distance is one sample from midnight to its last row, named the ring, so on a day with a switch Health's hourly chart spreads it across the strap's hours too (review-224c N-c; the day total is right) |
 
 #### Who owns which time (decision 28)

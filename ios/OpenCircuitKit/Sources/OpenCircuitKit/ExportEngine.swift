@@ -1304,7 +1304,9 @@ public enum ExportEngine {
     /// so they cannot drift from what the HealthKit writer actually wrote.
     private static var units: [String: String] {
         var map: [String: String] = [:]
-        for kind in MetricKind.allCases { map[kind.rawValue] = kind.unit }
+        // `.stress` (#239) is stored in the app only and is in no export, so it gets no entry: the
+        // block stays exactly what it was before the kind existed.
+        for kind in MetricKind.allCases where kind != .stress { map[kind.rawValue] = kind.unit }
         map["delta"] = "count"                     // stepSamples[].delta
         map["celsius"] = "degC"
         map["skinTempC"] = "degC"
