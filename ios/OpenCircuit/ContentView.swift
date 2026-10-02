@@ -60,6 +60,10 @@ struct ContentView: View {
     /// Apple Health, or discard). Non-nil presents the recovery alert. See
     /// `WorkoutSessionRecovery` for what the app is allowed to claim about it.
     @State private var recoverableWorkout: RecoveredWorkout?
+    /// The strap's workout (#227): the app's one recorder, outliving every sheet as `workoutManager` does.
+    /// Built once, on first use (review-238 N2), idle and inert unless a strap workout starts.
+    private var strapWorkouts: StrapWorkoutRecorder { .shared }
+    @State private var showStrapWorkout = false
     @State private var showCalibration = false
     @StateObject private var calibration = CalibrationSessionManager()
     /// Raw-capture export state for the activity-channel probe (debug / RE — issue #93).
@@ -219,10 +223,16 @@ struct ContentView: View {
                     evaluateReminders: { evaluateReminders(includeSedentary: false) }),
                 // A switch made from Profile ▸ Device: hand the store to the newly chosen driver.
                 onChoiceChanged: { choice in
+                    // Switched to the ring mid-workout: the strap's link is already closed (its stream
+                    // stopped with `04 00`), so the strap workout ends here and keeps what it recorded.
+                    if choice != .helioStrap, strapWorkouts.isRecording { Task { await strapWorkouts.end() } }
                     if choice == .helioStrap { helio.setLocalStore(LocalStore(modelContext)) }
                     else { scanner.setLocalStore(LocalStore(modelContext)) }
                     Task { await loadTrends(.syncFinished) }
                 }))
+            // The strap's workout (#227): its sheet, the interrupted-workout offer, the landing pass.
+            .modifier(StrapWorkoutHooks(recorder: strapWorkouts, session: helioSession, show: $showStrapWorkout,
+                                        onWorkoutsChanged: { workoutHistoryToken += 1 }))
             // Feed / reset the liveline live-vitals buffer as on-demand readings arrive.
             .onChange(of: session?.liveHR) { _, hr in
                 if session?.monitoring == true, session?.liveMode == .hr, let hr { appendLive(Double(hr)) }
@@ -584,6 +594,11 @@ struct ContentView: View {
                     }
                     // Workouts record the ring's live heart rate and native sport mode: ring only (#215).
                     if ringActive { workoutCard }
+                    // The strap's workout (#227): its live heart rate and the phone's GPS. Still shown
+                    // while one is recording after a switch, so it can always be ended.
+                    if !ringActive || strapWorkouts.isRecording {
+                        StrapWorkoutCard(recorder: strapWorkouts, show: $showStrapWorkout)
+                    }
                     // The app's own workout history, read back out of Apple Health (no SwiftData
                     // model, no schema version). Before this a finished workout was visible exactly
                     // once — on the summary screen — which is the other half of the tester's "it
@@ -852,6 +867,8 @@ struct ContentView: View {
     @MainActor
     private func handleActiveWorkoutLink() {
         selectedTab = .activity
+        // The strap's workout has its own sheet (#227); never recording for a ring-only user.
+        if strapWorkouts.isRecording { showStrapWorkout = true; return }
         showWorkout = true
     }
 

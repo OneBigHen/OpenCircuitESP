@@ -183,6 +183,8 @@ final class HelioSession: WearableSession {
     private(set) var liveHRAt: Date?
     /// The authenticated heart-rate stream (§7.1) is running.
     private(set) var liveHeartRateRunning = false
+    /// Who started the running stream: the Measure control (90 s), or a workout (until it ends, #227).
+    private(set) var liveHeartRateOwner: LiveHeartRateOwner?
     /// Standard heart-rate notifications arrived without auth (Tier 0) on this connection.
     private(set) var tierZeroHeartRateSeen = false
     private(set) var steps: Int?
@@ -231,6 +233,12 @@ final class HelioSession: WearableSession {
     @ObservationIgnored private let random: ZeppRandom
     @ObservationIgnored private let autoTick: Bool
     @ObservationIgnored private let autoSyncOnConnect: Bool
+    /// True while the app records a workout on this strap (#227): history syncs wait until it ends.
+    @ObservationIgnored private let workoutHoldsLink: @MainActor () -> Bool
+    /// Every valid heart-rate reading, as it arrives (the workout recorder, #227).
+    @ObservationIgnored var heartRateObserver: (@MainActor (Int, Date) -> Void)?
+    /// The `04 00` owed after an interrupted workout (#227, review-238 SF2).
+    @ObservationIgnored var orphanStop = StrapWorkoutOrphanStop()
 
     // MARK: Protocol state
 
@@ -246,6 +254,8 @@ final class HelioSession: WearableSession {
     @ObservationIgnored private var syncCounts = (stored: 0, failed: 0, empty: 0)
     @ObservationIgnored private var liveHRKeepAliveAt: Date?
     @ObservationIgnored private var liveHREndsAt: Date?
+    /// When the workout stream was last (re)started, for its restart watchdog.
+    @ObservationIgnored private var liveHRStartedAt: Date?
     @ObservationIgnored private var disHardwareRevision: String?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     /// When this session last sent to each endpoint, to tell a reply from a message the strap sent on
@@ -263,6 +273,16 @@ final class HelioSession: WearableSession {
 
     private enum NotifyPurpose { case auth, fetch }
 
+    enum LiveHeartRateOwner: Equatable { case measure, workout }
+
+    /// A workout started the heart-rate stream and no reading has arrived for this long: send the
+    /// start again (#227).
+    // SPEC-GAP: §7.1 says only that `04 02` every second keeps the stream running. Whether the strap
+    // ever stops on its own (a maximum duration, or after the keep-alive paused while the app was
+    // suspended), and whether `04 02` alone restarts it, is not specified. A stalled stream is
+    // restarted with `04 01`, at most once per this interval.
+    static let workoutStreamRestartAfter: TimeInterval = 10
+
     private enum SetupStep: Equatable {
         case servicesList, deviceInfo, battery, setTime, healthConfig
         case findCapabilities, alarms, alertCapabilities, alertSettings
@@ -274,7 +294,8 @@ final class HelioSession: WearableSession {
          onSyncFinished: @escaping @MainActor (HelioSyncResult, SyncDeviceID) async -> Void = { _, _ in },
          onEvent: @escaping @MainActor (HelioSessionEvent) -> Void = { _ in },
          clock: @escaping () -> Date = Date.init, random: ZeppRandom = .system,
-         autoTick: Bool = true, autoSyncOnConnect: Bool = true) {
+         autoTick: Bool = true, autoSyncOnConnect: Bool = true,
+         workoutHoldsLink: @escaping @MainActor () -> Bool = { false }) {
         self.transport = transport
         self.identityID = identityID
         self.model = model
@@ -288,6 +309,7 @@ final class HelioSession: WearableSession {
         self.random = random
         self.autoTick = autoTick
         self.autoSyncOnConnect = autoSyncOnConnect
+        self.workoutHoldsLink = workoutHoldsLink
         timeline = SyncDeviceID.timeline(for: .zeppOS(model: Self.displayName), identityID: identityID)
         findPhase = findState.machine.state
     }
@@ -332,6 +354,14 @@ final class HelioSession: WearableSession {
     }
 
     func syncHistory(manual: Bool) {
+        // A workout holds the link (#227), like the ring's (T6): the sync runs when it ends.
+        // SPEC-GAP: whether a history fetch (…0004/…0005) and the heart-rate stream (`0x001D`) can
+        // run together on one connection is not specified, so they never do.
+        guard !workoutHoldsLink() else {
+            if manual { syncStatus = "Syncs after the workout ends" }
+            helioLog.notice("helio: sync deferred, a workout holds the link")
+            return
+        }
         guard phase == .ready, isAuthenticated else {
             if manual { syncStatus = phase == .syncing ? "Already syncing" : "Not ready to sync" }
             return
@@ -439,6 +469,7 @@ final class HelioSession: WearableSession {
             liveHR = measurement.beatsPerMinute
             liveHRAt = now
             if !isAuthenticated { tierZeroHeartRateSeen = true }
+            heartRateObserver?(measurement.beatsPerMinute, now)
         case .chunkedRead, .chunkedWrite:
             guard var link else { return }
             let out = link.receive(bytes)
@@ -476,8 +507,10 @@ final class HelioSession: WearableSession {
         findPhase = findState.machine.state
         if fetch != nil || phase == .syncing { finishFetch(interrupted: true) }
         liveHeartRateRunning = false
+        liveHeartRateOwner = nil
         liveHRKeepAliveAt = nil
         liveHREndsAt = nil
+        liveHRStartedAt = nil
         authDeadline = nil
         stepDeadline = nil
         tickTask?.cancel()
@@ -502,12 +535,13 @@ final class HelioSession: WearableSession {
         if fetch != nil || phase == .syncing { finishFetch(interrupted: true) }
     }
 
-    /// Decision 18: backgrounding stops a find; the live heart-rate stream stops too, and so does the
-    /// keyless Tier 0 subscription (§16.5: none for background work).
+    /// Decision 18: backgrounding stops a find; a Measure stream stops too, and so does the keyless
+    /// Tier 0 subscription (§16.5: none for background work). A workout's stream keeps running (#227):
+    /// the workout's location session keeps the app alive, as the ring's does.
     func appDidEnterBackground() {
         appInBackground = true
         stopFind()
-        stopLiveHeartRate()
+        if liveHeartRateOwner != .workout { stopLiveHeartRate() }
         stopTierZero()
     }
 
@@ -554,6 +588,12 @@ final class HelioSession: WearableSession {
         if liveHeartRateRunning {
             if let end = liveHREndsAt, now >= end {
                 stopLiveHeartRate()
+            } else if liveHeartRateOwner == .workout, let started = liveHRStartedAt,
+                      now.timeIntervalSince(max(liveHRAt ?? started, started)) >= Self.workoutStreamRestartAfter {
+                helioLog.notice("helio: workout heart rate stalled; sending start again")
+                send(ZeppEndpoint.heartRate, ZeppHeartRateControl.start)
+                liveHRStartedAt = now
+                liveHRKeepAliveAt = now.addingTimeInterval(1)
             } else if let next = liveHRKeepAliveAt, now >= next {
                 send(ZeppEndpoint.heartRate, ZeppHeartRateControl.keepRunning)
                 liveHRKeepAliveAt = now.addingTimeInterval(1)
@@ -734,6 +774,7 @@ final class HelioSession: WearableSession {
     private func setupFinished() {
         phase = .ready
         helioLog.notice("helio: ready (clock \(self.clockSet ? "set" : "NOT set", privacy: .public), controls: find \(self.controlCapabilities.isSupported(.findDevice), privacy: .public), alarms \(self.controlCapabilities.isSupported(.alarms), privacy: .public))")
+        sendOwedOrphanStop()   // before any stream or sync (review-238 SF2)
         if autoSyncOnConnect { syncHistory(manual: false) }
     }
 
@@ -988,7 +1029,9 @@ final class HelioSession: WearableSession {
     /// §16.5: standard heart rate that nothing on this connection asked for. Do what Gadgetbridge does,
     /// once: `04 00` on `0x001D` (with a key) and unsubscribe. It only stops a stream.
     private func heartRateFailSafe() {
-        guard !heartRateFailSafeSent else { return }
+        // Never the workout's own stream (#227, review-238 B1 d). It can't reach here today (a running
+        // stream is never "unasked for"); the guard keeps it that way.
+        guard !heartRateFailSafeSent, liveHeartRateOwner != .workout else { return }
         heartRateFailSafeSent = true
         if isAuthenticated, services?.contains(ZeppEndpoint.heartRate) == true {
             send(ZeppEndpoint.heartRate, ZeppHeartRateControl.stop)
@@ -1016,7 +1059,8 @@ final class HelioSession: WearableSession {
     }
 
     private func stopTierZero() {
-        guard tierZeroSubscribed else { return }
+        // The 0x2A37 subscription is the workout stream's too: never dropped under it (#227).
+        guard tierZeroSubscribed, liveHeartRateOwner != .workout else { return }
         tierZeroSubscribed = false
         transport?.setNotify(.heartRateMeasurement, enabled: false)
     }
@@ -1033,14 +1077,59 @@ final class HelioSession: WearableSession {
         liveHRKeepAliveAt = now.addingTimeInterval(1)
         liveHREndsAt = now.addingTimeInterval(duration)
         liveHeartRateRunning = true
+        liveHeartRateOwner = .measure
+    }
+
+    /// A workout's stream (#227): the same start and 1 s `04 02` keep-alive, with no time limit, until
+    /// `stopWorkoutHeartRate()` (or the link drops). A running Measure is taken over, not restarted.
+    // SPEC-GAP: §7.1 gives no maximum stream duration; none is applied here (see
+    // `workoutStreamRestartAfter` for a strap that stops by itself).
+    func startWorkoutHeartRate() {
+        guard canStreamHeartRate, let transport else { return }
+        let now = clock()
+        if liveHeartRateRunning {
+            liveHeartRateOwner = .workout
+            liveHREndsAt = nil
+            liveHRStartedAt = now
+            return
+        }
+        transport.setNotify(.heartRateMeasurement, enabled: true)
+        send(ZeppEndpoint.heartRate, ZeppHeartRateControl.start)
+        liveHRKeepAliveAt = now.addingTimeInterval(1)
+        liveHREndsAt = nil
+        liveHRStartedAt = now
+        liveHeartRateRunning = true
+        liveHeartRateOwner = .workout
+    }
+
+    /// Stops the stream only if a workout owns it.
+    func stopWorkoutHeartRate() {
+        guard liveHeartRateOwner == .workout else { return }
+        stopLiveHeartRate()
+    }
+
+    /// Review-238 SF2: a killed process's workout stream is owed one `04 00` (§7.1), set by the
+    /// recorder's launch recovery (`StrapWorkoutOrphanStop`). Sent at this connection's first
+    /// authenticated `ready` (`setupFinished`, before any stream or sync) or at once if already ready,
+    /// then cleared. A stream this connection runs itself means the strap streams for us now: nothing
+    /// to stop, so it's only cleared. A strap without the heart-rate endpoint never streamed: cleared.
+    func sendOwedOrphanStop() {
+        guard orphanStop.owed, isAuthenticated else { return }
+        if canStreamHeartRate, !liveHeartRateRunning {
+            send(ZeppEndpoint.heartRate, ZeppHeartRateControl.stop)
+            helioLog.notice("helio: sent the 04 00 owed since an interrupted workout")
+        }
+        orphanStop.owed = false
     }
 
     func stopLiveHeartRate() {
         guard liveHeartRateRunning else { return }
         liveHeartRateRunning = false
+        liveHeartRateOwner = nil
         liveHRStoppedAt = clock()
         liveHRKeepAliveAt = nil
         liveHREndsAt = nil
+        liveHRStartedAt = nil
         send(ZeppEndpoint.heartRate, ZeppHeartRateControl.stop)
         transport?.setNotify(.heartRateMeasurement, enabled: false)
     }

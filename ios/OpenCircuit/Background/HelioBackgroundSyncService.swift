@@ -205,7 +205,14 @@ extension HelioBackgroundLink {
     /// - The standing connect is armed in this call (`rearmAfterTeardown`). Its `connect` is issued when
     ///   the cancel lands (`didDisconnectPeripheral`, an event iOS wakes the app for), not before: one
     ///   issued while the cancel is in flight could keep the session-less link up, the state this fixes.
+    ///
+    /// While the app records a strap workout (#227, review-238 B1) nothing is torn down: the workout's
+    /// location session keeps the app alive, its link carries the heart-rate stream, and no sync runs on it.
     func tearDownForExpiry() {
+        guard !StrapWorkoutRecorder.holdsStrapLink else {
+            helioLog.notice("helio: expiry teardown skipped: a strap workout holds the strap")
+            return
+        }
         session?.stopSyncForTeardown()
         disconnectForBackground(cancelNow: true)
         rearmAfterTeardown()
@@ -241,6 +248,9 @@ struct HelioBackgroundRun: Equatable {
         case coalesced(into: HelioWake)
         /// Coalesced the other way: a later run with a larger budget took this run's sync over.
         case handedOver(to: HelioWake)
+        /// The app records a strap workout (#227, review-238 B1): the run touched nothing (no sync, no
+        /// teardown, no disconnect); the workout's End runs the sync it held back.
+        case workoutHoldsStrap
 
         /// For the breadcrumb: the case name, with the other run's wake when there is one.
         var label: String {
@@ -277,7 +287,7 @@ struct HelioBackgroundRun: Equatable {
     var endedQuietly: Bool {
         switch ending {
         case .noSavedStrap, .keyNeeded, .keyRejected, .strapBusy, .unsupported, .anotherRunActive,
-             .coalesced, .handedOver: return true
+             .coalesced, .handedOver, .workoutHoldsStrap: return true
         case .synced, .outOfTime, .expired, .handedToApp: return false
         }
     }
@@ -286,6 +296,7 @@ struct HelioBackgroundRun: Equatable {
     /// done for two tasks (#233: a coalesced task is not a failure).
     var success: Bool {
         (ending == .synced && result?.interrupted == false) || flush?.wroteAnything == true || ending.isCoalesced
+            || ending == .workoutHoldsStrap   // the app was busy recording, not failing
     }
 
     /// What an out-of-time or expired run did to the link, for its log line.
@@ -307,6 +318,7 @@ struct HelioBackgroundRun: Equatable {
         case .anotherRunActive: head = "another background run held the strap for this run's whole window; nothing done"
         case .coalesced(let into): head = "coalesced into the \(into.runName) run"
         case .handedOver(let to): head = "handed its sync to the \(to.runName) run (larger budget)"
+        case .workoutHoldsStrap: head = "a strap workout holds the strap; nothing synced or torn down (the sync runs when it ends)"
         }
         var parts = ["helio strap: \(head)"]
         if let result {
@@ -357,6 +369,8 @@ struct HelioBackgroundSyncService {
     let appIsActive: @MainActor () -> Bool
     /// The link and wake breadcrumbs (#233); nil in tests that don't look at them.
     var breadcrumbs: HelioBreadcrumbs? = nil
+    /// The app records a strap workout (#227): the run ends at once, touching nothing (review-238 B1).
+    var workoutHoldsStrap: @MainActor () -> Bool = { StrapWorkoutRecorder.holdsStrapLink }
 
     /// One bounded run. `nightsFinalized` is the Sleep Focus wake's "the night is over": the time T
     /// Sleep Focus ended. The strap's nights then skip the 20-minute quiet margin, as the ring's do on
@@ -368,6 +382,14 @@ struct HelioBackgroundSyncService {
         let start = now()
         var run = HelioBackgroundRun(ending: .outOfTime)
         let syncDeadline = start.addingTimeInterval(max(0, timeout - Self.flushReserve))
+
+        // Review-238 B1: a strap workout holds the link. A sync would be deferred (and read as
+        // "unsupported", which disconnects), and a teardown would end the workout's heart rate. So the
+        // run touches nothing: no connect, no sync, no teardown.
+        if workoutHoldsStrap() {
+            run.ending = .workoutHoldsStrap
+            return record(run, kind: kind)
+        }
 
         // Review-225 S2: one run at a time on a link. The Sleep Focus wake and the scheduler's morning
         // refresh can overlap; two runs would adopt the same sync and both flush it (and a
@@ -465,6 +487,9 @@ struct HelioBackgroundSyncService {
         if link.session?.isLinkConnected != true { _ = link.connectForBackground() }
 
         loop: while true {
+            // Checked first, before an expiry and before `syncHistory` (which a workout defers): a
+            // workout started while this run waited for the session ends the run without a teardown.
+            if workoutHoldsStrap() { run.ending = .workoutHoldsStrap; break }
             if Task.isCancelled { run.ending = .expired; break }
             if let to = link.activeRun?.handOverTo { run.ending = .handedOver(to: to); break }
             if let session = link.session, session.isLinkConnected {
@@ -576,6 +601,13 @@ struct HelioBackgroundSyncService {
         case .handedToApp, .anotherRunActive, .coalesced:
             // These return above; none may touch a link another party is using.
             return record(run, kind: kind)
+        case .workoutHoldsStrap:
+            // Review-238 B1: the link is the workout's. Nothing sent, nothing torn down; a session this
+            // run adopted goes back to its own hooks.
+            watched?.backgroundRunOwnsSyncs = false
+            link.session?.backgroundRunOwnsSyncs = false
+            breadcrumbs?.wakeNote(wake, "background run ended: a strap workout holds the strap")
+            return record(run, kind: kind)
         case .keyNeeded, .keyRejected, .strapBusy, .unsupported, .noSavedStrap:
             // Decision 7: end here, drop the link and leave it down; the next explicit connect retries.
             link.disconnectForBackground()
@@ -619,7 +651,7 @@ struct HelioBackgroundSyncService {
     /// connect again (decision 33). false when no session is up: a connect still pending stays armed,
     /// so the strap coming into range can wake the app through state restoration later.
     private func abandon() -> Bool {
-        guard let session = link.session else { return false }
+        guard let session = link.session, !workoutHoldsStrap() else { return false }
         session.abortSync()
         link.disconnectForBackground()
         link.rearmAfterTeardown()
