@@ -90,8 +90,8 @@ struct SleepCardView: View {
     var sleepPersistOutcome: SleepPersistOutcome? = nil
     /// Sleep-vitals samples (HR / HRV / SpO₂) over the last few days — narrowed in memory to the
     /// resolved night window for the "overnight average" row under the stage breakdown. Bounded
-    /// (value-positive + windowed) so it never scans all history (#32), mirroring
-    /// `VitalsTableView.recentTemp`. A night older than this window keeps its totals but omits the
+    /// (value-positive + windowed) so it never scans all history (#32), the pattern the Vitals card's
+    /// `recentTemp` set before #245 removed it. A night older than this window keeps its totals but omits the
     /// averages (its raw samples have aged out of the query window).
     @Query private var recentVitals: [StoredSample]
     /// Days of HR/HRV/SpO₂ history scanned before the precise night window is applied in memory.

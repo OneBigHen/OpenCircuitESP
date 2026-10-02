@@ -14,6 +14,10 @@ import OpenCircuitKit
 struct MetricDetailView: View {
     let metric: TodayTile.Metric
     let tempUnitRaw: String
+    /// Today's live devices and its ONE live buffer, for the Measure card under the chart (#245).
+    /// nil — the default — means no card, so a detail opened from anywhere else still compiles and
+    /// renders exactly as before.
+    let measure: VitalMeasureSource?
 
     @Environment(\.modelContext) private var modelContext
     @State private var range = 14
@@ -23,9 +27,11 @@ struct MetricDetailView: View {
     static let dayRange = 1
 
     /// `startsOnDay`: open on today's Day chart, as from a Today tile (#239); otherwise the 14-day trend.
-    init(metric: TodayTile.Metric, tempUnitRaw: String, startsOnDay: Bool = false) {
+    init(metric: TodayTile.Metric, tempUnitRaw: String, startsOnDay: Bool = false,
+         measure: VitalMeasureSource? = nil) {
         self.metric = metric
         self.tempUnitRaw = tempUnitRaw
+        self.measure = measure
         _range = State(initialValue: startsOnDay ? Self.dayRange : 14)
     }
 
@@ -69,6 +75,12 @@ struct MetricDetailView: View {
                     notes(tile)
                 } else {
                     ProgressView().frame(maxWidth: .infinity, minHeight: 240)
+                }
+                // On-demand Measure, under the chart in EVERY range (#245, decision 47), so changing
+                // the Day / 14 / 30 picker never takes the button away. Only the two vitals a device
+                // can read on demand have one; the rest get nothing.
+                if let measure, let vital = metric.measuredVital {
+                    VitalMeasureCard(vital: vital, source: measure)
                 }
             }
             .padding(16)

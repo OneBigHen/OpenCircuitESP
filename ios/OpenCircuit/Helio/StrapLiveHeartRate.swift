@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// The strap's on-demand live heart rate, shaped like the ring's Measure (decision 30): one round
-/// heart control on the Vitals card's heart-rate row, and the same "Live Heart Rate" card on Today
-/// while it streams. A thin adapter over `HelioSession`; the ring's path
-/// (`VitalsTableView.measureButton`, `RingSession.startMonitoring`) is untouched.
+/// heart control on the Measure card under the Resting HR detail's chart (`VitalMeasureCard`, #245),
+/// and the same "Live Heart Rate" card on Today while it streams. A thin adapter over `HelioSession`;
+/// the ring's path (`VitalMeasureCard.measureButton`, `RingSession.startMonitoring`) is untouched.
 @MainActor
 struct StrapLiveHeartRate {
     let session: HelioSession
@@ -29,7 +29,7 @@ struct StrapLiveHeartRate {
     }
 }
 
-/// The same 30 pt round control as the ring's `VitalsTableView.measureButton` for heart rate (a heart
+/// The same 30 pt round control as the ring's `VitalMeasureCard.measureButton` for heart rate (a heart
 /// in a grey circle; while running, a stop icon in a filled red circle with a pulse), driving the strap.
 struct StrapMeasureButton: View {
     let live: StrapLiveHeartRate
