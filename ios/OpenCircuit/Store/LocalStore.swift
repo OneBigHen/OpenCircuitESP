@@ -1080,6 +1080,48 @@ struct LocalStore {
         return ingested
     }
 
+    /// Store readings the device handed us LIVE — the settled value of an on-demand / auto measure,
+    /// or of the poll cycle a workout fell back to — WITHOUT moving the ingest watermark (#241).
+    ///
+    /// Why not `ingest`. That cursor exists to dedupe re-synced HISTORY, and it only ever moves
+    /// forward. A live reading is stamped at the moment it was measured, which is almost always
+    /// NEWER than anything the ring has yet delivered from its own buffer: putting it through
+    /// `ingest` parked the watermark at "now" and the next drain then discarded, in silence, every
+    /// buffered reading older than it. That is #241's mechanism — the workout's End path was the
+    /// loudest instance (a whole night lost to a morning workout), and ending a workout that fell
+    /// back to the live poll reaches `stopLiveMonitoring` too, so fixing only the workout's own
+    /// rows would have left the same cursor jump in the same End path.
+    ///
+    /// Idempotence comes from deduplication by `(kind, start)` instead, which is what the cursor was
+    /// providing here: re-persisting the same lock (`RingSession` does, on every teardown) stores
+    /// nothing the second time. Returns the readings actually stored.
+    ///
+    /// Cumulative counters are NOT accepted: their rows are deltas built by
+    /// `CumulativeMetricAccumulator` against the day's running state, which only `ingest` maintains.
+    /// No live path produces one (heart rate and SpO₂ are the only two readings this takes).
+    @discardableResult
+    func insertLiveReadings(_ samples: [QuantitySample], device: SyncDeviceID = .ringConn) throws -> [QuantitySample] {
+        let plausible = samples.filter { Self.isPlausible($0) && !$0.kind.isCumulativeCounter }
+        guard !plausible.isEmpty else { return [] }
+        let deviceID = device.rawValue
+        var stored: [QuantitySample] = []
+        for (kind, group) in Dictionary(grouping: plausible, by: \.kind) {
+            let kindRaw = kind.rawValue
+            guard let lo = group.map(\.start).min(), let hi = group.map(\.start).max() else { continue }
+            let descriptor = FetchDescriptor<StoredSample>(predicate: #Predicate {
+                $0.kindRaw == kindRaw && $0.deviceID == deviceID && $0.start >= lo && $0.start <= hi
+            })
+            var present = Set(try context.fetch(descriptor).map(\.start))
+            for s in group.sorted(by: { $0.start < $1.start }) where present.insert(s.start).inserted {
+                context.insert(StoredSample(s, device: device))
+                stored.append(s)
+            }
+        }
+        guard !stored.isEmpty else { return [] }
+        do { try context.save() } catch { context.rollback(); throw error }
+        return stored
+    }
+
     /// Single ingest choke point for sample plausibility, checked BEFORE the SyncCursor — see the
     /// ordering note in `ingest`. Two independent gates:
     /// - TIMESTAMP: reject any sample whose `start` predates the ring's own counter epoch
@@ -1370,11 +1412,17 @@ struct LocalStore {
         if !(log.isEmpty && device == .ringConn) {
             out = out.filter { log.owns(device, at: $0.start) }
         }
-        // #227 (review-238 SF1): a strap workout's own readings are already in Health inside its
-        // HKWorkout; they stay out of this flush without the watermark moving. Never the ring's.
-        if device != .ringConn {
-            out = StrapWorkoutHealthExclusions().filter(out, device: device, healthWatermark: cursor.last(.heartRate))
-        }
+        // #227 (review-238 SF1) and #241 (decision 46): a workout's own readings are already in Health
+        // inside its HKWorkout, so they stay out of this flush — and the watermark does NOT move past
+        // them, which is what lets rows older than the workout still be offered once they sync.
+        //
+        // The ring is no longer exempt. It used to be, because its workout's heart rate went through
+        // `ingest` and was mirrored like any other row; decision 46 lands it the strap's way instead
+        // (`landRingWorkoutHeartRate`), so the exemption would have kept writing the workout's readings
+        // to Health a SECOND time, beside the HKWorkout that already holds them. For a timeline with no
+        // span recorded — every ring install until its first workout under this build — `filter`
+        // returns `out` untouched.
+        out = WorkoutHealthExclusions().filter(out, device: device, healthWatermark: cursor.last(.heartRate))
         return out.sorted { $0.start < $1.start }
     }
 
