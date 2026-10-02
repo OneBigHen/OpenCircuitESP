@@ -6,12 +6,13 @@ metrics over Bluetooth LE, decodes them on the phone, and writes them to **Apple
 Inspired by [openwhoop](https://github.com/bWanShiTong/openwhoop), which does the same for the
 Whoop 4.0.
 
-One wearable at a time: pick the ring or the strap on the first run, which shows that device's
-setup steps (and, for the strap, ends on its setup screen), or later in the app (Profile ▸ Device).
-Each device owns the time it was chosen for, and only its readings for that time reach Apple Health
-and the daily totals; a night belongs to the device you went to bed with. What the other device
-recorded in that time is never written to Apple Health: the ring's readings are kept in the app, and
-the strap's are left on the strap.
+One wearable at a time: choose which one you wear on the first run, which shows its setup steps
+(for a strap that isn't set up yet, it ends on the strap's setup screen, where saving the key
+switches to it), or switch later in the app (Profile ▸ Device). Each device owns the time it was
+chosen for, and only its readings for that time reach Apple Health and the daily totals; a night
+belongs to the device you went to bed with. What the other device recorded in that time is never
+written to Apple Health: the ring's readings are kept in the app, and the strap's are left on the
+strap.
 
 <a href="https://www.buymeacoffee.com/standardsoftware" target="_blank"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=standardsoftware&button_colour=5F7FFF&font_colour=ffffff&font_family=Bree&outline_colour=000000&coffee_colour=FFDD00" alt="Buy me a coffee" height="40"></a>
 
