@@ -499,12 +499,17 @@ final class DeviceOwnershipAppTests: XCTestCase {
         ownership.install(.strapOwnsAllTime)
         let store = try makeStore()
         // Four made-up readings a night for 25 nights, the oldest 25 days back (inside retention).
-        let hrv = (0..<25).flatMap { night in
-            (0..<4).map { i in
-                QuantitySample(kind: .hrvSDNN, start: at(Double(-24 * night - 2 - i)), value: Double(40 + i))
+        var hrv: [QuantitySample] = []
+        for night in 0..<25 {
+            for i in 0..<4 {
+                let hoursBack = Double(24 * night + 2 + i)
+                hrv.append(QuantitySample(kind: .hrvSDNN, start: at(-hoursBack), value: Double(40 + i)))
             }
-        }.sorted { $0.start < $1.start }
-        let heartRate = (0..<10).map { QuantitySample(kind: .heartRate, start: at(11 + Double($0) / 60), value: 60) }
+        }
+        hrv.sort { $0.start < $1.start }
+        let heartRate: [QuantitySample] = (0..<10).map {
+            QuantitySample(kind: .heartRate, start: at(11 + Double($0) / 60), value: 60)
+        }
         _ = try store.ingest(hrv + heartRate, device: strapTimeline)
 
         // Every flush before the switch: the old policy's kinds were written and their watermark advanced.
