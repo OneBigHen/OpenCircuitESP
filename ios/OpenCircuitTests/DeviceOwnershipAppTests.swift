@@ -1137,3 +1137,48 @@ extension DeviceOwnershipAppTests {
         XCTAssertEqual(lines, ["a strap sleep was kept out of its night (over 60 min from the night's longer part); not stored until strap naps (#231)"])
     }
 }
+
+// MARK: - The strap's HRV backfill boundary (review-244 P1–P3; all synthetic)
+
+extension DeviceOwnershipAppTests {
+
+    /// From review-244 P1: the backfill reaches back exactly to the raw-sample retention and no further.
+    func testStrapHRVBackfillStopsAtTheRetentionPrune() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        let old = QuantitySample(kind: .hrvSDNN, start: at(-24 * 35), value: 38)
+        let kept = QuantitySample(kind: .hrvSDNN, start: at(-24 * 25), value: 44)
+        _ = try store.ingest([old, kept], device: strapTimeline)
+        try store.pruneExpiredSamples(now: at(12))
+        let pending = try store.pendingHealthSamples(device: strapTimeline, kinds: HelioHealthPolicy.healthMirroredKinds())
+        XCTAssertEqual(pending, [kept], "the 25-day row backfills; the 35-day row was pruned before the flag flipped")
+    }
+
+    /// From review-244 P2: the ring wrote HRV for weeks (its `hk:hrvSDNN` watermark is NEWER than every strap
+    /// row). The strap's backlog must still be offered in full: the watermark is per device.
+    func testRingHRVWatermarkDoesNotHideTheStrapBacklog() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        let strapRows = (0..<5).map { QuantitySample(kind: .hrvSDNN, start: at(-24 * Double(20 - $0)), value: 40 + Double($0)) }
+        _ = try store.ingest(strapRows, device: strapTimeline)
+        let ringRow = QuantitySample(kind: .hrvSDNN, start: at(11), value: 55)
+        _ = try store.ingest([ringRow], device: .ringConn)
+        try store.markHealthWritten([ringRow], device: .ringConn)
+        let pending = try store.pendingHealthSamples(device: strapTimeline, kinds: HelioHealthPolicy.healthMirroredKinds())
+        XCTAssertEqual(pending, strapRows)
+    }
+
+    /// From review-244 P3: decision 28 still bounds the backfill. Strap rows from time the ring owned (before the
+    /// switch) stay in the app; rows after the switch backfill.
+    func testStrapHRVBackfillHonoursTheOwnershipSwitch() throws {
+        let switchAt = at(-24 * 10)
+        ownership.install(DeviceOwnershipLog(entries: [.init(family: .ringConn, since: .distantPast),
+                                                       .init(family: .zeppOS, since: switchAt)]))
+        let store = try makeStore()
+        let before = QuantitySample(kind: .hrvSDNN, start: at(-24 * 15), value: 41)
+        let after = QuantitySample(kind: .hrvSDNN, start: at(-24 * 5), value: 46)
+        _ = try store.ingest([before, after], device: strapTimeline)
+        let pending = try store.pendingHealthSamples(device: strapTimeline, kinds: HelioHealthPolicy.healthMirroredKinds())
+        XCTAssertEqual(pending, [after])
+    }
+}
