@@ -567,50 +567,50 @@ final class WorkoutSessionManager: NSObject {
         // sync writes to. These samples carry REAL start/end spans (unlike the zero-duration point
         // samples live-monitoring/history-sync persist elsewhere), so GoalsCardView's
         // ExerciseMinutes estimate can credit them directly without needing two elevated point
-        // samples within one epoch of each other. `ingest` is cursor-gated, so re-running a workout
-        // (or this code path firing twice) can't double-count.
+        // samples within one epoch of each other.
         //
-        // ORDERING (double-count guard): this ingest MUST run AFTER `writeWorkout` returns — i.e.
-        // after the workout's active-energy credit is banked via `recordWorkoutActiveKcal` — and in
-        // this suspension-free stretch. `endWorkoutHR()` above flipped `monitoring` false, which
-        // fires ContentView's `flushHealth()`. That flush computes the day's active-energy delta
-        // from LocalStore HR. If we ingested the workout HR BEFORE the credit was banked, a flush
-        // could observe the workout HR with `workoutActiveKcalCredited == 0`, write the workout's
-        // TRIMP kcal as the daily active-energy delta AND let the workout's own `activeEnergyBurned`
-        // sample land too — a permanent, unretractable double-count. Ingesting only now guarantees
+        // #241 / decision 46: this goes through `landRingWorkoutHeartRate`, NOT `store.ingest`.
+        // `ingest` is gated on the ring's own `(ringconn, heartRate)` cursor, and leaving that
+        // cursor at the workout's last reading made the drain that re-arms at End discard every
+        // reading the ring buffered BEFORE and DURING the workout — a morning workout before the
+        // morning sync cost the whole night. The rows are inserted directly and deduplicated by
+        // `start` instead, which is also what keeps re-running this path a no-op (the job the
+        // cursor gate used to do). See `LocalStore+RingWorkout.swift` for the whole mechanism,
+        // including the Health-side exclusion that keeps these readings out of the raw-sample
+        // flush without moving `hk:heartRate` (they are already in Health, inside the HKWorkout
+        // `writeWorkout` just committed).
+        //
+        // ORDERING (double-count guard): this MUST run AFTER `writeWorkout` returns — i.e. after
+        // the workout's active-energy credit is banked via `recordWorkoutActiveKcal` — and in this
+        // suspension-free stretch. Ending the workout flipped `monitoring` false, which fires
+        // ContentView's `flushHealth()`. That flush computes the day's active-energy delta from
+        // LocalStore HR. If we stored the workout HR BEFORE the credit was banked, a flush could
+        // observe the workout HR with `workoutActiveKcalCredited == 0`, write the workout's TRIMP
+        // kcal as the daily active-energy delta AND let the workout's own `activeEnergyBurned`
+        // sample land too — a permanent, unretractable double-count. Storing only now guarantees
         // any flush that sees the workout HR also sees the banked credit and nets it out.
         //
-        // The guard holds PER CHUNK. We split the ingest into small LOSSLESS sub-batches below —
-        // each `store.ingest(...)` is a single `context.save()`, so a one-shot ingest of the whole
-        // workout's HR invalidated EVERY `@Query[StoredSample]` (Calories/Goals/Vitals cards) at
-        // once and the dashboard `List` re-fetched + re-laid-out all of it synchronously on the
-        // main thread — >10 s → the FRONTBOARD `0x8BADF00D` scene-update-watchdog SIGKILL a user hit
-        // when backgrounding right after a long workout summary. Two-part fix: (1) chunking makes
-        // each save a SMALL @Query invalidation, and a short `Task.sleep` between saves gives the
-        // runloop a real turn so no single scene-update exceeds the watchdog budget; (2) the actual
-        // confirmed stall in the crash trace was the READER side — those three cards' per-card
-        // baseline/kcal analytics now run OFF the main actor (`.task` → `Task.detached`, see
-        // CaloriesCardView / GoalsCardView / VitalsStatusCardView), so a re-fetch during a
-        // background scene-update snapshot no longer drags the O(n) math onto the main thread.
-        // Every chunk still runs AFTER the banked active-energy credit, so a `flushHealth()` that
-        // lands between chunks still nets out exactly as the single-shot ingest did.
+        // The guard holds PER CHUNK. The store splits the write into small sub-batches — each save
+        // is one `context.save()`, so a one-shot write of the whole workout's HR invalidated EVERY
+        // `@Query[StoredSample]` (Calories/Goals/Vitals cards) at once and the dashboard `List`
+        // re-fetched + re-laid-out all of it synchronously on the main thread — >10 s → the
+        // FRONTBOARD `0x8BADF00D` scene-update-watchdog SIGKILL a user hit when backgrounding right
+        // after a long workout summary. Two-part fix: (1) chunking makes each save a SMALL @Query
+        // invalidation, and the short `Task.sleep` passed below gives the runloop a real turn so no
+        // single scene-update exceeds the watchdog budget; (2) the actual confirmed stall in the
+        // crash trace was the READER side — those three cards' per-card baseline/kcal analytics now
+        // run OFF the main actor (`.task` → `Task.detached`, see CaloriesCardView / GoalsCardView /
+        // VitalsStatusCardView), so a re-fetch during a background scene-update snapshot no longer
+        // drags the O(n) math onto the main thread. Every chunk still runs AFTER the banked
+        // active-energy credit, so a `flushHealth()` that lands between chunks still nets out
+        // exactly as the single-shot write did.
         if let store {
-            // Sort ascending by `start` BEFORE chunking so the forward-only SyncCursor
-            // (`selectNew` keeps `start > watermark`, strictly) advances monotonically and never
-            // discards a later chunk. The chunks are disjoint and together cover EVERY sample, and
-            // each boundary is extended to swallow any equal-`start` run at its tail (see below), so
-            // the total StoredSample rows are identical to the old single `store.ingest(toIngest)` —
-            // lossless, nothing dropped or deduped away.
-            let sorted = agg.collectedSamples.sorted { $0.start < $1.start }
-            let toIngest = sorted.map {
-                QuantitySample(kind: .heartRate, start: $0.start, end: $0.end, value: Double($0.bpm))
-            }
             // PARTIAL-WRITE HARDENING (review MF3): the crash scenario this fixes IS "user
             // backgrounds right after the summary", so this chunked loop very often runs as the app
             // leaves the foreground. Without a background-task assertion iOS can suspend the app
             // mid-loop and only a PREFIX of the workout HR would reach LocalStore — a bounded local
             // active-kcal/exercise-min under-count (HealthKit already has EVERY sample from
-            // `writeWorkout` above; this only keeps the LOCAL estimate whole, and the cursor guard
+            // `writeWorkout` above; this only keeps the LOCAL estimate whole, and dedupe-by-start
             // still prevents any double-count). The loop is ~1–2 s of wall time, far under the
             // background budget, and self-ends via `defer` / the expiration handler.
             var bgTask: UIBackgroundTaskIdentifier = .invalid
@@ -619,27 +619,14 @@ final class WorkoutSessionManager: NSObject {
             }
             defer { if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) } }
 
-            let chunkSize = 64
-            var i = 0
-            while i < toIngest.count {
-                var end = min(i + chunkSize, toIngest.count)
-                // Never split an equal-`start` run across a boundary: once the head sample advances
-                // the cursor watermark to that instant, `selectNew`'s strict `start > watermark`
-                // would drop the tail sample in the next chunk. Extend to swallow the whole run so
-                // chunking stays byte-for-byte lossless vs. the single-batch ingest.
-                while end < toIngest.count && toIngest[end].start == toIngest[end - 1].start {
-                    end += 1
-                }
-                _ = try? store.ingest(Array(toIngest[i..<end]))
-                i = end
-                // Give the runloop a real turn between saves (review MF1). A bare `Task.yield()`
-                // reschedules on the SAME main-actor executor and can resume WITHOUT CFRunLoop
-                // reaching before-waiting and committing a CATransaction — so the chunk saves + the
-                // coalesced `@Query` re-fetches could still execute as ONE contiguous >10 s
-                // main-thread stretch and blow the scene-update watchdog anyway. A short sleep
-                // suspends off the executor so the runloop definitively lays out + commits (and the
-                // watchdog resets) between chunks. Cheap: workouts collect ~6 HR/min, so even a long
-                // session is a handful of chunks.
+            // Give the runloop a real turn between saves (review MF1). A bare `Task.yield()`
+            // reschedules on the SAME main-actor executor and can resume WITHOUT CFRunLoop reaching
+            // before-waiting and committing a CATransaction — so the chunk saves + the coalesced
+            // `@Query` re-fetches could still execute as ONE contiguous >10 s main-thread stretch
+            // and blow the scene-update watchdog anyway. A short sleep suspends off the executor so
+            // the runloop definitively lays out + commits (and the watchdog resets) between chunks.
+            // Cheap: workouts collect ~6 HR/min, so even a long session is a handful of chunks.
+            try? await store.landRingWorkoutHeartRate(agg.collectedSamples) {
                 try? await Task.sleep(for: .milliseconds(20))
             }
         }
