@@ -412,9 +412,28 @@ final class HelioConnection: NSObject {
     /// included, decision 44) and its nights. The kinds are decided here only, and a test pins them
     /// through `HealthKitWriter.lastFlushRequest` (review-244 SF-2).
     static func flushStrap(_ writer: HealthKitWriter, store: LocalStore, timeline: SyncDeviceID,
-                           nights: [[SleepSegment]], nightsFinalized: Bool = false) async -> HealthKitWriter.FlushResult {
+                           nights: [[SleepSegment]], nightsFinalized: Bool = false,
+                           now: Date = Date()) async -> HealthKitWriter.FlushResult {
         await writer.flushToHealth(store: store, device: timeline, mirroredKinds: HelioHealthPolicy.healthMirroredKinds(),
-                                   strapNights: nights, strapNightsFinalized: nightsFinalized)
+                                   strapNights: strapNights(nights, store: store, timeline: timeline, now: now),
+                                   strapNightsFinalized: nightsFinalized)
+    }
+
+    /// The nights a strap flush offers the writer: the sync's own `nights`, then the stored strap
+    /// nights that never reached Apple Health (decision 50b, #253). A sync's nights cover that sync
+    /// only, so a night whose later re-deliveries were all kept as thinner was never offered again;
+    /// both flush sites run through here, so every strap flush catches it. A stored night is skipped
+    /// when the sync already carries the same window. The writer's gate, `mirrorSettledNight` and its
+    /// bails judge these exactly as the sync's own.
+    static func strapNights(_ nights: [[SleepSegment]], store: LocalStore, timeline: SyncDeviceID,
+                            now: Date) -> [[SleepSegment]] {
+        func window(_ night: [SleepSegment]) -> DateInterval? {
+            guard let start = night.map(\.start).min(), let end = night.map(\.end).max(), end > start else { return nil }
+            return DateInterval(start: start, end: end)
+        }
+        let carried = Set(nights.compactMap(window))
+        return nights + store.strapNightsAwaitingHealth(timeline: timeline, now: now)
+            .filter { window($0).map { !carried.contains($0) } ?? false }
     }
 
     /// Whether a strap sync's flush may write (decision 28, review-224 S3). Attribution follows the
