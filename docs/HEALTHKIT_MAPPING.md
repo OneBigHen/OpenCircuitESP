@@ -36,7 +36,7 @@ their spec tags until checked on a real strap.
 | `0x38` sleep respiratory rate | `.respiratoryRate` → `.respiratoryRate` | breaths/min as-is | none |
 | `0x48` sleep session + stages | `.sleep` → `.sleepAnalysis` | stage `04` light → `asleepCore`, `05` deep → `asleepDeep`, `08` REM → `asleepREM`, `07` awake → `awake`; unknown stage → `asleepUnspecified` | the strap's own staging. Decide device staging vs `SleepStaging`, and whether to write `inBed` (the record has no separate in-bed span, 🔴) |
 | `0x13` stress (auto) | none | — | **gap**: no HealthKit type. Local only |
-| `0x0D` PAI | none | — | **gap**: no HealthKit type. Local only |
+| `0x0D` PAI | none | — | **gap**: no HealthKit type. Stored as phone-only `.pai` history (decision 45), never in Health |
 | active energy | `.activeEnergy` → `.activeEnergyBurned` | derived from HR with `Calories` (the strap sends no energy history) | same derivation as the ring. Needs dense HR, which the strap's per-minute HR provides |
 | `0x05`/`0x06` workouts | `HKWorkout` | — | **out of scope for v1** (see protocol §6.5) |
 
@@ -62,7 +62,7 @@ rules are in `ZeppKit/HelioSyncPolicy.swift`, tested by `HelioSyncPolicyTests`.
 | HRV (`0x49`) | `.hrvSDNN` (local only) | **no** (`HelioHealthPolicy.writesHRV = false`): the statistic is unverified |
 | Sleep (`0x48`) | the strap's own stages → Sleep summary + hypnogram; no invented in-bed span | yes, through `mirrorSettledNight`; a manually edited night is never overwritten. No `SleepStaging` fallback yet (DECISION-GAP, see `HelioSleepSelection`) |
 | Stress (`0x13`) | `.stress`, one 0–100 sample per minute (`ff` skipped), charted through the day (#239). A backfill moves only its fetch watermark back, up to 7 days and never before the strap's ownership start, and only when another build advanced that watermark without storing the minutes (builds 59/60) | **no**: no Health type (`HealthKitWriter.quantityType(for: .stress)` is nil; not in any mirrored-kind list; not exported) |
-| PAI (`0x0d`) | shown in the app only (latest value) | no Health type |
+| PAI (`0x0d`) | `.pai`, one row per valid record (value = total PAI, at the record's own time, owned rows only). Phone-only history (decision 45): the strap card shows the newest row under 48 h old, so the number survives a sync with no `0x0d` record and every relaunch. A backfill moves only its fetch watermark back, up to 7 days, never before the strap's ownership start and never past the 30-day sample retention, and only when another build advanced that watermark without storing the records (builds 59–62). No chart, no Today tile, no trend in v1 | **no**: no Health type (`HealthKitWriter.quantityType(for: .pai)` is nil; not in any mirrored-kind list; not exported) |
 | Walking + running distance | — | **no**: the ring's distance is its own per-step estimate, so it is derived only from step rows the RING owned (decision 28). The strap sends no distance history and its steps get none. The ring's day distance is one sample from midnight to its last row, named the ring, so on a day with a switch Health's hourly chart spreads it across the strap's hours too (review-224c N-c; the day total is right) |
 
 #### Who owns which time (decision 28)
