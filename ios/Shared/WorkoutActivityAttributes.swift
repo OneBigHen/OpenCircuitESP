@@ -42,6 +42,12 @@ struct WorkoutActivityAttributes: ActivityAttributes {
         /// True when `bpm` is older than the freshness window — the widget dims it and shows
         /// "measuring…" instead of implying the number is live (#45 honesty).
         public var hrIsStale: Bool
+        /// A workout with pauses (the strap's, #227): the instant the clock counts up from, so it
+        /// shows running time only. nil (the ring's workout, which has no pause) counts from
+        /// `startDate`, exactly as before.
+        public var clockStart: Date? = nil
+        /// Set while paused: the clock stands still at this many seconds. nil while running.
+        public var pausedElapsed: TimeInterval? = nil
     }
 
     // MARK: Fixed attributes (set once at start, immutable for the Activity's life)

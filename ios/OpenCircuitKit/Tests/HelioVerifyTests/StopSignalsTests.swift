@@ -41,4 +41,27 @@ final class StopSignalsTests: XCTestCase {
         }
         XCTAssertEqual(received, Set(expected))
     }
+
+    /// review-223 N2: a write to a pipe whose reader is gone must fail with EPIPE, not kill the run
+    /// before the find stop goes out. (Without `ignoreBrokenPipe()`, this test process would die.)
+    func testABrokenPipeFailsTheWriteInsteadOfKillingTheProcess() {
+        var previous = sigaction()
+        sigaction(SIGPIPE, nil, &previous)
+        defer { sigaction(SIGPIPE, &previous, nil) }
+
+        StopSignals.ignoreBrokenPipe()
+        var current = sigaction()
+        sigaction(SIGPIPE, nil, &current)
+        XCTAssertEqual(unsafeBitCast(current.__sigaction_u.__sa_handler, to: Int.self),
+                       unsafeBitCast(SIG_IGN, to: Int.self))
+
+        var fds: [Int32] = [0, 0]
+        XCTAssertEqual(pipe(&fds), 0)
+        close(fds[0])                      // the reader went away (the terminal behind `| tee` closed)
+        defer { close(fds[1]) }
+        let line = Array("find device: STOP before exiting\n".utf8)
+        let written = line.withUnsafeBytes { write(fds[1], $0.baseAddress, $0.count) }
+        XCTAssertEqual(written, -1)
+        XCTAssertEqual(errno, EPIPE)
+    }
 }

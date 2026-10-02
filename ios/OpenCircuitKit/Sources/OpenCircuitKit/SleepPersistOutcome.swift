@@ -45,6 +45,14 @@ public enum SleepPersistOutcome: String, Codable, Sendable, Equatable, CaseItera
     case deferredNightKeyMigration
     /// The store threw. Previously swallowed by `try?`.
     case failed
+    /// Another device keeps this night, and its night IS stored (decision 28a of #215: the device you
+    /// went to bed with keeps the night; a stored night is never replaced by the other device's). This
+    /// device's staging is deliberately not stored. NOT a failure: the wearer's night is the other's.
+    case ownedByOtherDevice
+    /// Another device owns this night, but NO night of it is stored (review-224b N-3): e.g. the strap
+    /// was chosen at bedtime and hasn't delivered (or wasn't worn). Deliberate, but the wearer has no
+    /// stored night, so it counts as a loss for the card; a retry of THIS device can't change it.
+    case ownedByOtherDeviceNoRow
 
     /// Whether a `StoredSleepSummary` row now reflects THIS staging. This — not "the stage path ran"
     /// — is what `historySyncEvidence.sleepCommitted` means.
@@ -53,7 +61,7 @@ public enum SleepPersistOutcome: String, Codable, Sendable, Equatable, CaseItera
     /// Whether the night is represented by a stored row at all. The two deliberate keeps count: the
     /// wearer has a night, it just isn't the one this drain staged.
     public var nightIsStored: Bool {
-        wroteRow || self == .keptFullerStoredNight || self == .keptManualEdit
+        wroteRow || self == .keptFullerStoredNight || self == .keptManualEdit || self == .ownedByOtherDevice
     }
 
     /// No stored row backs this night and nothing deliberately kept one — the state in which the

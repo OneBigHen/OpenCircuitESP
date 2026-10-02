@@ -1651,6 +1651,27 @@ final class RingSession: NSObject {
         }
     }
 
+    /// Persist the LIVE readings this cycle settled on, without moving the store-ingest watermark
+    /// (#241, `LocalStore.insertLiveReadings`).
+    ///
+    /// Not `persist(_:)`: that goes through the forward-only ingest cursor, and a live reading is
+    /// stamped at the moment it was measured — newer than anything still sitting in the ring's own
+    /// buffer. Parking the watermark there made the NEXT history drain drop the whole backlog
+    /// behind it, in silence. Ending a workout that fell back to the `0x95` live poll runs straight
+    /// through here (`endSportSession`), so this is the same loss #241 reports, on the same path.
+    /// Deduplication by `(kind, start)` keeps a re-persisted lock a no-op, which is all the cursor
+    /// was doing for these readings.
+    private func persistLiveReadings(_ samples: [QuantitySample]) {
+        guard let localStore, !samples.isEmpty else { return }
+        do {
+            storedMetricSamples += try localStore.insertLiveReadings(samples).count
+        } catch {
+            let detail = "live store save failed input=\(samples.count) error=\(error.localizedDescription)"
+            observability.recordMetricEvent(source: "persist", detail: detail)
+            ringLog.error("persist-live FAILED: \(detail, privacy: .public)")
+        }
+    }
+
     /// Record a DAYTIME skin-temp reading for the Trends intraday chart only (`StoredDaytimeTemp`)
     /// — deliberately a SEPARATE table from the nightly `.temperature` path above, so this never
     /// touches the nightly cycle-tracking baseline or Apple Health (#41's guarantee is unchanged).
@@ -1743,7 +1764,9 @@ final class RingSession: NSObject {
         // contaminate its own baseline.
         let stagedDay = BulkSleep.mainSleep(from: records)
             .map { SleepNightKey.night(inBedStart: $0.start, inBedEnd: $0.end) }
-        let recentDeepHR = ((try? localStore.recentSleepSummaries(limit: 8)) ?? [])
+        // Decision 29: the ring's own nights only (all of them with an empty ownership log).
+        let recentDeepHR = LocalStore.ownershipLog().only(.ringConn, (try? localStore.recentSleepSummaries(limit: 8)) ?? [],
+                                                         time: \.inBedStart)
             .filter { stagedDay == nil || Calendar.current.startOfDay(for: $0.night) != stagedDay! }
             .prefix(7)
             .map(\.hrDeep)
@@ -2154,7 +2177,9 @@ final class RingSession: NSObject {
         // drain and a re-stage, which is exactly the non-idempotence `personalSleepBaseline`'s doc
         // says this exclusion exists to prevent.
         let tonightDay = SleepNightKey.night(inBedStart: start, inBedEnd: end)
-        let priorNights: [SkinTempBaseline.NightlyTemp] = ((try? store.recentSleepSummaries(limit: 40)) ?? [])
+        // Decision 29: the ring's own nights only (all of them with an empty ownership log).
+        let priorNights: [SkinTempBaseline.NightlyTemp] = LocalStore.ownershipLog()
+            .only(.ringConn, (try? store.recentSleepSummaries(limit: 40)) ?? [], time: \.inBedStart)
             .filter { $0.skinTempC > 0 && Calendar.current.startOfDay(for: $0.night) != tonightDay }
             .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }
         let baseline = SkinTempBaseline.baseline(priorNights: priorNights)
@@ -3468,7 +3493,7 @@ final class RingSession: NSObject {
         if let spo2 = liveSpO2, let at = liveSpO2At, at >= cycleStart {
             last.append(QuantitySample(kind: .spo2, start: at, value: Double(spo2) / 100))
         }
-        persist(last)
+        persistLiveReadings(last)
         if scheduleStatusRefresh {
             scheduleDeviceStatusRefresh(reason: "live-stop")
         }

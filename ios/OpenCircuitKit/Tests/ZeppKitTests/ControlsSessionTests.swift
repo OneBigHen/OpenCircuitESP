@@ -5,6 +5,7 @@
 
 import XCTest
 @testable import ZeppKit
+import ZeppKitTesting
 
 private struct SetupFailed: Error {
     let step: String

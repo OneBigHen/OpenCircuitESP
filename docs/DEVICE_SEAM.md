@@ -25,7 +25,7 @@ Measured on `origin/master` b1c2fdd (build 56), 2026-09-30.
 |---|---|---|
 | `BLE/RingScanner.swift` | Owns the session. `ready`, `syncing`, `syncHistory`, `liveHR`, `steps`, `lastFrameAt`, `startMonitoring`, `stopLiveMonitoring`, `invalidate`, `setLocalStore` · `epochArchiveStore`, `healthSleepSegments`, `isInSleepWindow`, `resumeChannelHint`, `interruptedDrainChannel`, `rediscoverIfNeeded` | Mixed. It is the RingConn transport and stays ring-only |
 | `ContentView.swift` | `ready`, `syncing`, `syncStatus`, `syncHistory`, `batteryPercent`, `batteryStale`, `batteryFetchedAt`, `charging`, `inferredCharging`, `liveHR`, `liveSpO2`, `liveMode`, `monitoring`, `historySamples`, `firmwareInfo` · `caseBattery`, `batteryTTESamples`, `batteryChargeSamples`, `notStreaming`, `appearsNotWorn`, `autoMeasuring`, `liveHRWarmup`, `livePreparing`, `userMeasuring`, `userMeasureFailed(Message)`, `workoutHolding`, `calibrationCapturing`, `probing`, `probeStatus`, `probeActivityChannels`, `captureHistoricPull`, `capturingHistoricPull`, `historicPullStatus`, `captureForensicSweep`, `capturingForensicSweep`, `forensicSweepStatus`, `rawCaptureLog`, `lastFrame`, `lastDrainSummary`, `lastDrainTraces`, `lastAdoptedRecordCount`, `recorderStallEvidence`, `lastSyncAnomalies`, `lastSleepPersistOutcome`, `healthSleepSegments`, `stagedSegments`, `applySleepEdit`, `sleepEditDataCoverage`, `automaticWorkoutCandidates` | Mixed. The status card is agnostic; the RE tools, drain traces, calibration and sleep edit are RingConn |
-| `VitalsTableView.swift` | `ready`, `syncing`, `monitoring`, `liveMode`, `liveSpO2`, `liveTemperature`, `liveHRTrend`, `liveReadingsStale`, `lastFrameAt`, `steps`, `historySamples`, `startMonitoring`, `stopLiveMonitoring`, `RingSession.LiveMode` · `notStreaming`, `livePreparing`, `userMeasuring`, `workoutHolding`, `probing`, `capturingHistoricPull`, `capturingForensicSweep`, `calibrationCapturing` | Mixed. On-demand HR/SpO₂ measure buttons |
+| `Dashboard/VitalMeasureCard.swift` | `ready`, `syncing`, `monitoring`, `liveMode`, `liveHR`, `liveSpO2`, `liveHRTrend`, `liveReadingsStale`, `historySamples`, `startMonitoring`, `stopLiveMonitoring`, `RingSession.LiveMode` · `notStreaming`, `livePreparing`, `userMeasuring`, `workoutHolding`, `probing`, `capturingHistoricPull`, `capturingForensicSweep`, `calibrationCapturing` | Mixed. On-demand HR/SpO₂ measure buttons, under a metric detail's chart (#245). Every member is read into the plain `RingMeasureFacts` in `Dashboard/VitalMeasure.swift`, which is the only place the rules live |
 | `DeviceInfoView.swift` | `ready`, `syncing`, `monitoring`, `firmwareInfo` · `sourceRingIdentity`, `setAirplaneModeOn`, `setOSAAssessment`, `osaAssessmentArmed`, `latestOSABurst`, `setAutomaticWorkoutDetection`, `automaticWorkoutDetectionEnabled`, `diagnosticsFrameCount`, `clearDiagnosticsCapture`, `repairFromRecoveredRecords`, `RingSession.diagnosticsCaptureKey` | RingConn (a ring device screen) |
 | `FindMyRingView.swift` | `ready`, `ringRSSI`, `startFindingRing`, `stopFindingRing`, `setFindRingLight`, `findRingLightOn` | RingConn |
 | `RingVibrationView.swift` | `ready` (it passes the session to `RingAlarmController`) | RingConn |
@@ -218,7 +218,8 @@ pins the throw.
    - Automatic workout detection → `.automaticWorkoutDetection`.
    - ContentView calibration section → `.bloodPressureCalibration`.
    - ContentView RE tools / `DeviceInfoView` diagnostics → `.diagnosticsCapture`.
-   - VitalsTableView measure buttons → `.onDemandHeartRate` / `.onDemandSpO2`.
+   - `VitalMeasureCard` measure buttons → `.onDemandHeartRate` / `.onDemandSpO2`. The branch is
+     already isolated: `VitalMeasureState.resolve` is the one decision, over plain facts.
 
    `DeviceInfoView`, `FindMyRingView`, `RingVibrationView`, `CalibrationSessionView` and
    `DiagnosticsReport` are ring device screens; the Helio gets its own screen rather than a branch
@@ -241,3 +242,24 @@ pins the throw.
 1. User-entered samples (headache, menstrual flow, asserted/typed sleep) are **not** given the
    ring's `HKDevice` (§2). OK, or do you want literally every sample attributed?
 2. `manufacturer` = brand ("RingConn") rather than the DIS string (`JZ_Tech`). OK?
+
+## 6. The second device (Helio Strap, #215 phase 3)
+
+- `ActiveWearable.session` now reads the device `ActiveDeviceChoiceStore` names:
+  `RingScanner.shared.session` or `HelioConnection.shared.session`. Only the chosen driver is read,
+  so the other is never constructed by it. The ring stays the default.
+- `HealthKitWriter.flushToHealth` gained the strap's pass (`device:`, `mirroredKinds:`,
+  `strapNights:`); `LocalStore.pendingHealthSamples` gained a `kinds:` filter. Their defaults are
+  the ring's pass, byte for byte.
+- No view was retyped to `(any WearableSession)?`: the strap got its own screens
+  (`ios/OpenCircuit/Helio/`), and `ContentView` hides the ring-only surfaces while the strap is
+  chosen (its `session` is nil then). Follow-up §4 item 1 still stands for the ring's views.
+
+- **Who owns which time (decision 28, review-224).** Every switch is recorded in
+  `DeviceOwnershipLog` (Kit, pure; persisted by `DeviceOwnershipStore` under
+  `device.ownershipLog.v1`, written only by `ActiveDeviceChoiceStore.set`). Health attribution now
+  follows the ROW, not the current choice: `ActiveWearable.identityForHealthWrite(timeline:)` for a
+  timeline's rows, `identityForHealthWrite(at:)` (the owner at that moment) for untagged rows. The
+  no-argument `identityForHealthWrite()` is unchanged. With an empty log (a ring-only install)
+  every one of them is the pre-decision answer (`DeviceOwnershipAppTests.testARingOnlyInstallIsUnchanged`).
+  The store and Health rules are listed in `HEALTHKIT_MAPPING.md` ("Who owns which time").

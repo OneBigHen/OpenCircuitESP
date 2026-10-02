@@ -15,6 +15,8 @@ let package = Package(
     products: [
         .library(name: "OpenCircuitKit", targets: ["OpenCircuitKit"]),
         .library(name: "ZeppKit", targets: ["ZeppKit"]),
+        // Test-only: the simulated strap shared by ZeppKitTests and the app's OpenCircuitTests.
+        .library(name: "ZeppKitTesting", targets: ["ZeppKitTesting"]),
     ],
     targets: [
         .target(name: "OpenCircuitKit"),
@@ -31,9 +33,12 @@ let package = Package(
         // plus public standards; the B-163 maths is ported from public-domain tiny-ECDH-c. Pure
         // Swift + CommonCrypto (Security for the CSPRNG): no CoreBluetooth, no app code.
         .target(name: "ZeppKit", dependencies: ["OpenCircuitKit"]),
+        // A simulated strap written from the spec (FakeZeppDevice), for tests only. Public ZeppKit
+        // API only, so the app's test target can compile the same file (ios/project.yml).
+        .target(name: "ZeppKitTesting", dependencies: ["ZeppKit"]),
         .testTarget(
             name: "ZeppKitTests",
-            dependencies: ["ZeppKit", "OpenCircuitKit"],
+            dependencies: ["ZeppKit", "OpenCircuitKit", "ZeppKitTesting"],
             exclude: ["make_b163_vectors.sh"]
         ),
         // macOS CoreBluetooth verifier for a real strap: `swift run HelioVerify --help`.

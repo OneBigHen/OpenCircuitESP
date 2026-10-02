@@ -36,6 +36,13 @@ struct OpenCircuitApp: App {
                 // run after `rekeySleepNightsOnce`, for the same reason the backfill does: so it
                 // sees rows under their final night key.
                 .task { OpenCircuitApp.healWithheldSleepScores(container) }
+                // #246: score strap nights stored without a Sleep Score (builds 59-62 stored every
+                // one of them unscored, and Readiness is anchored on last night's). Next to the pass
+                // above because it is the same kind of repair — idempotent, unlatched, and wanting
+                // the rows under their final night key, so after `rekeySleepNightsOnce`. The two
+                // populations are disjoint: that one takes only `isManuallyEdited` rows, this one
+                // never touches an edited night.
+                .task { OpenCircuitApp.scoreUnscoredHelioNights(container) }
                 // Repair of any SyncCursor watermark stuck in the future by a corrupted-timestamp
                 // sample, BEFORE `ingest` guarded plausibility ahead of the cursor advance — run
                 // every launch (not one-time; see the function doc), after the sample scrubs so
@@ -62,7 +69,11 @@ struct OpenCircuitApp: App {
                 // so a reinstall, a restore, or a revoked notification permission can't quietly
                 // leave the guaranteed half of the alarm unarmed. Both are no-ops when the alarm
                 // is off. (`RingAlarmController`)
-                RingAlarmController.shared.evaluate(session: RingScanner.shared.session)
+                // The ring's wake-up alarm drives the ring only; with the Helio Strap active the ring
+                // is never touched (decision 1), and the strap's alarms live on the strap.
+                if ActiveDeviceChoiceStore.shared.isRing {
+                    RingAlarmController.shared.evaluate(session: RingScanner.shared.session)
+                }
                 RingAlarmController.shared.refreshBackupNotification()
                 return
             }
@@ -70,6 +81,8 @@ struct OpenCircuitApp: App {
             let scheduler = BackgroundRefreshScheduler()
             scheduler.schedule()
             scheduler.scheduleProcessing()
+            // Review-225e SF-3: a strap night's margin refresh survives this `schedule()` (no-op for the ring).
+            StrapNightRefresh.resubmit(scheduler, strapChosen: ActiveDeviceChoiceStore.persisted() == .helioStrap)
             ObservabilityStore().recordScheduled()
         }
     }
@@ -683,6 +696,29 @@ struct OpenCircuitApp: App {
         }
     }
 
+    /// The process-wide container for a site that runs without the App's views (the BGTask handler,
+    /// the Sleep Focus filter, a restoration relaunch, the intents): `sharedContainer`, else a
+    /// NON-destructive `makeContainerOrThrow()` build that is then PUBLISHED as `sharedContainer`, so
+    /// every later site reuses it instead of opening a second container over the same SQLite file
+    /// (#222 review Q2 + U2). Throws, touching nothing, when the store can't be opened (before the
+    /// first unlock); the caller aborts and a later wake retries. Never `makeContainer()` (#131).
+    ///
+    /// `storeURL` is a test-only seam, as for `makeContainerOrThrow`.
+    @MainActor
+    static func sharedOrFallbackContainer(storeURL: URL? = nil) throws -> ModelContainer {
+        if let sharedContainer { return sharedContainer }
+        let container = try makeContainerOrThrow(storeURL: storeURL)
+        sharedContainer = container
+        return container
+    }
+
+    /// A store over `sharedOrFallbackContainer()` that keeps its container alive (`LocalStore(container:)`):
+    /// a `ModelContext` alone does not, and a fetch through a context whose container was released traps.
+    @MainActor
+    static func backgroundStore() throws -> LocalStore {
+        LocalStore(container: try sharedOrFallbackContainer())
+    }
+
     /// The destructive FOREGROUND-ONLY recovery: back up durable rollups, wipe the store files,
     /// rebuild a fresh store, restore the rollups, and raise `historyResetDefaultsKey`. Only reached
     /// from `resolveContainer` when `isBackground == false`. (#40/#131)
@@ -815,6 +851,34 @@ struct OpenCircuitApp: App {
             // A fetch/save failure here costs a badge, nothing more, and the pass is unlatched — so
             // the next launch simply retries the whole set.
             ringLog.error("[OC] sleep-score-heal: failed — \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Give a Sleep Score to the Helio Strap's nights that were stored without one (#246).
+    ///
+    /// Readiness is anchored on last night's Sleep Score, so a strap wearer's Readiness card was
+    /// empty every day: `LocalStore.saveHelioNight` stored the hypnogram and the skin temperature
+    /// and left both scores at 0. Builds 59-62 stored every strap night that way, and the night the
+    /// wearer wants Readiness for TODAY is one of them — so the fix has to run at launch, not only
+    /// on the next sync (which `HelioStoreSink.finishSync` also does).
+    ///
+    /// Needs no strap, no connection and no key: it reads the stored hypnogram and the strap's own
+    /// stored rows. Ring nights, manual edits and already-scored nights are never touched, and a
+    /// ring-only install (an empty ownership log) does nothing at all — see the pass's own doc.
+    @MainActor
+    static func scoreUnscoredHelioNights(_ container: ModelContainer) {
+        do {
+            let scored = try LocalStore(container.mainContext).scoreUnscoredHelioNights()
+            if !scored.isEmpty {
+                ringLog.notice("""
+                    [OC] sleep-score-strap: scored \(scored.count, privacy: .public) \
+                    strap night(s) stored without a Sleep Score
+                    """)
+            }
+        } catch {
+            // A fetch/save failure costs a badge and a day's readiness, nothing more, and the pass
+            // is unlatched — the next launch (or the next strap sync) retries the whole set.
+            ringLog.error("[OC] sleep-score-strap: failed — \(error.localizedDescription, privacy: .public)")
         }
     }
 

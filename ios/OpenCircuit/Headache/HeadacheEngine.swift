@@ -536,7 +536,18 @@ struct HeadacheEngine {
         let defaults = UserDefaults.standard
         let end = nextDay(after: day, calendar)
 
-        let nights = ((try? store.recentSleepSummaries(limit: nightsFetchLimit)) ?? [])
+        // Decision 29: the day is judged only against its own device's history: the device of the night
+        // it scores (else the current one). With an empty log that is the ring for everything, and
+        // every filter below keeps every row.
+        let log = LocalStore.ownershipLog()
+        let storedNights = (try? store.recentSleepSummaries(limit: nightsFetchLimit)) ?? []
+        let device = storedNights.filter { $0.inBedEnd >= day && $0.inBedEnd < end }
+            .max { $0.inBedEnd < $1.inBedEnd }
+            .map { log.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd) } ?? log.currentFamily
+        let nightOwners = Dictionary(storedNights.map { (calendar.startOfDay(for: $0.night),
+                                                         log.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd)) },
+                                     uniquingKeysWith: { first, _ in first })
+        let nights = log.only(device, storedNights, time: \.inBedStart)
             .map(HeadacheNightRow.init)
             .sorted { $0.night < $1.night }
         let tonight = nights.filter { $0.inBedEnd >= day && $0.inBedEnd < end }
@@ -544,10 +555,10 @@ struct HeadacheEngine {
 
         // Bounded by the predicate, and additionally by the 30-day sample retention.
         let sampleStart = calendar.date(byAdding: .day, value: -sampleLookbackDays, to: day) ?? day
-        let hr = ((try? store.samples(kind: .heartRate, from: sampleStart, to: asOf)) ?? [])
+        let hr = ((try? store.ownSamples(kind: .heartRate, from: sampleStart, to: asOf, of: device)) ?? [])
             .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
         // 0 is a placeholder, not a measured HRV — dropping it here keeps a zero out of a baseline.
-        let hrv = ((try? store.samples(kind: .hrvSDNN, from: sampleStart, to: asOf)) ?? [])
+        let hrv = ((try? store.ownSamples(kind: .hrvSDNN, from: sampleStart, to: asOf, of: device)) ?? [])
             .filter { $0.value > 0 }
 
         // The banding budget is a TRAILING-60-DAY window, not the last 60 rows: it exists to
@@ -556,7 +567,12 @@ struct HeadacheEngine {
         let bandStart = calendar.date(byAdding: .day,
                                       value: -HeadacheSignals.Tuning().bandWindowDays,
                                       to: day) ?? day
+        // Decision 29: only days scored on the same device's nights (each day's night, else its noon).
         let priorIndices = ((try? store.riskDays(from: bandStart, to: day)) ?? [])
+            .filter { risk in
+                log.isEmpty || (nightOwners[calendar.startOfDay(for: risk.nightKey)]
+                    ?? log.owner(at: calendar.startOfDay(for: risk.day).addingTimeInterval(12 * 3600))) == device
+            }
             .map { Int($0.index.rounded()) }
 
         // "Already having one" suppression. A severity-1 (`notPresent`) entry records the ABSENCE of

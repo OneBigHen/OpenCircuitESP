@@ -102,6 +102,47 @@ final class HealthKitShareTypesTests: XCTestCase {
         XCTAssertNil(HealthKitWriter.quantityType(for: .exerciseMinutes))
     }
 
+    /// #239: the strap's all-day stress is stored in the app only. Apple Health has no stress type
+    /// (decision 15), so `.stress` maps to none and can't enter the auth request or a write.
+    func testStressHasNoHealthKitType() {
+        XCTAssertNil(HealthKitWriter.quantityType(for: .stress))
+    }
+
+    /// Decision 45: the strap's PAI is stored in the app only. Apple Health has no PAI type
+    /// (decision 15), so `.pai` maps to none and can't enter the auth request or a write.
+    func testPAIHasNoHealthKitType() {
+        XCTAssertNil(HealthKitWriter.quantityType(for: .pai))
+    }
+
+    /// #239 added `MetricKind.stress` and decision 45 `MetricKind.pai`, and `allTypes` loops
+    /// `MetricKind.allCases`. Pinned as an
+    /// EQUALITY of identifiers, so a new kind can't silently add a type to the share request (which
+    /// would put a fresh Health sheet in front of every existing install).
+    func testTheShareTypeSetIsExactlyTheShippedOne() {
+        let shipped: Set<String> = [
+            HKQuantityTypeIdentifier.heartRate.rawValue,
+            HKQuantityTypeIdentifier.restingHeartRate.rawValue,
+            HKQuantityTypeIdentifier.heartRateVariabilitySDNN.rawValue,
+            HKQuantityTypeIdentifier.oxygenSaturation.rawValue,
+            HKQuantityTypeIdentifier.bodyTemperature.rawValue,
+            HKQuantityTypeIdentifier.respiratoryRate.rawValue,
+            HKQuantityTypeIdentifier.stepCount.rawValue,
+            HKQuantityTypeIdentifier.activeEnergyBurned.rawValue,
+            HKQuantityTypeIdentifier.distanceWalkingRunning.rawValue,
+            HKQuantityTypeIdentifier.basalEnergyBurned.rawValue,
+            HKQuantityTypeIdentifier.distanceCycling.rawValue,
+            HKQuantityTypeIdentifier.bloodPressureSystolic.rawValue,
+            HKQuantityTypeIdentifier.bloodPressureDiastolic.rawValue,
+            HKCategoryTypeIdentifier.sleepAnalysis.rawValue,
+            HKCategoryTypeIdentifier.menstrualFlow.rawValue,
+            HKCategoryTypeIdentifier.headache.rawValue,
+            HKWorkoutType.workoutType().identifier,
+            HKSeriesType.workoutRoute().identifier,
+        ]
+        XCTAssertEqual(Set(HealthKitWriter().allTypes.map(\.identifier)), shipped)
+        XCTAssertEqual(HealthKitWriter().allTypes.count, shipped.count)
+    }
+
     /// Sanity: the genuinely writable ring metrics still map to a quantity type, so the fix
     /// above didn't over-broadly drop real Health writes.
     func testWritableMetricsStillMapToAType() {

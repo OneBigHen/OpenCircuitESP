@@ -148,6 +148,11 @@ final class RingScanner: NSObject {
     /// The active ring's id, for the connect UI (the "Last used" picker badge).
     var activeRingID: String? { Self.activePeripheralID }
 
+    /// The active ring's id read straight from UserDefaults, WITHOUT constructing the scanner: a
+    /// strap-chosen app names the ring on the ring's own pending rows (decision 28, #215) without
+    /// touching the ring's driver.
+    static var persistedActiveRingID: String? { activePeripheralID }
+
     /// True when a ring was connected at least once (persisted in the remembered set), read WITHOUT
     /// touching `.shared` or creating the central (#142). The AppDelegate launch gate uses this to
     /// decide whether to arm reconnection early — which creates the central for state restoration —

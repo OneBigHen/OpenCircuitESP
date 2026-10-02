@@ -230,6 +230,17 @@ struct HealthKitHistoryInspector {
 @MainActor
 struct HealthKitVitalsBaselineReader {
     private let store = HKHealthStore()
+    /// Decision 29: whose Apple Health history may stand in for a short local baseline. nil (no switch
+    /// on record): every sample, as before. Set: only that device's (`isFrom`).
+    var device: DeviceOwnershipLog.Family?
+
+    /// Whether a sample written with `localIdentifier` may count for `family`'s baseline. Our writes name
+    /// the strap `zeppos:<id>` and the ring `ringconn`; the ring keeps every other sample it counted
+    /// before the strap existed (legacy device-less writes included), the strap only its own.
+    nonisolated static func isFrom(_ family: DeviceOwnershipLog.Family, localIdentifier: String?) -> Bool {
+        let isStrap = localIdentifier?.hasPrefix("zeppos:") == true
+        return family == .zeppOS ? isStrap : !isStrap
+    }
 
     struct DailyValue: Equatable {
         let day: Date
@@ -410,7 +421,7 @@ struct HealthKitVitalsBaselineReader {
 
     private func quantitySamples(type: HKQuantityType,
                                  predicate: NSPredicate?) async throws -> [HKQuantitySample] {
-        try await withCheckedThrowingContinuation { cont in
+        let samples: [HKQuantitySample] = try await withCheckedThrowingContinuation { cont in
             let query = HKSampleQuery(sampleType: type, predicate: predicate,
                                       limit: HKObjectQueryNoLimit,
                                       sortDescriptors: [NSSortDescriptor(keyPath: \HKSample.startDate, ascending: true)]) { _, result, error in
@@ -422,5 +433,7 @@ struct HealthKitVitalsBaselineReader {
             }
             store.execute(query)
         }
+        guard let device else { return samples }
+        return samples.filter { Self.isFrom(device, localIdentifier: $0.device?.localIdentifier) }
     }
 }

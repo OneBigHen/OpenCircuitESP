@@ -17,8 +17,8 @@ struct SleepFocusSyncSetupView: View {
                     Image(systemName: "moon.zzz.fill")
                         .foregroundStyle(.indigo)
                 }
-                Text("After this one-time setup, turning off Sleep Focus starts a short ring "
-                     + "history sync and Apple Health flush. Your other automatic syncs continue "
+                Text("After this one-time setup, turning off Sleep Focus starts a short history "
+                     + "sync from your device and Apple Health flush. Your other automatic syncs continue "
                      + "to work as before.")
                     .font(.callout)
                     .foregroundStyle(.secondary)

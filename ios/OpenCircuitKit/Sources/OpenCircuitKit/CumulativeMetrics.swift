@@ -7,7 +7,7 @@ public extension MetricKind {
         case .steps, .activeEnergy:
             return true
         case .heartRate, .restingHeartRate, .hrvSDNN, .spo2, .temperature, .respiratoryRate, .sleep,
-             .distance, .exerciseMinutes:
+             .distance, .exerciseMinutes, .stress, .pai:
             // distance + exerciseMinutes are derived values written directly by HealthKitWriter,
             // NOT raw ring samples — they never flow through the cumulative-counter ingest path.
             return false

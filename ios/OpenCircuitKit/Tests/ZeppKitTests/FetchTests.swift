@@ -3,6 +3,7 @@
 
 import XCTest
 @testable import ZeppKit
+import ZeppKitTesting
 
 final class FetchTests: XCTestCase {
 
@@ -645,6 +646,99 @@ final class FetchTests: XCTestCase {
         XCTAssertEqual(round.rawData.count, 1_152_000)
         XCTAssertEqual(round.parsed.records.count, records)
         XCTAssertEqual(round.nextSince, date(1_790_632_800 + TimeInterval(records * 60)))
+    }
+
+    // MARK: Record cap (review-223 N1, #215 phase 4)
+
+    /// A start reply for `type` announcing `bytes` (every type but activity announces bytes).
+    private func startReply(bytes: UInt32, at since: Date) -> [UInt8] {
+        [0x10, 0x01, 0x01] + le32(bytes) + ZeppFetchTimestamp.encode(since, timeZone: utc)
+    }
+
+    func testTheRecordLimitIsAHundredDaysOfMinutesTimesFourPerType() {
+        let configuration = ZeppHistoryFetch.Configuration()
+        XCTAssertEqual(configuration.maxRecordsPerRound, 100 * 1440 * 4)
+        XCTAssertEqual(configuration.maxRecordsPerRound, 576_000)
+        // Per type, in bytes: the record cap over the type's record length, never above the byte cap.
+        XCTAssertEqual(configuration.roundByteLimit(for: .autoStress), 576_000)
+        XCTAssertEqual(configuration.roundByteLimit(for: .manualStress), 2_880_000)
+        for type in [ZeppFetchType.manualHeartRate, .restingHeartRate, .maxHeartRate, .hrv] {
+            XCTAssertEqual(configuration.roundByteLimit(for: type), 3_456_000, "\(type)")
+        }
+        for type in [ZeppFetchType.activity, .temperature, .sleepRespiratoryRate, .spo2, .sleepSpO2, .sleepSession, .pai] {
+            XCTAssertEqual(configuration.roundByteLimit(for: type), 4 << 20, "\(type): held by the byte cap")
+        }
+        // A 100-day backlog at one record a minute is a quarter of the limit for every per-minute type.
+        for type in ZeppFetchType.allCases where type.isPerMinute {
+            XCTAssertEqual(type.recordCount(bytes: 144_000 * type.wireRecordLength), 144_000)
+            XCTAssertLessThanOrEqual(144_000 * type.wireRecordLength, configuration.roundByteLimit(for: type))
+        }
+        XCTAssertEqual(ZeppFetchType.spo2.recordCount(bytes: 1 + 65 * 3), 3, "the version byte is not a record")
+        XCTAssertEqual(ZeppFetchType.hrv.recordCount(bytes: 13), 3, "a partial record counts")
+    }
+
+    func testTheReviewersMaximalStressRoundNowFailsBeforeBufferingAndIsKept() {
+        // review-223 N1: 4 MiB of automatic stress passes the byte cap but would parse to 4,194,304
+        // records. The start reply is enough to refuse it: 03 09 (keep), never 02, never 03 01.
+        let now = date(1_790_700_000)
+        let since = now.addingTimeInterval(-3_600)
+        var fetch = ZeppHistoryFetch(plan: [(.autoStress, since), (.hrv, since)], now: now,
+                                     configuration: .init(ackPolicy: .deleteAfterDurableCommit, timeZone: utc))
+        _ = fetch.start()
+        XCTAssertEqual(fetch.receiveControl(startReply(bytes: 4 << 20, at: since)), [
+            .roundFailed(type: .autoStress, failure: .tooManyRecords(announced: 4_194_304, limit: 576_000)),
+            .sendControl(hex("03 09")),
+        ])
+        XCTAssertEqual(fetch.phase, .awaitingAckReply)
+        // Data the strap sends anyway is dropped: nothing is buffered, nothing parsed.
+        XCTAssertEqual(fetch.receiveData([0x00] + [UInt8](repeating: 0x20, count: 512)), [])
+        XCTAssertEqual(buffered(fetch), [])
+        XCTAssertEqual(fetch.receiveControl(hex("10 02 01 00 00 00 00")), [])
+        // Retried once from the same since, as every failed round; refused again; then the next type.
+        let retry = fetch.receiveControl(hex("10 03 01"))
+        XCTAssertEqual(retry, [.sendControl(ZeppFetchCommand.start(.autoStress, since: since, timeZone: utc))])
+        XCTAssertEqual(fetch.receiveControl(startReply(bytes: 4 << 20, at: since)), [
+            .roundFailed(type: .autoStress, failure: .tooManyRecords(announced: 4_194_304, limit: 576_000)),
+            .sendControl(hex("03 09")),
+        ])
+        XCTAssertEqual(fetch.receiveControl(hex("10 03 01")),
+                       [.sendControl(ZeppFetchCommand.start(.hrv, since: since, timeZone: utc))])
+    }
+
+    func testTheRecordLimitIsInclusiveAndConfigurable() {
+        let now = date(1_790_700_000)
+        let since = now.addingTimeInterval(-3_600)
+        var atLimit = ZeppHistoryFetch(plan: [(.autoStress, since)], now: now, configuration: .init(timeZone: utc))
+        _ = atLimit.start()
+        XCTAssertEqual(atLimit.receiveControl(startReply(bytes: 576_000, at: since)), [.sendControl([0x02])])
+        var overLimit = ZeppHistoryFetch(plan: [(.autoStress, since)], now: now, configuration: .init(timeZone: utc))
+        _ = overLimit.start()
+        XCTAssertEqual(overLimit.receiveControl(startReply(bytes: 576_001, at: since)), [
+            .roundFailed(type: .autoStress, failure: .tooManyRecords(announced: 576_001, limit: 576_000)),
+            .sendControl(hex("03 09")),
+        ])
+        // Worked example D: 12 bytes of HRV are two 6-byte records.
+        var two = ZeppHistoryFetch(plan: [(.hrv, sinceD)], now: date(1_790_633_430),
+                                   configuration: .init(timeZone: plusTwo, maxRecordsPerRound: 2))
+        _ = two.start()
+        XCTAssertEqual(two.receiveControl(startReplyD), [.sendControl([0x02])])
+        var one = ZeppHistoryFetch(plan: [(.hrv, sinceD)], now: date(1_790_633_430),
+                                   configuration: .init(timeZone: plusTwo, maxRecordsPerRound: 1))
+        _ = one.start()
+        XCTAssertEqual(one.receiveControl(startReplyD), [
+            .roundFailed(type: .hrv, failure: .tooManyRecords(announced: 2, limit: 1)),
+            .sendControl(hex("03 09")),
+        ])
+        // Activity announces records: the byte cap still decides it (524,288 records = 4 MiB).
+        var activity = machine([(.activity, sinceD)])
+        _ = activity.start()
+        XCTAssertEqual(activity.receiveControl(activityStart(524_288, at: hex("ea 07 09 1d 00 00 00 08"))),
+                       [.sendControl([0x02])])
+    }
+
+    func testTooManyRecordsDescription() {
+        XCTAssertEqual(ZeppRoundFailure.tooManyRecords(announced: 4_194_304, limit: 576_000).description,
+                       "too many records, announced 4194304, limit 576000")
     }
 
     func testAnnouncedLengthTooLargeDescription() {
