@@ -75,6 +75,12 @@ final class HealthKitAuthorizationSurfaceTests: XCTestCase {
     /// `toShare` (one non-shareable type must degrade to "temp not shared", not disable every
     /// metric). Both send the SAME read set, so they are one request surface, not two.
     ///
+    /// `VO2MaxHealthWriter.swift` = 1 (#232): the lazy VO₂ max share request, asked the first time
+    /// an estimate is about to be written instead of at launch. It cannot diverge from the main
+    /// request because it names a type the main request never names — pinned by
+    /// `testTheLazyVO2MaxRequestNamesOnlyVO2Max` below and, on the app side, by
+    /// `HealthKitShareTypesTests.testVO2MaxStaysOutOfTheMainRequest`.
+    ///
     /// `CalibrationSupport.swift` = 3 (SpO₂, Apple Watch HR, Apple Watch ECG). These are read-only
     /// requests inside the cuff/PPG calibration dev tool, reachable ONLY from the `#if DEBUG` block
     /// in `ContentView` (`showCalibration = true` at ContentView.swift is inside `#if DEBUG` …
@@ -100,7 +106,8 @@ final class HealthKitAuthorizationSurfaceTests: XCTestCase {
             if n > 0 { found[source.name] = n }
         }
 
-        let expected = ["HealthKitWriter.swift": 2, "CalibrationSupport.swift": 3]
+        let expected = ["HealthKitWriter.swift": 2, "CalibrationSupport.swift": 3,
+                        "VO2MaxHealthWriter.swift": 1]
         XCTAssertEqual(found, expected, """
             The HealthKit authorization surface moved. Found \(found), expected \(expected).
 
@@ -164,5 +171,49 @@ final class HealthKitAuthorizationSurfaceTests: XCTestCase {
             to hold the right value: it is the shape build 50 shipped, and it is invisible to this
             audit. Pass the property.
             """)
+    }
+
+    /// The one request outside `HealthKitWriter` (#232) is safe only while it names a type no other
+    /// request names. So: in `VO2MaxHealthWriter.swift` it shares exactly `[Self.vo2MaxType]` and
+    /// reads nothing, and the vo2Max HealthKit type is spelled nowhere else in the app — in particular not in
+    /// `HealthKitWriter.allTypes`, where it would also make the #129 probe prompt every install at
+    /// launch. If VO₂ max ever has to be READ, that is a redesign (one request for it, one place),
+    /// not an edit to this pin.
+    func testTheLazyVO2MaxRequestNamesOnlyVO2Max() throws {
+        let sources = try appSources()
+        guard let vo2 = sources.first(where: { $0.name == "VO2MaxHealthWriter.swift" }) else {
+            return XCTFail("VO2MaxHealthWriter.swift not found under ios/OpenCircuit — FIX THE AUDIT")
+        }
+        let exact = try matchCount(
+            #"requestAuthorization\s*\(\s*toShare\s*:\s*\[\s*Self\.vo2MaxType\s*\]\s*,\s*read\s*:\s*\[\s*\]\s*\)"#,
+            in: vo2)
+        XCTAssertEqual(exact, 1, """
+            VO2MaxHealthWriter's request must be exactly \
+            `requestAuthorization(toShare: [Self.vo2MaxType], read: [])`. Anything wider names a type \
+            the main request may also name — the build-50 permission-loop shape.
+            """)
+        XCTAssertEqual(try matchCount(#"HKQuantityType\(\s*\.vo2Max\s*\)"#, in: vo2), 1,
+                       "vo2MaxType must stay the vo2Max quantity type")
+
+        // The HealthKit type, however it is spelled (`HKQuantityType(.vo2Max)`,
+        // `HKQuantityTypeIdentifier.vo2Max`, the raw identifier string). A plain `.vo2Max` is not
+        // searched for: `VO2MaxEstimate.Estimate.vo2Max` is a number, not the type.
+        let typePattern = #"HKQuantityType\s*\(\s*\.vo2Max\b|HKQuantityTypeIdentifier\s*\.\s*vo2Max\b|HKQuantityTypeIdentifierVO2Max"#
+        var elsewhere: [String] = []
+        for source in sources where source.name != "VO2MaxHealthWriter.swift" {
+            if try matchCount(typePattern, in: source) > 0 { elsewhere.append(source.name) }
+        }
+        XCTAssertEqual(elsewhere, [], """
+            The vo2Max HealthKit type is named outside VO2MaxHealthWriter.swift (\(elsewhere)). \
+            VO₂ max is shared ONLY through that file's lazy request; naming it in \
+            HealthKitWriter.allTypes or authorizationReadTypes would put it in two requests and \
+            prompt every install at launch.
+            """)
+        if let writer = sources.first(where: { $0.name == "HealthKitWriter.swift" }) {
+            XCTAssertEqual(try matchCount(#"vo2MaxType"#, in: writer), 0,
+                           "HealthKitWriter must not borrow VO2MaxHealthWriter.vo2MaxType into its sets")
+        } else {
+            XCTFail("HealthKitWriter.swift not found under ios/OpenCircuit — FIX THE AUDIT")
+        }
     }
 }

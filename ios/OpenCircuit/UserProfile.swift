@@ -168,6 +168,12 @@ struct UserProfileSettingsView: View {
     /// authorization (the lazy-prompt design is preserved).
     @State private var notifStatus: UNAuthorizationStatus = .notDetermined
 
+    /// The Profile age row's value: "Not set" while `userProfile.age` has never been written (the
+    /// `@AppStorage` default of 35 is then a placeholder), else the stored age.
+    static func ageRowValue(age: Int, defaults: UserDefaults = .standard) -> String {
+        defaults.object(forKey: "userProfile.age") == nil ? "Not set" : "\(age)"
+    }
+
     /// The settings that drive only the ring (auto-record, BP write-back, the sedentary and wear
     /// reminders) are hidden while the Helio Strap is chosen; their stored values are untouched
     /// (#215, review-224 S4).
@@ -177,7 +183,10 @@ struct UserProfileSettingsView: View {
         Form {
             Section("Profile") {
                 Stepper(value: $age, in: 13...120) {
-                    LabeledContent("Age", value: "\(age)")
+                    // `age` reads 35 until the stepper first writes the key; that 35 is a placeholder,
+                    // so say "Not set" (the VO₂ max estimate asks for a real age, #232). Display
+                    // only: this reads the key, it never writes it.
+                    LabeledContent("Age", value: Self.ageRowValue(age: age))
                 }
                 LabeledContent("Weight") {
                     HStack(spacing: 4) {

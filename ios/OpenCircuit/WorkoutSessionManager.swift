@@ -80,6 +80,12 @@ final class WorkoutSessionManager: NSObject {
     private(set) var keepAliveUnavailable = false
     /// Count of HR samples captured so far (helps UI surface "good / sparse data").
     private(set) var hrSampleCount: Int = 0
+    /// VO₂ max estimate for the outdoor run `stop()` just finished, or the reason there is none
+    /// (#232). nil for every other sport and for workouts saved without `stop()` (detected,
+    /// recovered), which have no GPS.
+    private(set) var vo2MaxOutcome: VO2MaxEstimate.Outcome?
+    /// What happened to that estimate in Apple Health. nil while the write is pending.
+    private(set) var vo2MaxHealthStatus: VO2MaxHealthWriter.Status?
 
     // MARK: Private
 
@@ -631,7 +637,58 @@ final class WorkoutSessionManager: NSObject {
             }
         }
 
+        // #232: VO₂ max estimate for an outdoor run. Runs after the HR ingest above, so nothing
+        // here sits between the workout's active-energy credit and that ingest, and its Health write
+        // (which may show the one-time VO₂ max permission sheet) is off the "Saving workout…" path.
+        vo2MaxOutcome = summary.sport == .runningOutdoor
+            ? vo2MaxEstimate(summary: summary, hrSamples: agg.collectedSamples,
+                             route: hasRoute ? routeLocations : [])
+            : nil
+        vo2MaxHealthStatus = saved ? nil : .failed
         recordingState = .finished(summary: summary)
+        if saved, case .estimate(let estimate)? = vo2MaxOutcome {
+            Task { [weak self] in
+                let status = await VO2MaxHealthWriter().save(estimate, workoutEnd: summary.endDate)
+                // Only report into the summary it belongs to (the user may have moved on).
+                guard let self, case .finished(let shown) = self.recordingState,
+                      shown.startDate == summary.startDate else { return }
+                self.vo2MaxHealthStatus = status
+            }
+        }
+    }
+
+    /// The inputs `VO2MaxEstimate` needs, gathered from this session: the GPS fixes as cumulative
+    /// distance (the same running sum as `distanceMeters`), the age only if the user set one (the
+    /// profile's 35 placeholder is not an age), and the daily resting HR from the stored history
+    /// outside this workout's own window.
+    private func vo2MaxEstimate(summary: WorkoutSummary, hrSamples: [HRSample],
+                                route: [CLLocation]) -> VO2MaxEstimate.Outcome {
+        var points: [VO2MaxEstimate.RoutePoint] = []
+        var cumulative = 0.0
+        var previous: CLLocation?
+        for location in route {
+            if let previous { cumulative += location.distance(from: previous) }
+            previous = location
+            let hasAltitude = location.verticalAccuracy > 0
+            points.append(VO2MaxEstimate.RoutePoint(
+                time: location.timestamp, distance: cumulative,
+                altitude: hasAltitude ? location.altitude : nil,
+                verticalAccuracy: hasAltitude ? location.verticalAccuracy : nil))
+        }
+        let age = UserDefaults.standard.object(forKey: "userProfile.age") as? Int
+        var restingHR: Double?
+        if let store {
+            let since = summary.startDate.addingTimeInterval(-9 * 86_400)
+            let window = summary.startDate ... summary.endDate
+            let history = ((try? store.recentSamples(kind: .heartRate, since: since)) ?? [])
+                .filter { !window.contains($0.start) }
+                .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
+            restingHR = VO2MaxEstimate.restingHR(daily: RestingHR.dailyValues(hr: history),
+                                                 runStart: summary.startDate)
+        }
+        return VO2MaxEstimate.estimate(VO2MaxEstimate.Input(
+            sport: summary.sport, start: summary.startDate, end: summary.endDate,
+            heartRate: hrSamples, route: points, age: age, restingHR: restingHR))
     }
 
     /// Discard the session without writing to HealthKit.
@@ -669,6 +726,8 @@ final class WorkoutSessionManager: NSObject {
         recordingState = .idle
         elapsedSeconds = 0
         currentHR = nil
+        vo2MaxOutcome = nil
+        vo2MaxHealthStatus = nil
     }
 
     // ⚠️ OWNERSHIP — CORRECTED (tester report 2026-08-29, build 49). This note used to end "Ring
