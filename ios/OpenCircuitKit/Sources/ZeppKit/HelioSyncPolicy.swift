@@ -61,7 +61,8 @@ extension ZeppMetricMapping {
     /// Samples for the LOCAL store from one parsed round: `samples(from:)` (the Apple-Health-clean
     /// mapping) plus the strap's HRV as `.hrvSDNN`, which is stored and shown in the app but kept out
     /// of Apple Health by `HelioHealthPolicy.writesHRV` (decision 14). An HRV of 0 ms is no reading.
-    /// The strap's all-day stress becomes `.stress` (`stressSamples`), which has no Health type at all.
+    /// The strap's all-day stress becomes `.stress` (`stressSamples`) and its PAI `.pai`
+    /// (`paiSamples`), neither of which has a Health type at all.
     ///
     /// Steps and skin temperature are NOT here: steps go to the step ledger as additive per-minute
     /// deltas (decision 16) and temperature only through `HelioSkinTemperatureGate` (decision 12).
@@ -74,6 +75,7 @@ extension ZeppMetricMapping {
             }
         }
         if case .autoStress = parsed.records { return stressSamples(from: parsed) }
+        if case .pai = parsed.records { return paiSamples(from: parsed) }
         return samples(from: parsed).filter { $0.kind != .steps && $0.kind != .temperature }
     }
 
@@ -87,6 +89,26 @@ extension ZeppMetricMapping {
         guard case .autoStress(let minutes) = parsed.records else { return [] }
         return minutes.compactMap { minute in
             minute.rawLevel <= 100 ? QuantitySample(kind: .stress, start: minute.time, value: Double(minute.rawLevel)) : nil
+        }
+    }
+
+    /// The total PAI of each kept `0x0d` record as one `.pai` sample at the record's own time
+    /// (decision 45). The parser already dropped every record that is not type `05` (pre-reset and
+    /// unknown types), so what arrives here is the strap's own valid readings.
+    ///
+    /// A total of **0 is a real reading** — a week with no qualifying activity — and is stored like
+    /// any other. The only values skipped are ones no reading can be: a non-finite float, or a
+    /// negative total (SPEC-GAP: ZEPP_PROTOCOL.md §6.5 tags the `0x0d` fields 🟡, so a misread float
+    /// must not become a stored number).
+    ///
+    /// In the app only (decision 15): `.pai` is in no Health-mirrored kind list and
+    /// `HealthKitWriter.quantityType(for: .pai)` is nil.
+    public static func paiSamples(from parsed: ZeppParsedRecords) -> [QuantitySample] {
+        guard case .pai(let records) = parsed.records else { return [] }
+        return records.compactMap { record in
+            let total = Double(record.totalPAI)
+            guard total.isFinite, total >= 0 else { return nil }
+            return QuantitySample(kind: .pai, start: record.time, value: total)
         }
     }
 
@@ -445,7 +467,7 @@ public enum HelioFetchPlan {
         return max(previous, clamped)
     }
 
-    // MARK: Stress backfill (#239)
+    // MARK: One-time fetch-watermark backfills (#239 stress, decision 45 PAI)
 
     /// How far back a stress backfill reaches at most. Build 59 fetched the all-day stress (`0x13`)
     /// on every sync but kept only its latest value, while the type's watermark advanced, so no stress
@@ -483,10 +505,42 @@ public enum HelioFetchPlan {
     /// `plan(cursors:now:notBefore:)` bounds every type's start by `notBefore` again, so even a
     /// watermark written before any of this existed cannot reach time the ring owned.
     public static func stressBackfillCursor(watermark: Date?, ledger: Date?, notBefore: Date?) -> Date? {
+        backfillCursor(watermark: watermark, ledger: ledger, notBefore: notBefore,
+                       lookback: stressBackfillLookback)
+    }
+
+    /// How far back a PAI backfill reaches at most (decision 45). Builds 59–62 fetched `0x0d` on
+    /// every sync, kept only its latest value for the card and still advanced the type's watermark,
+    /// so no PAI row was ever stored.
+    ///
+    /// A week, the same as stress and `firstSyncLookback`: `0x0d` is written about once a day, so a
+    /// week is already seven records (714 bytes) and more than enough for the card to show a number
+    /// on build 63's first sync. It also sits well inside the store's 30-day raw-sample retention
+    /// (`LocalStore.sampleRetentionDays`), so nothing a rewind stores is pruned the moment it lands.
+    ///
+    /// SPEC-GAP: how much PAI history the strap itself keeps is not documented (§6.4 says nothing
+    /// about retention). The app always acked `03 09` (keep on strap, decision 8), so nothing was
+    /// released; if the strap has rotated older records out, the rounds just come back short.
+    public static let paiBackfillLookback: TimeInterval = 7 * 86_400
+
+    /// The PAI watermark a backfill rewinds to, or nil when none is due. Exactly the stress rule
+    /// above — the ledger is "where this code left the watermark", so a hole is only ever another
+    /// build's advance — with PAI's own lookback and its own ledger row.
+    public static func paiBackfillCursor(watermark: Date?, ledger: Date?, notBefore: Date?) -> Date? {
+        backfillCursor(watermark: watermark, ledger: ledger, notBefore: notBefore,
+                       lookback: paiBackfillLookback)
+    }
+
+    /// The shared ledger rule both backfills are: nil unless `watermark > ledger` (or there is a
+    /// watermark and no ledger at all), then `max(ledger, watermark − lookback, notBefore)`, with
+    /// `notBefore` rounded UP to its minute so the target never lies even seconds inside time the
+    /// strap doesn't own. nil when that leaves nothing to move.
+    public static func backfillCursor(watermark: Date?, ledger: Date?, notBefore: Date?,
+                                      lookback: TimeInterval) -> Date? {
         guard let watermark else { return nil }
         // Due only when another build moved the watermark past where this code left it.
         if let ledger, watermark <= ledger { return nil }
-        var target = floorToMinute(watermark.addingTimeInterval(-stressBackfillLookback))
+        var target = floorToMinute(watermark.addingTimeInterval(-lookback))
         if let ledger { target = max(target, ledger) }
         if let notBefore {
             target = max(target, Date(timeIntervalSince1970: (notBefore.timeIntervalSince1970 / 60).rounded(.up) * 60))
