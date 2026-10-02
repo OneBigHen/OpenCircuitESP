@@ -157,7 +157,8 @@ public struct ZeppHRVReading: Equatable {
     public let time: Date
     /// 🔴 probably the tz byte, as in the 6-byte HR records.
     public let unknown: UInt8
-    /// Milliseconds. The statistic (RMSSD vs SDNN) is unknown (🔴).
+    /// Milliseconds. RMSSD 🟡: Amazfit's product-line documentation, which doesn't name the strap; not
+    /// compared with Zepp's display (ZEPP_PROTOCOL.md §6.5).
     public let milliseconds: UInt8
 }
 

@@ -382,7 +382,7 @@ final class HelioConnection: NSObject {
     }
 
     /// The strap's Apple Health pass, shared by the post-sync hook and the background run (#215
-    /// phase 4): its timeline's pending samples (HRV withheld, decision 14) and `nights`. nil when
+    /// phase 4): its timeline's pending samples (`HelioHealthPolicy.healthMirroredKinds()`) and `nights`. nil when
     /// Health isn't available on this device, or when `mayFlush` says no. `nightsFinalized` is the
     /// time T Sleep Focus ended, if a Focus wake is behind this flush: the nights skip their 20-minute
     /// quiet margin (as the ring's do on that wake) only if this flush starts within 30 minutes of T.
@@ -401,11 +401,20 @@ final class HelioConnection: NSObject {
             helioLog.notice("helio: Health flush skipped: switched away before the strap had an identity")
             return nil
         }
-        let flush = await HealthKitWriter().flushToHealth(
-            store: store, device: timeline, mirroredKinds: HelioHealthPolicy.healthMirroredKinds(),
-            strapNights: nights.map(\.segments), strapNightsFinalized: finalized)
+        let flush = await flushStrap(HealthKitWriter(), store: store, timeline: timeline,
+                                     nights: nights.map(\.segments), nightsFinalized: finalized)
         helioLog.notice("helio: Health flush samples=\(flush.samples, privacy: .public) sleep=\(flush.sleepSegments, privacy: .public) steps=\(flush.steps, privacy: .public) rhr=\(flush.restingDays, privacy: .public)")
         return flush
+    }
+
+    /// The strap's pass through `writer`, run by both strap flush sites (`healthFlush` above and
+    /// `ContentView.flushHealth`): the strap's timeline, the kinds `HelioHealthPolicy` mirrors (HRV
+    /// included, decision 44) and its nights. The kinds are decided here only, and a test pins them
+    /// through `HealthKitWriter.lastFlushRequest` (review-244 SF-2).
+    static func flushStrap(_ writer: HealthKitWriter, store: LocalStore, timeline: SyncDeviceID,
+                           nights: [[SleepSegment]], nightsFinalized: Bool = false) async -> HealthKitWriter.FlushResult {
+        await writer.flushToHealth(store: store, device: timeline, mirroredKinds: HelioHealthPolicy.healthMirroredKinds(),
+                                   strapNights: nights, strapNightsFinalized: nightsFinalized)
     }
 
     /// Whether a strap sync's flush may write (decision 28, review-224 S3). Attribution follows the

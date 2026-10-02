@@ -2434,17 +2434,16 @@ struct ContentView: View {
         guard healthAuthorized else { return }
         let store = LocalStore(modelContext)
         if !ringActive {
-            // The Helio Strap (#215): its timeline's pending samples (HRV withheld, decision 14) and
-            // the nights of its last sync, through the same writer. Never the ring's segments.
+            // The Helio Strap (#215): its timeline's pending samples (`HelioConnection.flushStrap`'s
+            // kinds, HRV included since decision 44) and the nights of its last sync, through the same
+            // writer. Never the ring's segments.
             let timeline = helioSession?.timeline ?? HelioConnection.savedPeripheralID.map {
                 SyncDeviceID.timeline(for: .zeppOS(model: HelioSession.displayName), identityID: $0)
             }
             guard let timeline else { return }
             let nights = helioSession?.lastSyncResult?.nights.map(\.segments) ?? []
             Task {
-                let r = await health.flushToHealth(store: store, device: timeline,
-                                                   mirroredKinds: HelioHealthPolicy.healthMirroredKinds(),
-                                                   strapNights: nights)
+                let r = await HelioConnection.flushStrap(health, store: store, timeline: timeline, nights: nights)
                 refreshHealthShareState()
                 if r.wroteAnything {
                     observability.recordHealthWrite()

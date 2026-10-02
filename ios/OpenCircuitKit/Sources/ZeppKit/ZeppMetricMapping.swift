@@ -58,7 +58,7 @@ public enum ZeppMetricMapping {
         case .activity, .manualHeartRate, .restingHeartRate, .spo2, .temperature, .sleepRespiratoryRate:
             return nil
         case .hrv:
-            return "HRV statistic unknown (RMSSD vs SDNN); .hrvSDNN would assert SDNN"
+            return "RMSSD in the .hrvSDNN slot: mapped by storedSamples(from:) and mirrored by HelioHealthPolicy.writesHRV (decision 44), not here"
         case .maxHeartRate:
             return "no HealthKit type for max HR"
         case .autoStress:
