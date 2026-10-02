@@ -39,6 +39,19 @@ final class HealthKitWriter {
 
     static var isAvailable: Bool { HKHealthStore.isHealthDataAvailable() }
 
+#if DEBUG
+    /// Tests only, and DEBUG only: stands in for the HealthKit save in `write(_:timeline:)`, so a
+    /// fake can record exactly what would have reached Apple Health.
+    ///
+    /// ⚠️ NEVER make this available in Release. It is a plain internal `var` on the production
+    /// writer, so anything in the app module could replace the HealthKit save with it — and the
+    /// writer would still report those samples in `outcome.written`, which ADVANCES the mirror
+    /// watermark. A single accidental setter would therefore stop every metric reaching Apple Health
+    /// while the app believed it had written them (review-242 SF-1). The test target builds Debug,
+    /// so the seam keeps working where it is needed and cannot exist where it is not.
+    var quantitySaveOverride: (([HKQuantitySample]) async throws -> Void)?
+#endif
+
     /// HKQuantityType for a scalar metric, or nil for non-quantity kinds (sleep).
     static func quantityType(for kind: MetricKind) -> HKQuantityType? {
         let id: HKQuantityTypeIdentifier
@@ -71,6 +84,9 @@ final class HealthKitWriter {
         // Apps contribute exercise time only via HKWorkout (the #93 path), so there is no writable
         // quantity type for it — return nil so it is excluded from BOTH the auth set and writes.
         case .exerciseMinutes: return nil
+        // The Helio Strap's all-day stress (#239, decision 15): Apple Health has no stress type, so
+        // nil keeps it out of BOTH the auth set and every write. It is stored and charted in the app only.
+        case .stress: return nil
         }
         return HKQuantityType(id)
     }
@@ -88,6 +104,7 @@ final class HealthKitWriter {
         case .sleep: return .count()                  // unused
         case .distance: return .meter()              // ESTIMATE — steps × RingConn's per-step constant
         case .exerciseMinutes: return .minute()      // ESTIMATE — elevated HR minutes
+        case .stress: return .count()                // unused: no Health type (#239)
         }
     }
 
@@ -1165,7 +1182,11 @@ final class HealthKitWriter {
             }
             guard !hk.isEmpty else { continue }   // no writable HK type for this kind — nothing to save
             do {
+#if DEBUG
+                if let quantitySaveOverride { try await quantitySaveOverride(hk) } else { try await store.save(hk) }
+#else
                 try await store.save(hk)
+#endif
                 outcome.written.append(contentsOf: group)
             } catch {
                 outcome.failed.insert(kind)   // this metric is denied/failing; others still land

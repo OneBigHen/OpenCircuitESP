@@ -49,8 +49,16 @@ extension LocalStore {
     }
 
     /// Persist one fetch watermark.
+    ///
+    /// The stress watermark carries its ledger (`stageHelioStressCursor`): this is the ONLY place any
+    /// watermark is written, so routing `.autoStress` through here is what makes "the ledger moves in
+    /// the same save as the watermark" impossible to forget at a future call site (review-242b SF-1).
     func setHelioFetchCursor(_ type: ZeppFetchType, to date: Date, device: SyncDeviceID) throws {
-        stageHelioCursor(HelioFetchPlan.cursorName(for: type), to: date, device: device)
+        if type == .autoStress {
+            stageHelioStressCursor(to: date, device: device)
+        } else {
+            stageHelioCursor(HelioFetchPlan.cursorName(for: type), to: date, device: device)
+        }
         do { try context.save() } catch { context.rollback(); throw error }
     }
 
@@ -189,7 +197,8 @@ final class HelioStoreSink: HelioHistorySink {
     }
 
     func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date] {
-        store.helioFetchCursors(device: timeline)
+        store.applyHelioStressBackfillIfNeeded(device: timeline)   // #239: before the plan is built
+        return store.helioFetchCursors(device: timeline)
     }
 
     /// Decision 28: the strap's current ownership start. If it doesn't own the present (switched
@@ -243,6 +252,8 @@ final class HelioStoreSink: HelioHistorySink {
                 if let last = minutes.last(where: { $0.level != nil }), let level = last.level {
                     latestStress = HelioReading(value: Double(level), at: last.time)
                 }
+                // #239: every minute is kept as `.stress` history, in the app only (no Health type).
+                _ = try store.ingest(owned(ZeppMetricMapping.storedSamples(from: round.parsed), timeline), device: timeline)
             case .pai(let records):
                 if let last = records.last { latestPAI = HelioReading(value: Double(last.totalPAI), at: last.time) }
             default:

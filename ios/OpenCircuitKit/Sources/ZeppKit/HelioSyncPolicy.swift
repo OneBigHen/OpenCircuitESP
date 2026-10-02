@@ -61,6 +61,7 @@ extension ZeppMetricMapping {
     /// Samples for the LOCAL store from one parsed round: `samples(from:)` (the Apple-Health-clean
     /// mapping) plus the strap's HRV as `.hrvSDNN`, which is stored and shown in the app but kept out
     /// of Apple Health by `HelioHealthPolicy.writesHRV` (decision 14). An HRV of 0 ms is no reading.
+    /// The strap's all-day stress becomes `.stress` (`stressSamples`), which has no Health type at all.
     ///
     /// Steps and skin temperature are NOT here: steps go to the step ledger as additive per-minute
     /// deltas (decision 16) and temperature only through `HelioSkinTemperatureGate` (decision 12).
@@ -72,13 +73,58 @@ extension ZeppMetricMapping {
                     : nil
             }
         }
+        if case .autoStress = parsed.records { return stressSamples(from: parsed) }
         return samples(from: parsed).filter { $0.kind != .steps && $0.kind != .temperature }
+    }
+
+    /// The all-day stress minutes of an `.autoStress` round as `.stress` samples (0–100), one per
+    /// minute at the minute's own time (#239). A byte above 100 is the strap's "no reading" (`ff`,
+    /// ZEPP_PROTOCOL.md §6.5 `0x13`) and is skipped, never stored as a value. Empty for any other type.
+    ///
+    /// In the app only (decision 15): `.stress` is in no Health-mirrored kind list and
+    /// `HealthKitWriter.quantityType(for: .stress)` is nil.
+    public static func stressSamples(from parsed: ZeppParsedRecords) -> [QuantitySample] {
+        guard case .autoStress(let minutes) = parsed.records else { return [] }
+        return minutes.compactMap { minute in
+            minute.rawLevel <= 100 ? QuantitySample(kind: .stress, start: minute.time, value: Double(minute.rawLevel)) : nil
+        }
     }
 
     /// The per-minute step counts of an activity round, each spanning its own minute (decision 16:
     /// additive deltas over their real interval). Minutes with no steps are omitted.
     public static func stepMinutes(from parsed: ZeppParsedRecords) -> [QuantitySample] {
         samples(from: parsed).filter { $0.kind == .steps }
+    }
+}
+
+// MARK: - Stress bands (#239)
+
+/// Amazfit's four words for an all-day stress level (`0x13`), exactly as ZEPP_PROTOCOL.md §6.5
+/// records them: 0–39 relaxed, 40–59 mild, 60–79 moderate, 80–100 high (🟡, the fields' source).
+/// The ONLY labels the app puts on the strap's stress. It is the strap's own scale and its own
+/// words, not a judgement of the person, and there is deliberately no "usual" for it (#239).
+public enum HelioStressBand: String, CaseIterable, Sendable {
+    case relaxed, mild, moderate, high
+
+    /// The band for a level, or nil outside 0–100 (a byte above 100 is the strap's "no reading").
+    public init?(level: Int) {
+        switch level {
+        case 0...39: self = .relaxed
+        case 40...59: self = .mild
+        case 60...79: self = .moderate
+        case 80...100: self = .high
+        default: return nil
+        }
+    }
+
+    /// The level range the band covers, for the copy that lists them.
+    public var range: ClosedRange<Int> {
+        switch self {
+        case .relaxed: return 0...39
+        case .mild: return 40...59
+        case .moderate: return 60...79
+        case .high: return 80...100
+        }
     }
 }
 
@@ -397,6 +443,55 @@ public enum HelioFetchPlan {
         let clamped = min(next, floorToMinute(now))
         guard let previous else { return clamped }
         return max(previous, clamped)
+    }
+
+    // MARK: Stress backfill (#239)
+
+    /// How far back a stress backfill reaches at most. Build 59 fetched the all-day stress (`0x13`)
+    /// on every sync but kept only its latest value, while the type's watermark advanced, so no stress
+    /// history was stored; build 60 does the same. Rewinding that watermark refetches the hole.
+    ///
+    /// SPEC-GAP: how much stress history the strap itself still holds is not documented (§6.4 says
+    /// nothing about retention). The app always acked `03 09` (keep on strap, decision 8), so nothing
+    /// was released; if the strap has rotated older minutes out, those rounds just come back short.
+    public static let stressBackfillLookback: TimeInterval = 7 * 86_400
+
+    /// The stress watermark a backfill rewinds to, or nil when no backfill is due.
+    ///
+    /// **The test is exact: "did another build advance the stress watermark?"** (review-242b SF-1).
+    /// `ledger` is the watermark as THIS code last left it, written in the same save as every advance
+    /// or rewind this code makes (`LocalStore.helioStressLedger`). So:
+    ///
+    /// - `watermark > ledger` can only mean a build that fetches `0x13` and drops it moved the
+    ///   watermark on. The hole is exactly `[ledger, watermark]`, and it is refetched.
+    /// - `watermark == ledger` is every ordinary case — a wear gap, charging, stress monitoring off
+    ///   (#240), a strap that rotated minutes out — because this code advanced the watermark itself
+    ///   and recorded that it did. **Never due.** The previous gap heuristic could not tell those
+    ///   apart from a rollback: `ff` minutes advance the watermark but store no row, so an hour off
+    ///   the wrist re-armed a 7-day refetch whose minutes the strictly-forward `.stress` ingest cursor
+    ///   then dropped — pure cost, roughly once per gap.
+    /// - No `ledger` yet, but a watermark exists: the first run of this code on a timeline that an
+    ///   older build already advanced. That is the original build-59/60 upgrade, and it gets the
+    ///   7-day backfill.
+    /// - No watermark at all: nil. The type's first fetch already reaches `firstSyncLookback` back.
+    ///
+    /// The rewind is `max(ledger, watermark − stressBackfillLookback, notBefore)` — never past the
+    /// ledger (everything before it is already stored), never more than a week, and never before
+    /// `notBefore` (decision 28: the strap's current ownership start, rounded UP to its minute, so the
+    /// target never lies even seconds inside the ring's time). nil when that leaves nothing to move.
+    ///
+    /// `plan(cursors:now:notBefore:)` bounds every type's start by `notBefore` again, so even a
+    /// watermark written before any of this existed cannot reach time the ring owned.
+    public static func stressBackfillCursor(watermark: Date?, ledger: Date?, notBefore: Date?) -> Date? {
+        guard let watermark else { return nil }
+        // Due only when another build moved the watermark past where this code left it.
+        if let ledger, watermark <= ledger { return nil }
+        var target = floorToMinute(watermark.addingTimeInterval(-stressBackfillLookback))
+        if let ledger { target = max(target, ledger) }
+        if let notBefore {
+            target = max(target, Date(timeIntervalSince1970: (notBefore.timeIntervalSince1970 / 60).rounded(.up) * 60))
+        }
+        return target < watermark ? target : nil
     }
 
     /// How far back a temperature minute may still be waiting for its night: a night's session is

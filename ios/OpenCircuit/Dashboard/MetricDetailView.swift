@@ -1,6 +1,7 @@
 // A Today metric's trend screen (#216): the tile's metric over 14 or 30 days, with the personal
 // usual range as a band, the headline value and its delta, min / average / max, and plain notes on
-// what the number is and how "usual" is worked out.
+// what the number is and how "usual" is worked out. Its Day segment (#239, the default from Today)
+// is the metric through one day, with previous / next day (`MetricDayView`).
 //
 // Loads its own window through `TrendsData.loadAsync(lookbackDays:)` (the same off-main loader the
 // tabs use) when it opens, and each range the first time it is picked, so it shows the store as of
@@ -18,6 +19,16 @@ struct MetricDetailView: View {
     @State private var range = 14
     @State private var loaded: [Int: TrendsData] = [:]
 
+    /// The picker's Day segment (#239): one day's chart, not a window of days.
+    static let dayRange = 1
+
+    /// `startsOnDay`: open on today's Day chart, as from a Today tile (#239); otherwise the 14-day trend.
+    init(metric: TodayTile.Metric, tempUnitRaw: String, startsOnDay: Bool = false) {
+        self.metric = metric
+        self.tempUnitRaw = tempUnitRaw
+        _range = State(initialValue: startsOnDay ? Self.dayRange : 14)
+    }
+
     @ScaledMetric(relativeTo: .largeTitle) private var valueSize: CGFloat = 52
 
     private var tempUnit: TemperatureUnit { TemperatureUnit(rawValue: tempUnitRaw) ?? .celsius }
@@ -33,12 +44,19 @@ struct MetricDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
                 Picker("Range", selection: $range) {
+                    Text("Day").tag(Self.dayRange)
                     Text("14 days").tag(14)
                     Text("30 days").tag(30)
                 }
                 .pickerStyle(.segmented)
 
-                if let tile {
+                if range == Self.dayRange {
+                    MetricDayView(metric: metric.dayMetric, tempUnitRaw: tempUnitRaw, embedded: true)
+                    if metric == .restingHR {
+                        Text("Resting heart rate is one value per day. This is the day's heart rate it comes from.")
+                            .font(.caption).foregroundStyle(.tertiary)
+                    }
+                } else if let tile {
                     header(tile)
                     OCCard {
                         MetricTrendChart(tile: tile)
@@ -59,7 +77,7 @@ struct MetricDetailView: View {
         .navigationTitle(TodayTiles.build(metric, points: [], restingHR: [], tempUnit: tempUnit).title)
         .navigationBarTitleDisplayMode(.inline)
         .task(id: range) {
-            guard loaded[range] == nil else { return }
+            guard range != Self.dayRange, loaded[range] == nil else { return }
             loaded[range] = await TrendsData.loadAsync(container: modelContext.container,
                                                        tempUnitRaw: tempUnitRaw, lookbackDays: range)
         }
