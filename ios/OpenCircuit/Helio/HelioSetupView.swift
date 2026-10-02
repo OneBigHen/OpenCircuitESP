@@ -81,8 +81,8 @@ struct HelioSetupView: View {
             Section("What you get") {
                 bullet("Heart rate, HRV, steps, sleep stages, SpO₂, respiratory rate and skin temperature from the strap's own history, "
                        + "saved on this phone and written to Apple Health.")
-                bullet("Amazfit documents the strap's HRV as RMSSD, the same statistic as the ring's. Apple Health files it "
-                       + "under its only HRV type (SDNN), and each sample is labelled RMSSD.")
+                bullet("The strap's HRV is labelled RMSSD, like the ring's, based on Amazfit's statement that its devices "
+                       + "measure HRV as RMSSD. Apple Health files it under its only HRV type (SDNN).")
                 bullet("Stress and PAI are shown in the app only. Apple Health has no type for them.")
                 bullet("Find My Strap, a short buzz, and the strap's alarms.")
                 bullet("Nothing is sent to Zepp or any other server.")
