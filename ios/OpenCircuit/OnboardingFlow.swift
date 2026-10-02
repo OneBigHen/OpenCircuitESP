@@ -79,8 +79,12 @@ struct OnboardingFlow: Equatable {
     /// The strap is chosen and has its key, so there's nothing left to set up.
     var strapIsSetUp: Bool { installed.persistedChoice == .helioStrap && installed.hasStrapKey }
 
+    /// Exhaustive over the devices (review-256b N3): a new device must say how the guide ends for it.
     func finish(for pick: ActiveDeviceChoice?) -> Finish {
-        pick == .helioStrap && !strapIsSetUp ? .setUpStrap : .getStarted
+        switch pick {
+        case nil, .ringConn: return .getStarted
+        case .helioStrap: return strapIsSetUp ? .getStarted : .setUpStrap
+        }
     }
 
     /// Skip on every page but the last; on the last, "Set up later" only when it ends on the strap's
