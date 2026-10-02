@@ -561,6 +561,19 @@ final class DeviceOwnershipAppTests: XCTestCase {
                        as? String, "RMSSD")
     }
 
+    /// Review-244 SF-2: both strap flush sites (`HelioConnection.healthFlush`, `ContentView.flushHealth`)
+    /// run `HelioConnection.flushStrap`, and what it asks the writer to mirror includes HRV (decision 44).
+    /// A strap flush that withholds HRV fails here. Without Health access the writer stops at its gate,
+    /// after recording the request.
+    func testTheStrapFlushAsksTheWriterToMirrorHRV() async throws {
+        let store = try makeStore()
+        let writer = HealthKitWriter()
+        _ = await HelioConnection.flushStrap(writer, store: store, timeline: strapTimeline, nights: [])
+        let request = try XCTUnwrap(writer.lastFlushRequest)
+        XCTAssertEqual(request.device, strapTimeline)
+        XCTAssertEqual(request.mirroredKinds, [.heartRate, .spo2, .respiratoryRate, .temperature, .hrvSDNN])
+    }
+
     private func ringOnly() -> ActiveWearable {
         let ring = WearableSeamTests.FakeWearable(identity: ringIdentity())
         return ActiveWearable(session: { ring }, fallbackDeviceID: { self.ringID }, identityStore: WearableIdentityStore(defaults),

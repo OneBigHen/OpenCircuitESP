@@ -408,6 +408,17 @@ final class HealthKitWriter {
     /// timeline's pending samples (minus the kinds its policy withholds, `HelioHealthPolicy`) and the
     /// nights it staged. Their defaults are exactly the ring's pass, unchanged. `strapNightsFinalized`
     /// is `sleepFinalized` for those nights (the Sleep Focus wake, #215 phase 4).
+    /// What a `flushToHealth` call was asked to mirror: the timeline and the kinds (nil = every
+    /// mirrored kind, the ring's pass).
+    struct FlushRequest: Equatable {
+        let device: SyncDeviceID
+        let mirroredKinds: [MetricKind]?
+    }
+
+    /// The last `flushToHealth` request on this writer, recorded before any gate, so a test pins what
+    /// a call site passes without Health access (review-244 SF-2). Nothing in the app reads it.
+    private(set) var lastFlushRequest: FlushRequest?
+
     @discardableResult
     func flushToHealth(store: LocalStore, sleepSegments: [SleepSegment] = [],
                        sleepFinalized: Bool = false,
@@ -415,6 +426,7 @@ final class HealthKitWriter {
                        mirroredKinds: [MetricKind]? = nil,
                        strapNights: [[SleepSegment]] = [],
                        strapNightsFinalized: Bool = false) async -> FlushResult {
+        lastFlushRequest = FlushRequest(device: device, mirroredKinds: mirroredKinds)
         var result = FlushResult()
         guard isShareAuthorized, !Self.isFlushing else { return result }
         Self.isFlushing = true
