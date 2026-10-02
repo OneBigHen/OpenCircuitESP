@@ -183,7 +183,7 @@ struct StrapStressTileView: View {
                 Text(tile.band.map { $0.rawValue.prefix(1).uppercased() + $0.rawValue.dropFirst() } ?? " ")
                     .font(.caption2.weight(.medium)).foregroundStyle(.secondary)
                 Text("·").font(.caption2).foregroundStyle(.tertiary)
-                Text(tile.latest.at, format: .dateTime.hour().minute())
+                Text(StrapStressTile.timeLabel(tile.latest.at, now: Date()))
                     .font(.caption2).foregroundStyle(.tertiary)
             }
             .lineLimit(1)
@@ -204,7 +204,7 @@ struct StrapStressTileView: View {
     private var accessibilityLabel: String {
         var parts = ["Stress, from the Helio Strap", "\(level) out of 100"]
         if let band = tile.band { parts.append(band.rawValue) }
-        parts.append("at \(tile.latest.at.formatted(date: .omitted, time: .shortened))")
+        parts.append("at \(StrapStressTile.timeLabel(tile.latest.at, now: Date()))")
         parts.append("The strap's own scale, with no usual range")
         return parts.joined(separator: ". ")
     }

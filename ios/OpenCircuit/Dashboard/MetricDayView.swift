@@ -1,5 +1,6 @@
 // One metric through one day, with previous / next day (#239). The Day view of a Today metric's
-// detail (`MetricDetailView`), and on its own for the strap's stress, which has no Today tile.
+// detail (`MetricDetailView`), and on its own from the strap card and the Stress tile for the strap's
+// stress (steer 3).
 //
 // Opens on today. Loads through the store when it appears, when the day changes and after every
 // finished sync (`SyncRevision`), never from a parent's snapshot (#222 review S1).

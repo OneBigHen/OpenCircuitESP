@@ -823,3 +823,121 @@ final class StrapStressTodayTests: XCTestCase {
         XCTAssertTrue(DayMetricCard.stressFootnote.contains("0–39 relaxed, 40–59 mild, 60–79 moderate, 80–100 high"))
     }
 }
+
+// MARK: - The Stress tile's edges (adopted from review-242c's probes, steer 4)
+
+@MainActor
+final class StrapStressTileEdgeTests: XCTestCase {
+    private var containers: [ModelContainer] = []
+    private let ownership = OwnershipOverride()
+    private let strap = SyncDeviceID(rawValue: "zeppos:AAAAAAAA-0000-4000-8000-000000000001")
+    /// 2026-09-20 12:00 UTC.
+    private let now = sNow
+
+    override func tearDown() {
+        ownership.restore()
+        containers.removeAll()
+        super.tearDown()
+    }
+
+    private func put(_ store: LocalStore, _ value: Double, at t: Date) throws {
+        store.context.insert(StoredSample(QuantitySample(kind: .stress, start: t, value: value), device: strap))
+        try store.context.save()
+    }
+
+    private func load(_ store: LocalStore, at time: Date) -> StrapStressTile? {
+        StrapStressTile.load(container: store.context.container, log: .strapOwnsAllTime, now: time, calendar: .current)
+    }
+
+    /// The day card's footnote is generated from `HelioStressBand` now; it must still be byte-for-byte
+    /// the text that shipped before that change.
+    func testTheDayCardFootnoteIsByteIdenticalToTheShippedText() {
+        let shipped = "The Helio Strap's all-day stress, 0 to 100, as the strap measures it. "
+            + "It is not the ring's Overnight Stress score. Amazfit's bands: 0–39 relaxed, 40–59 mild, "
+            + "60–79 moderate, 80–100 high. Stays in the app: Apple Health has no stress type."
+        XCTAssertEqual(Array(DayMetricCard.stressFootnote.utf8), Array(shipped.utf8))
+    }
+
+    /// Exactly 24 hours old is shown, at load and at render; a millisecond past it is not.
+    func testTheDayBoundaryIsInclusiveAtExactly24HoursAtLoadAndAtRender() throws {
+        let edge = try makeMemoryStore(&containers)
+        try put(edge, 40, at: now.addingTimeInterval(-86_400))
+        let tile = try XCTUnwrap(load(edge, at: now), "exactly 24 h old is loaded")
+        XCTAssertTrue(tile.isFresh(now: now))
+        XCTAssertFalse(tile.isFresh(now: now.addingTimeInterval(0.001)), "a millisecond later it is hidden at render")
+
+        let over = try makeMemoryStore(&containers)
+        try put(over, 40, at: now.addingTimeInterval(-86_400.001))
+        XCTAssertNil(load(over, at: now), "a millisecond past 24 h is not loaded")
+    }
+
+    /// The morning case: before the strap's first sync of the day the newest reading is last night's.
+    /// It is still shown, labelled "Yesterday …" rather than a bare clock time, above an empty today.
+    func testLastNightsReadingIsLabelledYesterday() throws {
+        let calendar = Calendar.current
+        let morning = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: now)!
+        let lastNight = calendar.date(byAdding: .hour, value: -10, to: morning)!   // 23:00 the day before
+        let store = try makeMemoryStore(&containers)
+        try put(store, 45, at: lastNight)
+
+        let tile = try XCTUnwrap(load(store, at: morning))
+        XCTAssertFalse(calendar.isDate(tile.latest.at, inSameDayAs: morning))
+        XCTAssertTrue(tile.today.points.isEmpty, "nothing yet today")
+        XCTAssertEqual(tile.currentReading(now: morning)?.value, 45)
+        let clock = lastNight.formatted(date: .omitted, time: .shortened)
+        XCTAssertEqual(StrapStressTile.timeLabel(tile.latest.at, now: morning), "Yesterday \(clock)")
+    }
+
+    /// The one label the card and the tile share: bare time today, "Yesterday" before, weekday older.
+    func testTheTimeLabelQualifiesEveryDayButToday() {
+        let calendar = Calendar.current
+        let morning = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: now)!
+        let earlier = morning.addingTimeInterval(-3600)
+        XCTAssertEqual(StrapStressTile.timeLabel(earlier, now: morning),
+                       earlier.formatted(date: .omitted, time: .shortened), "today's reading: the clock time alone")
+        let older = calendar.date(byAdding: .day, value: -3, to: morning)!
+        XCTAssertEqual(StrapStressTile.timeLabel(older, now: morning),
+                       "\(older.formatted(.dateTime.weekday(.abbreviated))) \(older.formatted(date: .omitted, time: .shortened))")
+        XCTAssertFalse(StrapStressTile.timeLabel(older, now: morning).hasPrefix("Yesterday"))
+    }
+
+    /// A strap clock running ahead can store rows up to a day in the future. None is ever "latest" or
+    /// fresh: the past reading is shown instead, and a future-only store shows nothing.
+    func testAFutureDatedRowIsNeverLatestOrFresh() throws {
+        let store = try makeMemoryStore(&containers)
+        try put(store, 30, at: now.addingTimeInterval(-600))
+        try put(store, 90, at: now.addingTimeInterval(3 * 3600))
+        let tile = try XCTUnwrap(load(store, at: now))
+        XCTAssertEqual(tile.latest.value, 30, "the future-dated 90 is excluded")
+        XCTAssertTrue(tile.isFresh(now: now))
+
+        let futureOnly = try makeMemoryStore(&containers)
+        try put(futureOnly, 90, at: now.addingTimeInterval(3 * 3600))
+        XCTAssertNil(load(futureOnly, at: now))
+
+        let ahead = StrapStressTile(latest: HelioReading(value: 90, at: now.addingTimeInterval(60)),
+                                    today: .empty, day: DayTimeline.dayInterval(now))
+        XCTAssertFalse(ahead.isFresh(now: now), "a reading after now is never fresh")
+        XCTAssertNil(ahead.currentReading(now: now))
+    }
+
+    /// The off-main entry point returns exactly what the core read returns.
+    func testLoadAsyncEqualsLoad() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        let today = Calendar.current.startOfDay(for: now)
+        var t = today
+        var i = 0
+        while t < now {
+            store.context.insert(StoredSample(QuantitySample(kind: .stress, start: t, value: Double(i % 100)), device: strap))
+            t = t.addingTimeInterval(300)
+            i += 1
+        }
+        try store.context.save()
+        let container = store.context.container
+        let viaAsync = await StrapStressTile.loadAsync(container: container, now: now)
+        let direct = StrapStressTile.load(container: container, log: LocalStore.ownershipLog(), now: now, calendar: .current)
+        XCTAssertNotNil(direct)
+        XCTAssertEqual(viaAsync, direct)
+    }
+}

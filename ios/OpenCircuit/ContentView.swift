@@ -718,11 +718,18 @@ struct ContentView: View {
         // completion would let the second one pass this guard while the first is still in flight —
         // which is the exact double-load being fixed.
         trendsLoadedAt = Date()
-        trends = await TrendsData.loadAsync(container: modelContext.container, tempUnitRaw: tempUnitRaw)
         // The strap's stress for its card and tile (#239, steer 3), on the same triggers as the tiles —
         // launch, foreground return, every finished sync, a device switch — and from the store, so it
-        // survives a sync without a stress round, a relaunch and a background wake.
-        strapStress = await StrapStressTile.loadAsync(container: modelContext.container)
+        // survives a sync without a stress round, a relaunch and a background wake. Loaded alongside
+        // the trends, not after them, so it adds nothing before `trendsHaveLoaded` (review-242c NIT 2).
+        // Captured here, on the main actor: `async let` evaluates its expression in a child task, which
+        // must not touch the view's `modelContext` or `@AppStorage`. `ModelContainer` is Sendable.
+        let container = modelContext.container
+        let unitRaw = tempUnitRaw
+        async let loadedTrends = TrendsData.loadAsync(container: container, tempUnitRaw: unitRaw)
+        async let loadedStress = StrapStressTile.loadAsync(container: container)
+        trends = await loadedTrends
+        strapStress = await loadedStress
         trendsHaveLoaded = true
     }
 

@@ -40,9 +40,26 @@ struct StrapStressTile: Equatable {
     var band: HelioStressBand? { HelioStressBand(level: Int(latest.value.rounded())) }
 
     /// Whether `latest` is recent enough to show at `now`. Checked at RENDER time too, not only at
-    /// load, so an app left open past the 24 hours doesn't keep showing a stale number.
+    /// load, so an app left open past the 24 hours doesn't keep showing a stale number. A reading
+    /// dated after `now` is never fresh: ingest accepts rows up to a day ahead (a strap clock running
+    /// fast), and one of those must not be pinned as "latest" (review-242c NIT 3).
     func isFresh(now: Date) -> Bool {
-        now.timeIntervalSince(latest.at) <= Self.maxAge
+        latest.at <= now && now.timeIntervalSince(latest.at) <= Self.maxAge
+    }
+
+    /// When the reading was taken, as the card and the tile both show it: the clock time for a reading
+    /// from today, "Yesterday 11:00 PM" for last night's, and the abbreviated weekday for anything older
+    /// (the 24 h window can't reach past yesterday, but this stays safe if it ever does). The morning
+    /// case is why: before the strap's first sync of the day the newest reading is often last night's,
+    /// and a bare "11:00 PM" above "No readings yet today" reads as today (review-242c NIT 1).
+    static func timeLabel(_ at: Date, now: Date, calendar: Calendar = .current) -> String {
+        let time = at.formatted(date: .omitted, time: .shortened)
+        if calendar.isDate(at, inSameDayAs: now) { return time }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+           calendar.isDate(at, inSameDayAs: yesterday) {
+            return "Yesterday \(time)"
+        }
+        return "\(at.formatted(.dateTime.weekday(.abbreviated))) \(time)"
     }
 
     /// The reading the card shows at `now`, or nil once it is too old.
@@ -77,7 +94,8 @@ struct StrapStressTile: Equatable {
     }
 
     /// The newest `.stress` row on any strap timeline (never the ring's) started within `maxAge` of
-    /// `now`. One row: `fetchLimit` 1, newest first. There is no index on `StoredSample`, so this is a
+    /// `now` and not after it (a future-dated row is never "latest", review-242c NIT 3). One row:
+    /// `fetchLimit` 1, newest first. There is no index on `StoredSample`, so this is a
     /// scan bounded by its predicate (review-242b NIT 2 measured the same shape at ~8–12 ms warm and
     /// ~32 ms cold on 86 k rows); it runs off the main actor, once per trends load.
     nonisolated static func newestStrapStress(context: ModelContext, now: Date) -> HelioReading? {
@@ -85,7 +103,9 @@ struct StrapStressTile: Equatable {
         let ring = SyncDeviceID.ringConn.rawValue
         let cutoff = now.addingTimeInterval(-maxAge)
         var descriptor = FetchDescriptor<StoredSample>(
-            predicate: #Predicate { $0.kindRaw == kindRaw && $0.deviceID != ring && $0.start >= cutoff },
+            predicate: #Predicate {
+                $0.kindRaw == kindRaw && $0.deviceID != ring && $0.start >= cutoff && $0.start <= now
+            },
             sortBy: [SortDescriptor(\.start, order: .reverse)])
         descriptor.fetchLimit = 1
         guard let row = (try? context.fetch(descriptor))?.first else { return nil }

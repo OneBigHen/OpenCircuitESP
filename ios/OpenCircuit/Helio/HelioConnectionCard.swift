@@ -122,7 +122,8 @@ struct HelioConnectionCard: View {
                     if let onStress {
                         Button(action: onStress) {
                             HStack(alignment: .center, spacing: 4) {
-                                reading("Stress", value: "\(Int(stress.value))", at: stress.at)
+                                reading("Stress", value: "\(Int(stress.value))", at: stress.at,
+                                        timeLabel: StrapStressTile.timeLabel(stress.at, now: Date()))
                                 KeylineGlyph(.chevronRight, size: 12, relativeTo: .caption2).foregroundStyle(.tertiary)
                             }
                             .contentShape(Rectangle())
@@ -130,7 +131,8 @@ struct HelioConnectionCard: View {
                         .buttonStyle(.plain)
                         .accessibilityHint("Opens today's stress chart")
                     } else {
-                        reading("Stress", value: "\(Int(stress.value))", at: stress.at)
+                        reading("Stress", value: "\(Int(stress.value))", at: stress.at,
+                                timeLabel: StrapStressTile.timeLabel(stress.at, now: Date()))
                     }
                 }
                 if let pai = result?.latestPAI {
@@ -143,11 +145,13 @@ struct HelioConnectionCard: View {
         }
     }
 
-    private func reading(_ title: String, value: String, at: Date) -> some View {
+    /// `timeLabel` overrides the bare clock time: stress passes the day-qualified label it shares with
+    /// the Stress tile (`StrapStressTile.timeLabel`); PAI keeps the clock time (steer 3 leaves PAI alone).
+    private func reading(_ title: String, value: String, at: Date, timeLabel: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.caption2).foregroundStyle(.secondary)
             Text(value).font(.headline.monospacedDigit())
-            Text(at.formatted(date: .omitted, time: .shortened)).font(.caption2).foregroundStyle(.tertiary)
+            Text(timeLabel ?? at.formatted(date: .omitted, time: .shortened)).font(.caption2).foregroundStyle(.tertiary)
         }
         .accessibilityElement(children: .combine)
     }
