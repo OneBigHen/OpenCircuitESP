@@ -140,6 +140,9 @@ extension LocalStore {
         case .notMeasured: break
         }
         let sleep = SleepStaging.sleepWindow(segments)
+        // #246 / decision 48: the night's Sleep Score and overnight recovery, from the strap's own
+        // stored rows (`LocalStore+HelioNightScore.swift`). Nothing is written as 0.
+        applyHelioNightScores(to: &extras, window: window, segments: segments, device: device)
         return try saveSleepSummary(SleepStaging.summary(segments),
                                     night: SleepNightKey.night(inBedStart: window.start, inBedEnd: window.end),
                                     inBedStart: window.start, inBedEnd: window.end,
@@ -361,6 +364,9 @@ final class HelioStoreSink: HelioHistorySink {
         for night in storedNights {
             _ = try? store.saveHelioNight(night, device: timeline)
         }
+        // #246 / decision 48: score any strap night still stored without one — a merge that kept the
+        // stored night never reaches `applyExtras`, and builds 59-62 stored every night unscored.
+        _ = try? store.scoreUnscoredHelioNights()
         var result = HelioSyncResult()
         result.nights = storedNights
         result.todaySteps = try? store.todaySteps(day: now)
