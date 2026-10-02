@@ -688,3 +688,138 @@ final class DayTimelineLoadTests: XCTestCase {
         XCTAssertEqual(SyncRevision.shared.count, before + 1)
     }
 }
+
+// MARK: - The strap's stress on Today (steer 3)
+
+/// The strap card's number and the Today Stress tile read the newest STORED stress, so they survive a
+/// sync without a stress round, a relaunch and a background wake — which `lastSyncResult` did not.
+@MainActor
+final class StrapStressTodayTests: XCTestCase {
+    private var containers: [ModelContainer] = []
+    private let ownership = OwnershipOverride()
+    private let strapID = "5B1E4C2A-0000-4000-8000-00000000C241"
+    private var timeline: SyncDeviceID { SyncDeviceID.timeline(for: .zeppOS(model: ""), identityID: strapID) }
+    private let now = sNow
+
+    override func tearDown() {
+        ownership.restore()
+        containers.removeAll()
+        super.tearDown()
+    }
+
+    @discardableResult
+    private func connect(_ device: FakeZeppDevice, store: LocalStore, autoSync: Bool = true) -> HelioSession {
+        let transport = StressTransport(device: device)
+        let keys = StressKeys()
+        let session = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys,
+                                   sink: HelioStoreSink(store: store), findState: HelioFindState(),
+                                   clock: { [now] in now }, autoTick: false, autoSyncOnConnect: autoSync)
+        transport.session = session
+        session.start()
+        transport.drain()
+        return session
+    }
+
+    /// What the card and the tile read: the same load ContentView runs.
+    private func tile(_ store: LocalStore, at time: Date? = nil) -> StrapStressTile? {
+        StrapStressTile.load(container: store.context.container, log: LocalStore.ownershipLog(),
+                             now: time ?? now, calendar: .current)
+    }
+
+    private func insertStress(_ store: LocalStore, _ value: Double, at time: Date, device: SyncDeviceID) throws {
+        store.context.insert(StoredSample(QuantitySample(kind: .stress, start: time, value: value), device: device))
+        try store.context.save()
+    }
+
+    func testTheCardsNumberSurvivesASyncWithNoStressRoundAndAFreshSession() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        // A sync that brings stress: 180 minutes ending two minutes ago (every tenth `ff`).
+        let start = now.timeIntervalSince1970 - 3 * 3600
+        let first = connect(makeStressStrap(start: start, count: 180), store: store)
+        XCTAssertEqual(first.lastSyncResult?.latestStress?.value, 78)
+        let expected = HelioReading(value: 78, at: Date(timeIntervalSince1970: start + 178 * 60))
+        XCTAssertEqual(tile(store)?.currentReading(now: now), expected)
+
+        // A later sync whose strap has no new stress minute: the old source goes blank…
+        let quiet = FakeZeppDevice(authKey: ZeppHex.bytes(sKeyHex)!, privateKey: Array(UInt8(0x81)...UInt8(0x98)),
+                                   random: Array(UInt8(0xf0)...UInt8(0xff)), writeLength: 244)
+        quiet.services = sServices
+        quiet.deviceInfoReply = sDeviceInfoReply
+        quiet.dataPacketLength = 200
+        let second = connect(quiet, store: store)
+        XCTAssertNil(second.lastSyncResult?.latestStress, "this is the flaw: the per-sync value is reset")
+        // …but the card's number, read from the store, is still there.
+        XCTAssertEqual(tile(store)?.currentReading(now: now), expected)
+
+        // A fresh session that hasn't synced at all (a relaunch, or a background wake before the first
+        // sync): no sync result, and the number is still there.
+        let fresh = connect(quiet, store: store, autoSync: false)
+        XCTAssertNil(fresh.lastSyncResult)
+        XCTAssertEqual(tile(store)?.currentReading(now: now), expected)
+    }
+
+    func testTheNumberIsHiddenOnceTheNewestReadingIsOlderThanADay() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        // Older than 24 hours: no tile, no number.
+        try insertStress(store, 50, at: now.addingTimeInterval(-24 * 3600 - 60), device: timeline)
+        XCTAssertNil(tile(store))
+
+        // 23 hours old: shown…
+        try insertStress(store, 42, at: now.addingTimeInterval(-23 * 3600), device: timeline)
+        let loaded = try XCTUnwrap(tile(store))
+        XCTAssertEqual(loaded.currentReading(now: now)?.value, 42)
+        // …until it ages past the day while the app stays open: checked at render, not only at load.
+        XCTAssertFalse(loaded.isFresh(now: now.addingTimeInterval(2 * 3600)))
+        XCTAssertNil(loaded.currentReading(now: now.addingTimeInterval(2 * 3600)))
+        // Exactly 24 hours is still within the day.
+        XCTAssertTrue(loaded.isFresh(now: now.addingTimeInterval(3600)))
+    }
+
+    func testTheTileAppearsForStrapStressWithItsBandAndTodaysReadings() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeMemoryStore(&containers)
+        let today = Calendar.current.startOfDay(for: now)
+        // Every 5 minutes from local midnight to just before now: "relaxed" all day, then 45 ("mild").
+        var times: [Date] = []
+        var t = today
+        while t < now.addingTimeInterval(-60) { times.append(t); t = t.addingTimeInterval(300) }
+        XCTAssertGreaterThan(times.count, 1)
+        let levels = times.indices.map { $0 == times.count - 1 ? 45.0 : 20.0 }
+        for (time, level) in zip(times, levels) {
+            store.context.insert(StoredSample(QuantitySample(kind: .stress, start: time, value: level), device: timeline))
+        }
+        try store.context.save()
+
+        let loaded = try XCTUnwrap(tile(store))
+        XCTAssertEqual(loaded.latest.value, 45)
+        XCTAssertEqual(loaded.band, .mild, "Amazfit's word for 45")
+        XCTAssertEqual(loaded.today.points.count, levels.count, "today's readings feed the sparkline")
+        XCTAssertEqual(loaded.today.series.map(\.family), [.zeppOS])
+        XCTAssertEqual(loaded.day, DayTimeline.dayInterval(now))
+    }
+
+    func testARingOnlyInstallNeverGetsTheTile() throws {
+        // Empty log: the ring owns all time, and the ring never writes stress.
+        ownership.install(DeviceOwnershipLog())
+        let store = try makeMemoryStore(&containers)
+        for minute in stride(from: 0.0, to: 600, by: 5) {
+            store.context.insert(StoredSample(QuantitySample(kind: .heartRate, start: now.addingTimeInterval(-minute * 60),
+                                                             value: 60), device: .ringConn))
+        }
+        try store.context.save()
+        XCTAssertNil(tile(store), "a ring day has no stress tile")
+        // Even a stress row on the ring's timeline (nothing writes one) is never read as the strap's.
+        try insertStress(store, 70, at: now.addingTimeInterval(-600), device: .ringConn)
+        XCTAssertNil(tile(store))
+    }
+
+    func testTheTileAndTheCardOpenTodaysStressChart() {
+        XCTAssertEqual(Route.strapStress, .dayMetric(.stress))
+    }
+
+    func testTheDayCardsBandListMatchesTheTilesWords() {
+        XCTAssertTrue(DayMetricCard.stressFootnote.contains("0–39 relaxed, 40–59 mild, 60–79 moderate, 80–100 high"))
+    }
+}

@@ -97,6 +97,37 @@ extension ZeppMetricMapping {
     }
 }
 
+// MARK: - Stress bands (#239)
+
+/// Amazfit's four words for an all-day stress level (`0x13`), exactly as ZEPP_PROTOCOL.md §6.5
+/// records them: 0–39 relaxed, 40–59 mild, 60–79 moderate, 80–100 high (🟡, the fields' source).
+/// The ONLY labels the app puts on the strap's stress. It is the strap's own scale and its own
+/// words, not a judgement of the person, and there is deliberately no "usual" for it (#239).
+public enum HelioStressBand: String, CaseIterable, Sendable {
+    case relaxed, mild, moderate, high
+
+    /// The band for a level, or nil outside 0–100 (a byte above 100 is the strap's "no reading").
+    public init?(level: Int) {
+        switch level {
+        case 0...39: self = .relaxed
+        case 40...59: self = .mild
+        case 60...79: self = .moderate
+        case 80...100: self = .high
+        default: return nil
+        }
+    }
+
+    /// The level range the band covers, for the copy that lists them.
+    public var range: ClosedRange<Int> {
+        switch self {
+        case .relaxed: return 0...39
+        case .mild: return 40...59
+        case .moderate: return 60...79
+        case .high: return 80...100
+        }
+    }
+}
+
 // MARK: - Skin temperature gate (decision 12)
 
 /// Which of the strap's per-minute skin temperatures may be stored and written to Apple Health.

@@ -108,3 +108,21 @@ final class StressHistoryTests: XCTestCase {
                                                           notBefore: now.addingTimeInterval(3600)))
     }
 }
+
+// MARK: - Amazfit's stress bands (ZEPP_PROTOCOL.md §6.5)
+
+final class HelioStressBandTests: XCTestCase {
+    func testTheBandsAreExactlyTheSpecsAtEveryEdge() {
+        let expected: [(Int, HelioStressBand)] = [(0, .relaxed), (39, .relaxed), (40, .mild), (59, .mild),
+                                                  (60, .moderate), (79, .moderate), (80, .high), (100, .high)]
+        for (level, band) in expected { XCTAssertEqual(HelioStressBand(level: level), band, "\(level)") }
+        XCTAssertNil(HelioStressBand(level: 101), "above 100 is the strap's no-reading, never a band")
+        XCTAssertNil(HelioStressBand(level: 255))
+        XCTAssertNil(HelioStressBand(level: -1))
+    }
+
+    func testTheRangesTileZeroToAHundredWithNoGapOrOverlap() {
+        let covered = HelioStressBand.allCases.flatMap { Array($0.range) }
+        XCTAssertEqual(covered, Array(0...100))
+    }
+}

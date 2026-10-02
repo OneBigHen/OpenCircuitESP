@@ -17,6 +17,7 @@
 import SwiftUI
 import SwiftData
 import OpenCircuitKit
+import ZeppKit
 
 struct DayDetailView: View {
     let day: Date
@@ -121,8 +122,10 @@ struct DayMetricCard: View {
     /// What the strap's stress is and is not. The bands are the ones ZEPP_PROTOCOL.md §6.5 (`0x13`)
     /// records for Amazfit; nothing else is labelled.
     static let stressFootnote = "The Helio Strap's all-day stress, 0 to 100, as the strap measures it. "
-        + "It is not the ring's Overnight Stress score. Amazfit's bands: 0–39 relaxed, 40–59 mild, "
-        + "60–79 moderate, 80–100 high. Stays in the app: Apple Health has no stress type."
+        + "It is not the ring's Overnight Stress score. Amazfit's bands: "
+        + HelioStressBand.allCases.map { "\($0.range.lowerBound)–\($0.range.upperBound) \($0.rawValue)" }
+            .joined(separator: ", ")
+        + ". Stays in the app: Apple Health has no stress type."
 
     private var hasStrapReadings: Bool { timeline.day(metric).averages[.zeppOS] != nil }
 

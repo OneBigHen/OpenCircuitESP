@@ -103,6 +103,9 @@ struct ContentView: View {
     /// True once a trends load has LANDED (`trendsLoadedAt` is stamped before the await, so it
     /// can't say that) — the Today header and tiles show a loading state until then (#216).
     @State private var trendsHaveLoaded = false
+    /// The Helio Strap's newest stored stress and today's readings, for its card and the Stress tile
+    /// (#239, steer 3). nil when there is no strap reading in the last 24 h (always, ring-only).
+    @State private var strapStress: StrapStressTile?
     /// Rolling buffer of recent live readings feeding the liveline live chart during an on-demand
     /// measurement (HR or SpO₂). Accumulated from `session.liveHR`/`liveSpO2` onChange, reset when
     /// monitoring stops. Display units: bpm for HR, whole-percent for SpO₂.
@@ -448,7 +451,8 @@ struct ContentView: View {
                         connectionCard
                     } else {
                         HelioConnectionCard(connection: helio, onSetUp: { showHelioSetup = true },
-                                            onStress: { path.append(.dayMetric(.stress)) })
+                                            latestStress: strapStress?.currentReading(now: Date()),
+                                            onStress: { path.append(.strapStress) })
                     }
                     // First-run Health authorization banner (#143) — right under the connection card.
                     if !healthAuthorized, HealthKitWriter.isAvailable {
@@ -715,6 +719,10 @@ struct ContentView: View {
         // which is the exact double-load being fixed.
         trendsLoadedAt = Date()
         trends = await TrendsData.loadAsync(container: modelContext.container, tempUnitRaw: tempUnitRaw)
+        // The strap's stress for its card and tile (#239, steer 3), on the same triggers as the tiles —
+        // launch, foreground return, every finished sync, a device switch — and from the store, so it
+        // survives a sync without a stress round, a relaunch and a background wake.
+        strapStress = await StrapStressTile.loadAsync(container: modelContext.container)
         trendsHaveLoaded = true
     }
 
@@ -820,7 +828,9 @@ struct ContentView: View {
         case .readiness:    card { WellnessBalanceCardView(onReport: { readinessReport = $0 }) }
         case .metrics:      MetricTilesSection(tiles: todayTiles, isLoading: !trendsHaveLoaded,
                                                onSelect: { path.append(.metric($0)) },
-                                               onTimeline: { path.append(.timeline) })
+                                               onTimeline: { path.append(.timeline) },
+                                               strapStress: strapStress,
+                                               onStress: { path.append(.strapStress) })
         case .vitals:       vitalsCard
         case .vitalsStatus: vitalsStatusCard
         case .calories:     caloriesCard
@@ -2585,14 +2595,17 @@ private enum DashboardSection: String, CaseIterable, Identifiable, Hashable {
 /// Programmatic navigation targets pushed onto the Today tab's `NavigationStack` path. Using a typed
 /// route (vs a `NavigationLink` per card) keeps the `List` from drawing its own disclosure chevron on
 /// top of the cards' custom ones.
-private enum Route: Hashable {
+enum Route: Hashable {
     case cycle, headache, activityLog
     /// A Today metric tile's detail (#216), opening on today's day chart (#239).
     case metric(TodayTile.Metric)
     /// Today's timeline: every metric's day chart, stacked (#239).
     case timeline
-    /// One metric's day chart with no Today tile of its own: the strap's stress (#239).
+    /// One metric's day chart: the strap's stress (#239).
     case dayMetric(DayTimeline.Metric)
+
+    /// Where the strap's Stress tile and its card reading go: today's stress chart (#239, steer 3).
+    static let strapStress = Route.dayMetric(.stress)
 }
 
 /// A headache the quick-log deep link just stored, identified by its `onset` — the store key — so
