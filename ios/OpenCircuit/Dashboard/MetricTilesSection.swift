@@ -162,13 +162,13 @@ struct StrapStressTileView: View {
             HStack(spacing: 5) {
                 KeylineGlyph(.activity, size: 14, relativeTo: .caption).foregroundStyle(Theme.stress)
                 // The day chart's own label, so this is never read as the ring's Overnight Stress.
+                // The full label gets the whole row (the time sits with the band word below), so it is
+                // never truncated to something that could be the ring's.
                 Text("STRESS · HELIO STRAP")
                     .font(.caption2.weight(.semibold)).tracking(0.6)
                     .foregroundStyle(.secondary)
                     .lineLimit(1).minimumScaleFactor(0.7)
-                Spacer(minLength: 2)
-                Text(tile.latest.at, format: .dateTime.hour().minute())
-                    .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                Spacer(minLength: 0)
             }
             HStack(alignment: .firstTextBaseline, spacing: 3) {
                 Text("\(level)")
@@ -179,8 +179,14 @@ struct StrapStressTileView: View {
                 Text("/ 100").font(.footnote.weight(.medium)).foregroundStyle(.secondary).lineLimit(1)
             }
             // Amazfit's word for the level (ZEPP_PROTOCOL.md §6.5), the only label it gets.
-            Text(tile.band.map { $0.rawValue.prefix(1).uppercased() + $0.rawValue.dropFirst() } ?? " ")
-                .font(.caption2.weight(.medium)).foregroundStyle(.secondary).lineLimit(1)
+            HStack(spacing: 4) {
+                Text(tile.band.map { $0.rawValue.prefix(1).uppercased() + $0.rawValue.dropFirst() } ?? " ")
+                    .font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+                Text("·").font(.caption2).foregroundStyle(.tertiary)
+                Text(tile.latest.at, format: .dateTime.hour().minute())
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+            .lineLimit(1)
             StrapStressSparkline(tile: tile).frame(height: 34)
             Text("The strap's own scale · no usual range")
                 .font(.caption2).foregroundStyle(.secondary)
