@@ -28,7 +28,7 @@ struct DeviceChoiceView: View {
             Button("Use the RingConn ring") { DeviceSwitcher.activate(.ringConn) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The Helio Strap disconnects. Its history stays on this phone.")
+            Text("The \(choice.current.displayName) disconnects. Its history stays on this phone.")
         }
     }
 

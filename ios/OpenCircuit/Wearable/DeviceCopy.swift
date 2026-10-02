@@ -38,12 +38,15 @@ extension ActiveDeviceChoice {
         }
     }
 
-    /// What the device needs besides OpenCircuit, for onboarding's welcome.
+    /// What the device needs besides OpenCircuit, for onboarding's welcome. The strap's facts are
+    /// `docs/HELIO_KEY_EXTRACTION.md`'s: the key comes from the Zepp account the strap is paired to,
+    /// once, and every method needs a computer; OpenCircuit never signs in to Zepp.
     var accountSentence: String {
         switch self {
         case .ringConn: return "The ring needs no account."
         case .helioStrap:
-            return "The strap needs the Zepp app once, to create its key; after that, OpenCircuit talks only to the strap."
+            return "The strap needs a Zepp account once, to get its key: pair it in the Zepp app, then copy the key "
+                + "on a computer. After that, OpenCircuit talks only to the strap and never signs in to Zepp."
         }
     }
 
@@ -103,7 +106,8 @@ extension ActiveDeviceChoice {
         case .ringConn:
             return "Write your ring's heart rate, HRV, SpO₂, temperature, sleep and more into Apple Health."
         case .helioStrap:
-            return "Write your ring's heart rate, HRV, SpO₂, temperature, sleep and more into Apple Health."
+            let hrv = HelioHealthPolicy.writesHRV ? ", HRV" : ""
+            return "Write your strap's heart rate\(hrv), SpO₂, temperature, sleep and more into Apple Health."
         }
     }
 
@@ -135,14 +139,16 @@ enum DeviceCopy {
     static var worksWith: String { "OpenCircuit works with \(list(all.map(\.modelPhrase)))." }
 
     /// Onboarding's welcome: the subscription and account bullet.
-    static var accounts: String { (["No subscription, no cloud."] + all.map(\.accountSentence)).joined(separator: " ") }
+    /// "No cloud" isn't here: the local-first bullet says nothing is sent to any server, and next to the
+    /// strap's account step it would read as covering the key too.
+    static var accounts: String { (["No subscription."] + all.map(\.accountSentence)).joined(separator: " ") }
 
     /// Onboarding's permissions page.
     static var bluetoothPermission: String { "Bluetooth — to find and connect to your \(list(all.map(\.noun)))." }
 
     /// `DeviceChoiceView`'s footer, also on onboarding's "Your wearable" page.
-    static let oneAtATime = "OpenCircuit uses one device at a time. Switching keeps both devices' history on this "
-        + "phone; the other device isn't searched for or connected until you switch back."
+    static let oneAtATime = "OpenCircuit uses one device at a time. Switching keeps each device's history on this "
+        + "phone, and only the device in use is searched for and connected."
 
     /// The not-affiliated and not-a-medical-device text, shared by onboarding's last page and
     /// Profile ▸ About so they can't drift apart. Names match the README's (#225).
@@ -163,7 +169,7 @@ enum DeviceCopy {
 enum ProfileDeviceCopy {
     /// Apple Health, connected.
     static func healthWriting(_ device: ActiveDeviceChoice) -> String {
-        "OpenCircuit is writing your ring's metrics into Apple Health."
+        "OpenCircuit is writing your \(device.noun)'s metrics into Apple Health."
     }
 
     /// Apple Health, not connected yet.
@@ -171,8 +177,8 @@ enum ProfileDeviceCopy {
 
     /// Sleep Focus: the Focus-off run syncs the chosen device (`SleepFocusSyncFilter`).
     static func sleepFocusNote(_ device: ActiveDeviceChoice) -> String {
-        "Add OpenCircuit to your Sleep Focus once, and turning that Focus off will trigger a ring history "
-            + "sync alongside the existing automatic syncs."
+        "Add OpenCircuit to your Sleep Focus once, and turning that Focus off will trigger a \(device.noun) "
+            + "history sync alongside the existing automatic syncs."
     }
 
     /// Reminders' footer.
@@ -183,12 +189,12 @@ enum ProfileDeviceCopy {
 
     /// Data export: the export reads every device's stored rows (no device predicate in
     /// `LocalStore.samplesDescriptor`, `stepSamplesDescriptor` or `sleepSummaries`).
-    static let exportNote = "Export all stored ring data (HR, SpO₂, sleep, steps) as CSV or JSON "
+    static let exportNote = "Export all stored wearable data (HR, SpO₂, sleep, steps) as CSV or JSON "
         + "for your own analysis. Data stays on your device unless you share it."
 
-    /// The medical disclaimer under Health alerts (and the headache log). Both devices' syncs run the
-    /// alert pass (decision 37).
-    static let alertsDisclaimer = "Note: OpenCircuit is not a medical device. These reminders are based on ring "
-        + "sensor data only and are not a diagnosis. If you feel unwell, consult a "
+    /// The medical disclaimer under Health alerts (`UserProfileSettingsView.medicalDisclaimer`). Both
+    /// devices' syncs run the alert pass (decision 37).
+    static let alertsDisclaimer = "Note: OpenCircuit is not a medical device. These reminders are based on your "
+        + "wearable's sensor data only and are not a diagnosis. If you feel unwell, consult a "
         + "qualified medical professional."
 }

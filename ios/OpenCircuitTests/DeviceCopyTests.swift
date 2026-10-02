@@ -37,16 +37,22 @@ final class DeviceCopyTests: XCTestCase {
                        + "health concern.")
     }
 
-    func testTheAccountBullet() {
+    func testTheAccountBulletStatesTheStrapsKeyStepHonestly() {
         XCTAssertEqual(DeviceCopy.accounts,
-                       "No subscription, no cloud. The ring needs no account. The strap needs the Zepp app once, to "
-                       + "create its key; after that, OpenCircuit talks only to the strap.")
+                       "No subscription. The ring needs no account. The strap needs a Zepp account once, to get its "
+                       + "key: pair it in the Zepp app, then copy the key on a computer. After that, OpenCircuit talks "
+                       + "only to the strap and never signs in to Zepp.")
+        for fact in ["Zepp account", "once", "computer", "never signs in"] {
+            XCTAssertTrue(ActiveDeviceChoice.helioStrap.accountSentence.contains(fact), fact)
+        }
+        XCTAssertFalse(DeviceCopy.accounts.contains("no cloud"), "the key step goes through Zepp's servers")
     }
 
     func testTheOneAtATimeLine() {
         XCTAssertEqual(DeviceCopy.oneAtATime,
-                       "OpenCircuit uses one device at a time. Switching keeps both devices' history on this phone; "
-                       + "the other device isn't searched for or connected until you switch back.")
+                       "OpenCircuit uses one device at a time. Switching keeps each device's history on this phone, "
+                       + "and only the device in use is searched for and connected.")
+        XCTAssertFalse(DeviceCopy.oneAtATime.contains("both"), "no count of devices")
     }
 
     func testTheCardDetails() {
@@ -58,22 +64,31 @@ final class DeviceCopyTests: XCTestCase {
 
     func testProfileHealthConnectedLine() {
         XCTAssertEqual(ProfileDeviceCopy.healthWriting(.ringConn), "OpenCircuit is writing your ring's metrics into Apple Health.")
-        XCTAssertEqual(ProfileDeviceCopy.healthWriting(.helioStrap), "OpenCircuit is writing your ring's metrics into Apple Health.")
+        XCTAssertEqual(ProfileDeviceCopy.healthWriting(.helioStrap), "OpenCircuit is writing your strap's metrics into Apple Health.")
     }
 
     func testProfileHealthSummary() {
         XCTAssertEqual(ProfileDeviceCopy.healthSummary(.ringConn),
                        "Write your ring's heart rate, HRV, SpO₂, temperature, sleep and more into Apple Health.")
         XCTAssertEqual(ProfileDeviceCopy.healthSummary(.helioStrap),
-                       "Write your ring's heart rate, HRV, SpO₂, temperature, sleep and more into Apple Health.")
+                       HelioHealthPolicy.writesHRV
+                           ? "Write your strap's heart rate, HRV, SpO₂, temperature, sleep and more into Apple Health."
+                           : "Write your strap's heart rate, SpO₂, temperature, sleep and more into Apple Health.")
+    }
+
+    func testTheStrapsHealthSummaryNamesHRVOnlyWhenTheStrapWritesIt() {
+        // The strap's mirrored kinds decide it (HEALTHKIT_MAPPING "What the app writes").
+        let writesHRV = HelioHealthPolicy.healthMirroredKinds().contains(.hrvSDNN)
+        XCTAssertEqual(ProfileDeviceCopy.healthSummary(.helioStrap).contains("HRV"), writesHRV)
     }
 
     func testProfileSleepFocusLine() {
-        for device in ActiveDeviceChoice.allCases {
-            XCTAssertEqual(ProfileDeviceCopy.sleepFocusNote(device),
-                           "Add OpenCircuit to your Sleep Focus once, and turning that Focus off will trigger a ring "
-                           + "history sync alongside the existing automatic syncs.")
-        }
+        XCTAssertEqual(ProfileDeviceCopy.sleepFocusNote(.ringConn),
+                       "Add OpenCircuit to your Sleep Focus once, and turning that Focus off will trigger a ring "
+                       + "history sync alongside the existing automatic syncs.")
+        XCTAssertEqual(ProfileDeviceCopy.sleepFocusNote(.helioStrap),
+                       "Add OpenCircuit to your Sleep Focus once, and turning that Focus off will trigger a strap "
+                       + "history sync alongside the existing automatic syncs.")
     }
 
     func testProfileRemindersFooter() {
@@ -87,10 +102,10 @@ final class DeviceCopyTests: XCTestCase {
 
     func testProfileExportAndAlertLines() {
         XCTAssertEqual(ProfileDeviceCopy.exportNote,
-                       "Export all stored ring data (HR, SpO₂, sleep, steps) as CSV or JSON for your own analysis. "
+                       "Export all stored wearable data (HR, SpO₂, sleep, steps) as CSV or JSON for your own analysis. "
                        + "Data stays on your device unless you share it.")
         XCTAssertEqual(ProfileDeviceCopy.alertsDisclaimer,
-                       "Note: OpenCircuit is not a medical device. These reminders are based on ring sensor data only "
+                       "Note: OpenCircuit is not a medical device. These reminders are based on your wearable's sensor data only "
                        + "and are not a diagnosis. If you feel unwell, consult a qualified medical professional.")
     }
 
@@ -124,6 +139,23 @@ final class DeviceCopyTests: XCTestCase {
                         XCTAssertFalse(text.contains(brand), "\(device)'s copy names \(other)'s \(brand): \(text)")
                     }
                 }
+            }
+        }
+    }
+
+    func testNoDevicesCopyUsesAnotherDevicesNoun() {
+        for device in ActiveDeviceChoice.allCases {
+            for other in ActiveDeviceChoice.allCases where other != device {
+                for text in copy(of: device) {
+                    XCTAssertNil(text.range(of: "\\b\(other.noun)\\b", options: [.regularExpression, .caseInsensitive]),
+                                 "\(device)'s copy says \(other.noun): \(text)")
+                }
+            }
+        }
+        for text in [ProfileDeviceCopy.exportNote, ProfileDeviceCopy.alertsDisclaimer] {
+            for device in ActiveDeviceChoice.allCases {
+                XCTAssertNil(text.range(of: "\\b\(device.noun)\\b", options: .regularExpression),
+                             "a line about every device's data names one: \(text)")
             }
         }
     }

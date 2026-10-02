@@ -722,7 +722,7 @@ struct UserProfileSettingsView: View {
     private var activeDevice: ActiveDeviceChoice { ActiveDeviceChoiceStore.shared.current }
 
     /// Headache-specific wording. The shared `medicalDisclaimer` above says the reminders "are
-    /// based on ring sensor data only" — neither clause is true of a Phase-1 headache log, which is
+    /// based on your wearable's sensor data only" — neither clause is true of a Phase-1 headache log, which is
     /// typed by the user, derives nothing from the ring, and fires no reminder at all. Over-
     /// disclaiming is the safe direction, but a disclaimer that misdescribes the feature is its own
     /// kind of untrue, and this one has to carry the load-bearing sentence: we do not predict.
