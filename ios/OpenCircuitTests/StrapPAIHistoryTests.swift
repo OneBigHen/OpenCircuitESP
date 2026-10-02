@@ -543,6 +543,56 @@ final class StrapPAIBackfillTests: XCTestCase {
         XCTAssertNil(store.helioPAILedger(device: timeline))
     }
 
+    /// review-248 SF-1: the retention floor must come from the SYNC's clock, not `Date()`.
+    ///
+    /// The session clock here is a FIXED past date, and the test asserts the week-back rewind target
+    /// that `HelioStoreSink.fetchCursors` must compute from it. A floor taken from the wall clock
+    /// instead disagrees with the plan built around the session clock, and the `0x0d` fetch starts
+    /// somewhere else entirely: more than 30 days of wall-clock drift makes the floor later than the
+    /// watermark, so no rewind happens at all and the fetch starts at the stale watermark — seven
+    /// days short. (Between 23 and 30 days of drift the floor lands inside the week and the fetch
+    /// starts there instead. Either way this assertion fails.) The fixture only moves further into
+    /// that territory as real time passes, so this test cannot rot into a pass.
+    ///
+    /// The sibling test below uses the near-past shared fixture and so cannot see the difference —
+    /// which is exactly how the defect shipped.
+    func testTheRewindTargetComesFromTheSyncsClockNotTheWallClock() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makePAIStore(&containers)
+        // 2026-09-01T12:00:00Z, deliberately fixed and far behind any wall clock this will run under.
+        let sessionNow = Date(timeIntervalSince1970: 1_788_264_000)
+        XCTAssertGreaterThan(Date().timeIntervalSince(sessionNow), 23 * 86_400,
+                            "the premise: the two clocks must be far enough apart to disagree")
+
+        let watermark = sessionNow.addingTimeInterval(-600)
+        try olderBuildAdvancesPAIWatermark(store, to: watermark)
+
+        let day: TimeInterval = 86_400
+        let t0 = sessionNow.timeIntervalSince1970 - 3 * day
+        let device = makePAIStrap(start: t0, records: [(t0, 55), (t0 + day, 61.5)])
+        let transport = PAITransport(device: device)
+        let session = HelioSession(transport: transport, identityID: strapID, key: PAIKeys().load(),
+                                   keyStore: PAIKeys(), sink: HelioStoreSink(store: store),
+                                   findState: HelioFindState(), clock: { sessionNow },
+                                   autoTick: false, autoSyncOnConnect: true)
+        transport.session = session
+        session.start()
+        transport.drain()
+
+        let sinces = device.fetchStarts.filter { $0.count == 10 && $0[1] == ZeppFetchType.pai.rawValue }
+            .compactMap { ZeppFetchTimestamp.decode($0[2..<10]) }
+        XCTAssertEqual(sinces.first, HelioFetchPlan.floorToMinute(watermark.addingTimeInterval(-7 * 86_400)),
+                       "a week back from the stale watermark, measured on the session's clock")
+        // …and the week it refetched is stored and on the card, at that same clock.
+        let kind = MetricKind.pai.rawValue
+        let rows = try store.context.fetch(FetchDescriptor<StoredSample>(
+            predicate: #Predicate { $0.kindRaw == kind }, sortBy: [SortDescriptor(\.start)]))
+        XCTAssertEqual(rows.map(\.value), [55, 61.5])
+        XCTAssertEqual(StrapPAIReading.load(container: store.context.container, now: sessionNow)?
+                        .currentReading(now: sessionNow)?.value, 61.5)
+        XCTAssertEqual(Set(device.fetchAcks), [0x09])
+    }
+
     /// End to end: a build-62 timeline's first sync on this code already stores PAI, so the card has
     /// a number straight away — the goal of decision 45's rewind.
     func testABuild62StrapShowsANumberOnItsFirstSync() throws {

@@ -194,11 +194,16 @@ final class HelioStoreSink: HelioHistorySink {
         self.breadcrumbs = breadcrumbs
     }
 
-    func fetchCursors(timeline: SyncDeviceID) -> [ZeppFetchType: Date] {
+    func fetchCursors(timeline: SyncDeviceID, now: Date) -> [ZeppFetchType: Date] {
         // Before the plan is built: #239 (stress `0x13`) and decision 45 (PAI `0x0d`). Each is due at
         // most once per hole another build left, and neither can fire for an ordinary quiet stretch.
-        store.applyHelioStressBackfillIfNeeded(device: timeline)
-        store.applyHelioPAIBackfillIfNeeded(device: timeline)
+        //
+        // Both take the SYNC's `now`, like `notBefore` and `persist` (review-248 SF-1): PAI's rewind
+        // is floored at `now − 30 days` of sample retention, and reading the wall clock for it while
+        // the rest of the sync ran on the session clock made that floor disagree with the plan built
+        // from it. On a phone the two are the same instant; under an injected clock they are not.
+        store.applyHelioStressBackfillIfNeeded(device: timeline, now: now)
+        store.applyHelioPAIBackfillIfNeeded(device: timeline, now: now)
         return store.helioFetchCursors(device: timeline)
     }
 

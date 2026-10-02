@@ -79,16 +79,25 @@ extension LocalStore {
     /// Rewind the stress watermark if another build advanced it (`HelioFetchPlan.stressBackfillCursor`),
     /// never before the strap's current ownership start (decision 28). Returns the watermark it moved
     /// to, or nil when no backfill was due.
+    ///
+    /// `now` is unused by the stress rule itself (`helioBackfillFloor` returns `ownedSince` for every
+    /// non-`.pai` type), so #239's behaviour is exactly what it was. It is forwarded anyway, and
+    /// defaulted here only so #239's tests keep calling this with a device alone.
     @discardableResult
-    func applyHelioStressBackfillIfNeeded(device: SyncDeviceID) -> Date? {
-        applyHelioBackfillIfNeeded(.autoStress, device: device)
+    func applyHelioStressBackfillIfNeeded(device: SyncDeviceID, now: Date = Date()) -> Date? {
+        applyHelioBackfillIfNeeded(.autoStress, device: device, now: now)
     }
 
     /// Rewind the PAI watermark if another build advanced it (`HelioFetchPlan.paiBackfillCursor`),
     /// bounded by the strap's ownership start and by the raw-sample retention. Returns the watermark
     /// it moved to, or nil when no backfill was due (decision 45).
+    ///
+    /// `now` has NO default on purpose (review-248 SF-1). The retention floor is derived from it, so
+    /// a caller that forgot to pass the sync's clock would silently bound a rewind by the wall clock
+    /// while the plan built around it used the session's. Making it required puts that mistake at
+    /// compile time instead.
     @discardableResult
-    func applyHelioPAIBackfillIfNeeded(device: SyncDeviceID, now: Date = Date()) -> Date? {
+    func applyHelioPAIBackfillIfNeeded(device: SyncDeviceID, now: Date) -> Date? {
         applyHelioBackfillIfNeeded(.pai, device: device, now: now)
     }
 
@@ -96,8 +105,7 @@ extension LocalStore {
     /// (switched away): the sink then fetches nothing older than now anyway, and the backfill waits
     /// for a sync it owns.
     @discardableResult
-    func applyHelioBackfillIfNeeded(_ type: ZeppFetchType, device: SyncDeviceID,
-                                    now: Date = Date()) -> Date? {
+    func applyHelioBackfillIfNeeded(_ type: ZeppFetchType, device: SyncDeviceID, now: Date) -> Date? {
         guard Self.helioBackfilledTypes.contains(type) else { return nil }
         guard let ownedSince = Self.ownershipLog().currentStart(of: DeviceOwnershipLog.Family(timeline: device)) else {
             return nil
