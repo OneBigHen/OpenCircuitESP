@@ -7,6 +7,8 @@
 // The Helio Strap's Stress tile (#239, steer 3) sits in the same grid but is NOT a `TodayTile`: it has
 // no usual range and no baseline (see `StrapStressTile`), so it never enters the "vs your usual"
 // machinery, the Today sentence, or the 14/30-day detail. Tapping it opens today's stress chart.
+// The strap's PAI tile (decision 49) sits next to it on the same terms, with even less: no band and no
+// sparkline, because PAI is one rolling number a day. Tapping it explains PAI; there is nothing to chart.
 //
 // The delta arrow is deliberately colour-neutral (secondary): "above usual" is good news for HRV and
 // bad news for resting HR, and the tile has no business deciding which on the user's behalf — the
@@ -28,6 +30,18 @@ struct MetricTilesSection: View {
     var strapStress: StrapStressTile?
     /// Opens today's stress chart.
     var onStress: () -> Void = {}
+    /// The strap's PAI (decision 49): a tile only while a stored strap reading is under 48 h old.
+    var strapPAI: StrapPAIReading?
+    /// Explains what PAI is (a sheet: there is nothing to chart).
+    var onPAI: () -> Void = {}
+
+    /// The PAI reading the grid shows a tile for at `now`, or nil for no tile. Freshness is checked
+    /// here, at render, so a reading that ages past 48 h while the app stays open drops the tile. A
+    /// ring-only install always gets nil: its load never finds a strap row (`newestStrapPAI`).
+    static func paiTile(_ reading: StrapPAIReading?, now: Date) -> StrapPAIReading? {
+        guard let reading, reading.isFresh(now: now) else { return nil }
+        return reading
+    }
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -52,6 +66,11 @@ struct MetricTilesSection: View {
                 // while the app stays open drops the tile.
                 if let strapStress, strapStress.isFresh(now: Date()) {
                     Button(action: onStress) { StrapStressTileView(tile: strapStress) }
+                        .buttonStyle(.plain)
+                        .disabled(isLoading)
+                }
+                if let strapPAI = Self.paiTile(strapPAI, now: Date()) {
+                    Button(action: onPAI) { StrapPAITileView(reading: strapPAI) }
                         .buttonStyle(.plain)
                         .disabled(isLoading)
                 }
@@ -207,6 +226,59 @@ struct StrapStressTileView: View {
         parts.append("at \(StrapStressTile.timeLabel(tile.latest.at, now: Date()))")
         parts.append("The strap's own scale, with no usual range")
         return parts.joined(separator: ". ")
+    }
+}
+
+/// The strap's PAI tile (decision 49), laid out like the Stress tile — label, large value, a line with
+/// the time, the chart's slot, a bottom line — so it is the same size as its neighbours. But it has no
+/// band (PAI has no scale with words on it), nothing in the chart's slot (`0x0d` is about one record a
+/// day, so there is no intraday series), and no usual range: the score is Amazfit's own, computed by
+/// firmware we can't inspect, and a band or range on it would be fabricated precision (decision 25).
+struct StrapPAITileView: View {
+    let reading: StrapPAIReading
+
+    @ScaledMetric(relativeTo: .title) private var valueSize: CGFloat = 30
+
+    private var score: Int { Int(reading.latest.value.rounded()) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 5) {
+                KeylineGlyph(.activity, size: 14, relativeTo: .caption).foregroundStyle(Theme.energy)
+                Text("PAI · HELIO STRAP")
+                    .font(.caption2.weight(.semibold)).tracking(0.6)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1).minimumScaleFactor(0.7)
+                Spacer(minLength: 0)
+            }
+            // A unitless score: no suffix.
+            Text("\(score)")
+                .font(.system(size: valueSize, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .contentTransition(.numericText())
+                .lineLimit(1).minimumScaleFactor(0.6)
+            Text(StrapStressTile.timeLabel(reading.latest.at, now: Date()))
+                .font(.caption2).foregroundStyle(.tertiary)
+                .lineLimit(1)
+            // The sparkline's slot, kept empty so the tile is the same height as the others.
+            Color.clear.frame(height: 34)
+            Text("Amazfit's own score · no usual range")
+                .font(.caption2).foregroundStyle(.secondary)
+                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .ocCardSurface(padding: 12)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityHint("Explains what PAI is")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    private var accessibilityLabel: String {
+        ["PAI, from the Helio Strap", "\(score)",
+         "at \(StrapStressTile.timeLabel(reading.latest.at, now: Date()))",
+         "Amazfit's own score, with no usual range"].joined(separator: ". ")
     }
 }
 

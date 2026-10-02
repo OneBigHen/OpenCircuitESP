@@ -1,16 +1,17 @@
-// The Helio Strap's PAI on its Today card (decision 45), READ FROM THE STORE.
+// The Helio Strap's PAI on its Your Numbers tile (decisions 45, 49), READ FROM THE STORE.
 //
-// Why from the store. The card used to show `HelioSession.lastSyncResult.latestPAI`, which the sink
+// Why from the store. The strap card used to show `HelioSession.lastSyncResult.latestPAI`, which the sink
 // resets at the start of every sync and sets again only from that sync's own `0x0d` round. `0x0d`
 // arrives about once a day (ZEPP_PROTOCOL.md §6.5), so almost every sync brought no record and the
 // number was blank — as it was after every relaunch and background wake until the first sync. This
 // is the same flaw #239 fixed for stress, and the same fix: each valid record is kept as a `.pai`
-// row (`ZeppMetricMapping.paiSamples`), and the card reads the newest of them.
+// row (`ZeppMetricMapping.paiSamples`), and the tile reads the newest of them.
 //
-// What this is NOT. There is no tile, no chart and no trend for PAI in v1 (decision 45): only the
-// card's number. PAI is Amazfit's own 7-day rolling score computed by firmware we can't inspect, so
-// the app puts no band, no target and no "usual" on it — that would be fabricated precision
-// (decision 25). It stays in the app: Apple Health has no PAI type (decision 15).
+// What this is NOT. There is no chart and no trend for PAI in v1: only the number, on its own tile
+// in the Your Numbers grid (decision 49 moved it there from the strap card; tapping it explains PAI).
+// PAI is Amazfit's own 7-day rolling score computed by firmware we can't inspect, so the app puts no
+// band, no target and no "usual" on it — that would be fabricated precision (decision 25). It stays
+// in the app: Apple Health has no PAI type (decision 15).
 //
 // A ring-only install never sees it: only a strap writes `.pai` rows, and the read below ignores the
 // ring's timeline outright.
@@ -22,12 +23,12 @@ import ZeppKit
 
 /// The strap's newest stored PAI reading, loaded off the main actor alongside the trends.
 struct StrapPAIReading: Equatable {
-    /// A reading older than this is not shown on the card.
+    /// A reading older than this is not shown.
     ///
     /// 48 h, twice the stress tile's window, because PAI is a different shape of number. A `0x0d`
     /// record is written about once a day and holds a 7-day ROLLING total, so it barely moves between
     /// records — and the newest one is routinely most of a day old already (yesterday's, stamped near
-    /// its end of day). With a 24 h bound one missed sync day would blank the card, which is the
+    /// its end of day). With a 24 h bound one missed sync day would blank the tile, which is the
     /// exact bug this is fixing. Past 48 h the score has lost up to two of its seven days and the
     /// day-qualified label is the only thing saying so, so it is hidden rather than shown stale.
     static let maxAge: TimeInterval = 48 * 3600
@@ -43,7 +44,7 @@ struct StrapPAIReading: Equatable {
         latest.at <= now && now.timeIntervalSince(latest.at) <= Self.maxAge
     }
 
-    /// The reading the card shows at `now`, or nil once it is too old.
+    /// The reading shown at `now`, or nil once it is too old.
     func currentReading(now: Date) -> HelioReading? {
         isFresh(now: now) ? latest : nil
     }
@@ -66,7 +67,7 @@ struct StrapPAIReading: Equatable {
     /// `fetchLimit` 1, newest first.
     ///
     /// Deliberately NO `value > 0` filter: a total PAI of 0 is a real reading (a week with no
-    /// qualifying activity), not a missing one, and hiding it would make the card lie about a real
+    /// qualifying activity), not a missing one, and hiding it would make the tile lie about a real
     /// zero. There is no index on `StoredSample`, so this is a scan bounded by its predicate — but a
     /// far smaller one than the stress read's, because `0x0d` writes about one row a day; it runs off
     /// the main actor, once per trends load.
