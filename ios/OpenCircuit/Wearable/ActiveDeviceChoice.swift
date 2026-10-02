@@ -16,6 +16,15 @@ enum ActiveDeviceChoice: String, CaseIterable, Sendable {
         case .helioStrap: return "Amazfit Helio Strap"
         }
     }
+
+    /// The device's family in decision 28's ownership log. Exhaustive (decision 51e): a new device
+    /// doesn't compile until it says which family owns its time.
+    var ownershipFamily: DeviceOwnershipLog.Family {
+        switch self {
+        case .ringConn: return .ringConn
+        case .helioStrap: return .zeppOS
+        }
+    }
 }
 
 /// The persisted choice (UserDefaults). `.ringConn` when nothing was ever chosen, so an existing
@@ -69,7 +78,7 @@ final class ActiveDeviceChoiceStore {
     func set(_ choice: ActiveDeviceChoice, now: Date = Date()) {
         defaults.set(choice.rawValue, forKey: Self.key)
         if choice != current {
-            let family: DeviceOwnershipLog.Family = choice == .ringConn ? .ringConn : .zeppOS
+            let family = choice.ownershipFamily
             let strapOnly = family == .zeppOS && ownership.log.isEmpty && neverHadRing()
             ownership.record(family, since: strapOnly ? .distantPast : now)
         }

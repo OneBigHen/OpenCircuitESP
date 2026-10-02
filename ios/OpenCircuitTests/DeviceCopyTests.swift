@@ -119,6 +119,13 @@ final class DeviceCopyTests: XCTestCase {
                        + "and are not a diagnosis. If you feel unwell, consult a qualified medical professional.")
     }
 
+    // MARK: the ownership family (decision 51e follow-through)
+
+    func testEachDeviceRecordsItsOwnFamily() {
+        XCTAssertEqual(ActiveDeviceChoice.ringConn.ownershipFamily, .ringConn)
+        XCTAssertEqual(ActiveDeviceChoice.helioStrap.ownershipFamily, .zeppOS)
+    }
+
     // MARK: guards over every device
 
     /// Every string a device's descriptor supplies, including the Profile lines built from it.
