@@ -105,15 +105,17 @@ extension LocalStore {
     ///
     /// ⚠️ `row.updatedAt` IS BUMPED on a row it changes, and only then (#259): a candidate whose
     /// missing score still can't be computed, such as a night with no HRV, is left byte-identical.
-    /// The bump is for the reason `healWithheldSleepScores` records: the Sleep card and Readiness are `@Query`-backed and would otherwise keep showing
-    /// the empty badge until something else touched the row. Only the two score columns and
+    /// The bump is for the reason `healWithheldSleepScores` records: the Sleep card and Readiness
+    /// are `@Query`-backed and would otherwise keep showing the empty badge until something else
+    /// touched the row. Only the two score columns and
     /// `updatedAt` change — the minutes, the window, the hypnogram and every provenance column are
     /// left exactly as stored, so this turns a missing number into the number the night would have
     /// been stored with and restates nothing about the night.
     ///
     /// IDEMPOTENT AND DELIBERATELY NOT LATCHED, like `healWithheldSleepScores` and for the same
-    /// reasons: it is cheap (one fetch over a table with one row per night, plus one HRV fetch per
-    /// night still missing only its recovery number), a scored row is skipped by the predicate, and un-latched means a row that arrives LATER — from a restore, from a
+    /// reasons: it is cheap (one fetch over a table with one row per night, plus ONE HRV fetch shared
+    /// by every night missing only its recovery number), a scored row is skipped by the predicate,
+    /// and un-latched means a row that arrives LATER — from a restore, from a
     /// night re-keyed after the first run, or from a sync that fills in the HRV — is still picked up.
     @discardableResult
     func scoreUnscoredHelioNights() throws -> [Date] {
@@ -134,12 +136,24 @@ extension LocalStore {
             .sorted { $0.night > $1.night }
             .map { (night: $0.night, celsius: $0.skinTempC) }
 
-        var scored: [Date] = []
         // #259: a night missing EITHER score is a candidate. A sync that dies between the sleep
         // round and the HRV round stores a Sleep Score and no stress score, and the `.sleepSession`
         // watermark has already moved on, so this pass is the only thing that can ever fill it.
-        for row in strapNights where (row.sleepScore == 0 || row.stressScore == 0) && !row.isManuallyEdited {
-            guard !row.hypnogramData.isEmpty else { continue }
+        let targets = strapNights.filter {
+            ($0.sleepScore == 0 || $0.stressScore == 0) && !$0.isManuallyEdited && !$0.hypnogramData.isEmpty
+        }
+        // A night with a Sleep Score but no HRV stays a candidate on every launch, so the nights
+        // missing only their recovery number share ONE HRV fetch over their whole span instead of
+        // one fetch each. Each night then takes the readings `helioRMSSD` would have returned.
+        let stressOnly = targets.filter { $0.sleepScore != 0 }
+        let sharedHRV: [QuantitySample] = {
+            guard let lo = stressOnly.map(\.inBedStart).min(),
+                  let hi = stressOnly.map(\.inBedEnd).max() else { return [] }
+            return helioRows(kind: .hrvSDNN, in: DateInterval(start: lo, end: hi), device: nil)
+        }()
+
+        var scored: [Date] = []
+        for row in targets {
             let window = DateInterval(start: row.inBedStart, end: row.inBedEnd)
             let needsSleep = row.sleepScore == 0
             let scores: StoredNightScore.Scores
@@ -159,7 +173,11 @@ extension LocalStore {
                 // Only the recovery number is missing, and it depends on the HRV alone
                 // (`StoredNightScore` computes it independently of the composite), so the heart-rate
                 // fetch and the baseline are skipped.
-                scores = StoredNightScore.scores(.init(segments: [], rmssd: helioRMSSD(in: window, device: nil)))
+                let rmssd = sharedHRV
+                    .filter { $0.start >= window.start && $0.start < window.end }
+                    .map { Int($0.value.rounded()) }
+                    .filter { $0 > 0 }
+                scores = StoredNightScore.scores(.init(segments: [], rmssd: rmssd))
             }
             // ⚠️ BOTH WRITES ARE CONDITIONAL: only a score that is still 0 is filled. Recomputing
             // from thinner rows must never replace a number already stored, and a computed 0 is
