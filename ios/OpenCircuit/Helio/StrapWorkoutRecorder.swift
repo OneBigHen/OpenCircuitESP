@@ -25,7 +25,13 @@ import UIKit
 // This is the spec's "route 1" (ZEPP_PROTOCOL.md §18.1): the strap stays in its normal all-day mode.
 // Nothing is ever sent on the workout endpoint `0x0019` (no start/pause/end, which no permitted source
 // gives, and never the phone-GPS message of §18.5); the route is the phone's own location only. The
-// totals are OpenCircuit's own (§18.6): no training effect, VO₂ max or recovery time is claimed.
+// totals are OpenCircuit's own (§18.6): nothing the strap computes about the workout is read or
+// claimed. The training metrics on the summary are the phone's own too (#232,
+// docs/TRAINING_METRICS.md), the same as for the ring's workout: the Edwards training load from the
+// summary's zones, and for an outdoor run the VO₂ max estimate from these readings and the phone's
+// route (`StrapWorkoutTrainingInputs`), written to Apple Health through `VO2MaxHealthWriter`'s lazy
+// request and attributed to the strap. Recovery time and training effect are not computed for either
+// device (TRAINING_METRICS.md §3).
 //
 // Ring-only users: one recorder is still built per launch (ContentView's hooks are unconditional),
 // and it is inert. It touches no CoreBluetooth and no CoreLocation until a strap workout starts, and
@@ -63,6 +69,19 @@ struct StrapWorkoutWrite {
 protocol StrapWorkoutHealthWriting: AnyObject {
     /// One `HKWorkout` (with its heart rate, energy, distance and route). true when it committed.
     func save(_ write: StrapWorkoutWrite) async -> Bool
+}
+
+/// What the VO₂ max estimate needs beyond the workout itself (#232), and its Health write. The live
+/// one is `StrapWorkoutLiveTrainingInputs`, the same helpers and writer the ring's workout uses.
+@MainActor
+protocol StrapWorkoutTrainingInputs: AnyObject {
+    /// The age the user set, nil when they never set one (the profile's placeholder is not an age).
+    func age() -> Int?
+    /// The daily resting HR for a run over `start ... end`, from history outside that window.
+    func restingHR(start: Date, end: Date) -> Double?
+    /// Write the estimate to Apple Health, named after the device on `timeline`.
+    func saveVO2Max(_ estimate: VO2MaxEstimate.Estimate, workoutEnd: Date,
+                    timeline: SyncDeviceID) async -> VO2MaxHealthWriter.Status
 }
 
 /// The durable journal of a running workout, interrupted workouts the person postponed ("Not now"),
@@ -150,6 +169,13 @@ final class StrapWorkoutRecorder {
     private(set) var liveZoneBreakdown = WorkoutZoneBreakdown()
     private(set) var hrSampleCount = 0
     private(set) var ledger: WorkoutActivityLedger?
+    /// VO₂ max estimate for the outdoor run `end()` just finished, or the reason there is none (#232).
+    /// nil for every other sport and for a recovered workout (its route is gone), as on the ring.
+    private(set) var vo2MaxOutcome: VO2MaxEstimate.Outcome?
+    /// What happened to that estimate in Apple Health. nil while the write is pending.
+    private(set) var vo2MaxHealthStatus: VO2MaxHealthWriter.Status?
+    /// The estimate's Health write, so tests can wait for it.
+    @ObservationIgnored private(set) var vo2MaxWriteTask: Task<Void, Never>?
     /// A workout the previous process was running when it died, offered back (save or discard).
     private(set) var recoverable: RecoveredStrapWorkout?
     /// Where `recoverable` came from, so Save/Discard clear exactly that journal.
@@ -192,6 +218,7 @@ final class StrapWorkoutRecorder {
     @ObservationIgnored private let hrStore: @MainActor () -> (any StrapWorkoutHRStore)?
     let location: any WorkoutLocationTracking
     @ObservationIgnored private let liveActivity: WorkoutLiveActivityController?
+    @ObservationIgnored private let training: any StrapWorkoutTrainingInputs
     @ObservationIgnored private let profile: @MainActor () -> UserProfile
     @ObservationIgnored private let clock: () -> Date
     @ObservationIgnored private let autoTick: Bool
@@ -219,6 +246,7 @@ final class StrapWorkoutRecorder {
          hrStore: @escaping @MainActor () -> (any StrapWorkoutHRStore)?,
          location: any WorkoutLocationTracking,
          liveActivity: WorkoutLiveActivityController?,
+         training: any StrapWorkoutTrainingInputs,
          profile: @escaping @MainActor () -> UserProfile = { HealthKitWriter.storedUserProfile() },
          indoorKeepAlive: @escaping () -> Bool = {
              UserDefaults.standard.bool(forKey: WorkoutSessionManager.indoorKeepAliveEnabledKey)
@@ -233,6 +261,7 @@ final class StrapWorkoutRecorder {
         self.hrStore = hrStore
         self.location = location
         self.liveActivity = liveActivity
+        self.training = training
         self.profile = profile
         self.indoorKeepAlive = indoorKeepAlive
         self.orphanStop = orphanStop
@@ -253,7 +282,8 @@ final class StrapWorkoutRecorder {
                              journal: StrapWorkoutFileJournal(),
                              hrStore: store,
                              location: StrapWorkoutLocation(),
-                             liveActivity: WorkoutLiveActivityController())
+                             liveActivity: WorkoutLiveActivityController(),
+                             training: StrapWorkoutLiveTrainingInputs(store: store))
     }
 
     // MARK: Start, pause, resume
@@ -446,15 +476,53 @@ final class StrapWorkoutRecorder {
             activeKcal: Int((summary.summary.estimatedActiveKcal ?? 0).rounded()),
             bpm: summary.summary.avgHR, hrIsStale: true))
 
+        let route = hasRoute ? location.route : []
         let saved = await health.save(StrapWorkoutWrite(summary: summary, samples: counted,
-                                                         route: hasRoute ? location.route : [], timeline: timeline))
+                                                         route: route, timeline: timeline))
         helioLog.notice("helio: workout ended, \(counted.count, privacy: .public) reading(s), saved to Health \(saved, privacy: .public)")
         landPendingHeartRate()
+
+        // #232: the VO₂ max estimate for an outdoor run, as the ring's `stop()` makes it: after the
+        // readings are stored (the resting HR leaves this workout's own window out), and with its
+        // Health write (which may show the one-time VO₂ max permission sheet) off the "Saving
+        // workout…" path. Only when the workout itself is in Health.
+        vo2MaxOutcome = summary.summary.sport == .runningOutdoor
+            ? vo2MaxEstimate(summary, samples: counted, route: route)
+            : nil
+        vo2MaxHealthStatus = saved ? nil : .failed
+        vo2MaxWriteTask = nil
         // `.finished` BEFORE the sync, so the hold is already released when `syncHistory` asks:
         // otherwise the workout's own hold would defer the very sync it held back.
         state = .finished(summary, savedToHealth: saved)
+        if saved, case .estimate(let estimate)? = vo2MaxOutcome {
+            let workoutStart = summary.summary.startDate
+            let workoutEnd = summary.summary.endDate
+            vo2MaxWriteTask = Task { [weak self] in
+                guard let self else { return }
+                let status = await self.training.saveVO2Max(estimate, workoutEnd: workoutEnd, timeline: timeline)
+                // Only report into the summary it belongs to (the person may have moved on).
+                guard case .finished(let shown, _) = self.state,
+                      shown.summary.startDate == workoutStart else { return }
+                self.vo2MaxHealthStatus = status
+            }
+        }
         // The sync the workout held back (T6's re-arm, for the strap).
         if let session = source(), session.ready, !session.syncing { session.syncHistory(manual: false) }
+    }
+
+    /// The VO₂ max estimate's inputs (`WorkoutVO2MaxInputs`, shared with the ring): the readings that
+    /// count, the route with no distance across a pause, the age only if set, and the resting HR.
+    /// The 10-minute rule counts running time (`VO2MaxEstimate.estimate(_:activeSeconds:)`).
+    private func vo2MaxEstimate(_ result: StrapWorkoutSummary, samples: [HRSample],
+                                route: [CLLocation]) -> VO2MaxEstimate.Outcome {
+        let summary = result.summary
+        let input = VO2MaxEstimate.Input(
+            sport: summary.sport, start: summary.startDate, end: summary.endDate,
+            heartRate: samples,
+            route: WorkoutVO2MaxInputs.routePoints(route, pauses: result.pauses),
+            age: training.age(),
+            restingHR: training.restingHR(start: summary.startDate, end: summary.endDate))
+        return VO2MaxEstimate.estimate(input, activeSeconds: result.activeSeconds)
     }
 
     /// Discard the workout: nothing is written anywhere.
@@ -493,6 +561,8 @@ final class StrapWorkoutRecorder {
         currentHRAt = nil
         hrSampleCount = 0
         liveZoneBreakdown = WorkoutZoneBreakdown()
+        vo2MaxOutcome = nil
+        vo2MaxHealthStatus = nil
     }
 
     // MARK: Journal

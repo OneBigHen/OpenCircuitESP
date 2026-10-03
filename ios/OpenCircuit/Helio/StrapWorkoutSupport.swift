@@ -106,6 +106,30 @@ final class StrapWorkoutHealthWriter: StrapWorkoutHealthWriting {
     }
 }
 
+// MARK: - Training metrics (#232)
+
+/// The VO₂ max estimate's age, resting HR and Health write, through exactly what the ring's workout
+/// uses (`WorkoutVO2MaxInputs`, `VO2MaxHealthWriter`). `vo2Max` is asked for lazily by that writer
+/// only, never through `HealthKitWriter.allTypes`.
+@MainActor
+final class StrapWorkoutLiveTrainingInputs: StrapWorkoutTrainingInputs {
+    private let store: @MainActor () -> LocalStore?
+
+    init(store: @escaping @MainActor () -> LocalStore?) { self.store = store }
+
+    func age() -> Int? { WorkoutVO2MaxInputs.storedAge() }
+
+    func restingHR(start: Date, end: Date) -> Double? {
+        guard let store = store() else { return nil }
+        return WorkoutVO2MaxInputs.restingHR(store: store, start: start, end: end)
+    }
+
+    func saveVO2Max(_ estimate: VO2MaxEstimate.Estimate, workoutEnd: Date,
+                    timeline: SyncDeviceID) async -> VO2MaxHealthWriter.Status {
+        await VO2MaxHealthWriter().save(estimate, workoutEnd: workoutEnd, timeline: timeline)
+    }
+}
+
 // MARK: - Journal files
 
 /// The journal in Application Support/StrapWorkout: the small journal (rewritten on the heartbeat),

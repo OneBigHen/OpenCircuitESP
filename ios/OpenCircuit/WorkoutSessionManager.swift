@@ -648,7 +648,8 @@ final class WorkoutSessionManager: NSObject {
         recordingState = .finished(summary: summary)
         if saved, case .estimate(let estimate)? = vo2MaxOutcome {
             Task { [weak self] in
-                let status = await VO2MaxHealthWriter().save(estimate, workoutEnd: summary.endDate)
+                let status = await VO2MaxHealthWriter().save(estimate, workoutEnd: summary.endDate,
+                                                             timeline: .ringConn)
                 // Only report into the summary it belongs to (the user may have moved on).
                 guard let self, case .finished(let shown) = self.recordingState,
                       shown.startDate == summary.startDate else { return }
@@ -657,38 +658,19 @@ final class WorkoutSessionManager: NSObject {
         }
     }
 
-    /// The inputs `VO2MaxEstimate` needs, gathered from this session: the GPS fixes as cumulative
-    /// distance (the same running sum as `distanceMeters`), the age only if the user set one (the
-    /// profile's 35 placeholder is not an age), and the daily resting HR from the stored history
-    /// outside this workout's own window.
+    /// The inputs `VO2MaxEstimate` needs, gathered from this session through the helpers the strap's
+    /// workout shares (`WorkoutVO2MaxInputs`): the GPS fixes as cumulative distance (the same running
+    /// sum as `distanceMeters`), the age only if the user set one (the profile's 35 placeholder is not
+    /// an age), and the daily resting HR from the stored history outside this workout's own window.
     private func vo2MaxEstimate(summary: WorkoutSummary, hrSamples: [HRSample],
                                 route: [CLLocation]) -> VO2MaxEstimate.Outcome {
-        var points: [VO2MaxEstimate.RoutePoint] = []
-        var cumulative = 0.0
-        var previous: CLLocation?
-        for location in route {
-            if let previous { cumulative += location.distance(from: previous) }
-            previous = location
-            let hasAltitude = location.verticalAccuracy > 0
-            points.append(VO2MaxEstimate.RoutePoint(
-                time: location.timestamp, distance: cumulative,
-                altitude: hasAltitude ? location.altitude : nil,
-                verticalAccuracy: hasAltitude ? location.verticalAccuracy : nil))
-        }
-        let age = UserDefaults.standard.object(forKey: "userProfile.age") as? Int
-        var restingHR: Double?
-        if let store {
-            let since = summary.startDate.addingTimeInterval(-9 * 86_400)
-            let window = summary.startDate ... summary.endDate
-            let history = ((try? store.recentSamples(kind: .heartRate, since: since)) ?? [])
-                .filter { !window.contains($0.start) }
-                .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
-            restingHR = VO2MaxEstimate.restingHR(daily: RestingHR.dailyValues(hr: history),
-                                                 runStart: summary.startDate)
+        let restingHR = store.flatMap {
+            WorkoutVO2MaxInputs.restingHR(store: $0, start: summary.startDate, end: summary.endDate)
         }
         return VO2MaxEstimate.estimate(VO2MaxEstimate.Input(
             sport: summary.sport, start: summary.startDate, end: summary.endDate,
-            heartRate: hrSamples, route: points, age: age, restingHR: restingHR))
+            heartRate: hrSamples, route: WorkoutVO2MaxInputs.routePoints(route),
+            age: WorkoutVO2MaxInputs.storedAge(), restingHR: restingHR))
     }
 
     /// Discard the session without writing to HealthKit.
