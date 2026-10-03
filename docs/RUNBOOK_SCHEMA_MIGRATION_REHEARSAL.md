@@ -139,7 +139,10 @@ falsifiable.
    - the string `Cannot use staged migration with an unknown model version`, or `134504`, anywhere
      in `migration.log`;
    - the in-app "local history was reset" notice appearing (that is `historyResetDefaultsKey`, and
-     it is raised only by `wipeAndRecoverForeground`);
+     it is raised only by `wipeAndRecoverForeground`). Since #243 the notice carries the wipe's
+     date, and dismissing it clears the flag. A notice that says the date "was not recorded" is a
+     leftover from a wipe on an older build, not this upgrade: note it, dismiss it, and judge the
+     run on the row counts in §3;
    - a black screen / launch crash.
 7. **Take the AFTER census.** Repeat the step-3 pull and query into `after.store`.
 
