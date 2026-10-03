@@ -1229,24 +1229,26 @@ final class HelioSession: WearableSession {
         }
     }
 
-    /// A new alarm in the lowest free slot. nil when the write went out.
+    /// A new alarm in the lowest free slot. nil when the write went out. `quiet`: a write the person
+    /// didn't make on the Alarms screen (Shortcuts' wake alarm, review-261 N2) leaves that screen's
+    /// `alarmNotice` alone, from the write to its re-read.
     @discardableResult
-    func addAlarm(hour: UInt8, minute: UInt8, days: ZeppAlarmDays) -> String? {
-        editAlarm { try $0.add(hour: hour, minute: minute, days: days, isEnabled: true, now: self.clock()) }
+    func addAlarm(hour: UInt8, minute: UInt8, days: ZeppAlarmDays, quiet: Bool = false) -> String? {
+        editAlarm(quiet: quiet) { try $0.add(hour: hour, minute: minute, days: days, isEnabled: true, now: self.clock()) }
     }
 
     /// Replaces one slot (an edit, or enable/disable).
     @discardableResult
-    func replaceAlarm(_ alarm: ZeppAlarm) -> String? {
-        editAlarm { try $0.replace(alarm, now: self.clock()) }
+    func replaceAlarm(_ alarm: ZeppAlarm, quiet: Bool = false) -> String? {
+        editAlarm(quiet: quiet) { try $0.replace(alarm, now: self.clock()) }
     }
 
     @discardableResult
-    func deleteAlarm(slot: UInt8) -> String? {
-        editAlarm { try $0.delete(slot: slot, now: self.clock()) }
+    func deleteAlarm(slot: UInt8, quiet: Bool = false) -> String? {
+        editAlarm(quiet: quiet) { try $0.delete(slot: slot, now: self.clock()) }
     }
 
-    private func editAlarm(_ body: (inout ZeppAlarmEditor) throws -> ZeppAlarmEditor.Output) -> String? {
+    private func editAlarm(quiet: Bool, _ body: (inout ZeppAlarmEditor) throws -> ZeppAlarmEditor.Output) -> String? {
         guard var editor = alarmEditor else { return "Alarms aren't available on this connection." }
         do {
             let out = try body(&editor)

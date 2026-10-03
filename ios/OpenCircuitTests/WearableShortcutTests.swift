@@ -171,7 +171,8 @@ final class WearableShortcutTests: XCTestCase {
     /// The actions over `link`, with the strap chosen and saved, and a 250 ms pause that ticks the
     /// session and delivers what the strap sent.
     private func actions(_ link: WSLink, applier: StrapWakeAlarmApplier, device: ActiveDeviceChoice = .helioStrap,
-                         savedStrap: Bool = true) -> WearableShortcuts {
+                         savedStrap: Bool = true, cancelled: @escaping () -> Bool = { false },
+                         protectedData: Bool = true) -> WearableShortcuts {
         WearableShortcuts(WearableShortcutEnvironment(
             device: { device },
             savedStrapID: { [strapID] in savedStrap ? strapID : nil },
@@ -187,7 +188,8 @@ final class WearableShortcutTests: XCTestCase {
                 link.session?.tick(now: self.clock)
                 self.transport?.drain()
             },
-            isCancelled: { false }))
+            isCancelled: { cancelled() },
+            protectedDataAvailable: { protectedData }))
     }
 
     private func pairs(_ device: FakeZeppDevice) -> [UInt8] { device.findOpcodes.filter { $0 == 0x03 || $0 == 0x06 } }
@@ -264,6 +266,7 @@ final class WearableShortcutTests: XCTestCase {
         let started = clock
         let result = await actions(link, applier: applier()).vibrate(times: 1)
         XCTAssertEqual(link.connects, 1)
+        XCTAssertEqual(WearableShortcuts.reachTimeout, 15, "review-261 Q4: reach + the alarm write stay under 30 s")
         XCTAssertEqual(result.outcome, "unreachable: timed out")
         XCTAssertEqual(clock.timeIntervalSince(started), WearableShortcuts.reachTimeout, accuracy: 0.3)
         XCTAssertTrue(result.dialog.hasPrefix("Couldn't reach your Amazfit Helio Strap"), result.dialog)
@@ -282,7 +285,7 @@ final class WearableShortcutTests: XCTestCase {
     func testARequestSavedWhileAwayIsWrittenAtTheNextConnectionAfterTheClockAndTheList() throws {
         let applier = applier()
         applier.store.pending = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 6, minute: 30, days: .once)),
-                                                      madeAt: clock)
+                                                      strapID: strapID, madeAt: clock)
         let device = wsStrap()
         device.alarmRecords = [0: [0x04, 0x00, 0x09, 0x00, 0x60, 0x00, 0x00, 0x00, 0x01, 0x00]]   // the person's own
         _ = makeSession(device, applier: applier, findState: HelioFindState())
@@ -304,7 +307,7 @@ final class WearableShortcutTests: XCTestCase {
 
     func testAWriteTheStrapRefusesKeepsTheRequestPendingForTheNextConnection() throws {
         let applier = applier()
-        let request = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 7, minute: 0, days: .weekdays)), madeAt: clock)
+        let request = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 7, minute: 0, days: .weekdays)), strapID: strapID, madeAt: clock)
         applier.store.pending = request
         let device = wsStrap()
         device.alarmAckStatus = 0x02
@@ -323,7 +326,7 @@ final class WearableShortcutTests: XCTestCase {
     func testAnExpiredOnceRequestIsDroppedAtTheNextConnectionAndNothingIsSent() throws {
         let applier = applier()
         // Asked for 06:30 once at 12:00; the strap only comes back the morning after next, at 08:00.
-        let request = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 6, minute: 30, days: .once)), madeAt: clock)
+        let request = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 6, minute: 30, days: .once)), strapID: strapID, madeAt: clock)
         applier.store.pending = request
         clock = clock.addingTimeInterval(44 * 3600)
         let device = wsStrap()
@@ -410,7 +413,9 @@ final class WearableShortcutTests: XCTestCase {
 
     // MARK: a sync in progress (#233 coalescing: act through the session that's there)
 
-    func testABuzzAndAnAlarmWriteDuringASyncLeaveTheSyncWhole() async throws {
+    /// Review-261 F1 (its P2's shape): one notification at a time, the buzz's start, the alarm's add and
+    /// the buzz's stop all go out inside the first fetch round, before its ack.
+    func testABuzzAndAnAlarmWriteInsideTheFirstRoundLeaveTheSyncWhole() throws {
         // The control: the same strap's sync with nothing else on the link.
         let controlStore = try makeStore()
         let control = makeSession(wsStrap(withHistory: true), applier: applier(), findState: HelioFindState(),
@@ -424,19 +429,25 @@ final class WearableShortcutTests: XCTestCase {
         let device = wsStrap(withHistory: true)
         let session = makeSession(device, applier: applier, findState: HelioFindState(), store: store, autoSync: true,
                                   settle: false)
-        let link = WSLink()
-        link.session = session
+        let wire = try XCTUnwrap(transport)
         var steps = 0
-        while session.phase != .syncing, steps < 10_000, transport?.step() == true { steps += 1 }
-        XCTAssertEqual(session.phase, .syncing, "a background run's sync is under way")
+        while device.fetchStarts.isEmpty, steps < 10_000, wire.step() { steps += 1 }
+        wire.step()   // the start reply: the first round's data is now flowing
+        XCTAssertEqual(session.phase, .syncing)
+        XCTAssertTrue(device.fetchAcks.isEmpty, "inside the first round")
 
-        let buzz = await actions(link, applier: applier).vibrate(times: 1)
-        XCTAssertEqual(buzz.outcome, "vibrated 1")
-        let alarm = await actions(link, applier: applier).setWakeAlarm(hour: 6, minute: 30, days: .once)
-        XCTAssertEqual(alarm.outcome, "set")
-        transport?.drain()
-
+        XCTAssertNil(session.buzz(), "buzz start")
+        applier.store.pending = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 6, minute: 30, days: .once)),
+                                                      strapID: strapID, madeAt: clock)
+        XCTAssertEqual(applier.applyPending(on: session), .writing, "alarm add")
+        clock = clock.addingTimeInterval(2.25)
+        session.tick(now: clock)   // the session's own tick sends the buzz's stop
         XCTAssertEqual(pairs(device), [0x03, 0x06])
+        XCTAssertEqual(device.alarmCommands.filter { $0.first == 0x03 }.count, 1)
+        XCTAssertTrue(device.fetchAcks.isEmpty, "all three before the first round's ack")
+        XCTAssertEqual(session.phase, .syncing)
+
+        wire.drain()
         XCTAssertEqual(session.syncsFinished, 1)
         let result = try XCTUnwrap(session.lastSyncResult)
         XCTAssertFalse(result.interrupted)
@@ -445,6 +456,220 @@ final class WearableShortcutTests: XCTestCase {
         XCTAssertEqual(result.typesEmpty, expected.typesEmpty)
         XCTAssertEqual(try store.context.fetchCount(FetchDescriptor<StoredSample>()), expectedRows, "the same rows")
         XCTAssertEqual(Set(session.fetchAcksSent), [0x09], "every round acked keep")
+        XCTAssertEqual(device.failures, [])
+        XCTAssertEqual(applier.store.managed?.slot, 0, "the alarm write was confirmed")
+    }
+
+    // MARK: review-261 findings
+
+    /// B1 (P9): the person deletes the managed alarm on the Alarms screen and adds their own identical
+    /// one, which lands in the same slot. It is theirs: never claimed, rewritten or deleted.
+    func testP9TheReusedManagedSlotHoldingThePersonsOwnAlarmIsNeverClaimed() async throws {
+        let applier = applier()
+        let device = wsStrap()
+        let link = WSLink()
+        let session = makeSession(device, applier: applier, findState: HelioFindState())
+        link.session = session
+        let set = await actions(link, applier: applier).setWakeAlarm(hour: 7, minute: 0, days: .once)
+        XCTAssertEqual(set.outcome, "set")
+        XCTAssertEqual(applier.store.managed?.slot, 0)
+
+        XCTAssertNil(session.deleteAlarm(slot: 0))
+        transport?.drain()
+        XCTAssertNil(applier.store.managed, "a write OpenCircuit didn't make to the managed slot forgets the record")
+        XCTAssertNil(session.addAlarm(hour: 7, minute: 0, days: .once))
+        transport?.drain()
+        let theirs = try XCTUnwrap(device.alarmRecords[0], "theirs took the lowest free slot, 0")
+
+        let commands = device.alarmCommands.count
+        let clear = await actions(link, applier: applier).clearWakeAlarm()
+        XCTAssertEqual(clear.outcome, "nothing to clear")
+        XCTAssertEqual(device.alarmCommands.count, commands, "nothing deleted")
+
+        let moved = await actions(link, applier: applier).setWakeAlarm(hour: 6, minute: 0, days: .once)
+        XCTAssertEqual(moved.outcome, "set")
+        XCTAssertEqual(applier.store.managed?.slot, 1, "a NEW slot")
+        XCTAssertEqual(device.alarmRecords[0], theirs, "theirs untouched")
+    }
+
+    /// S2 (P10): the link drops between the write's ack and the re-read. The strap holds the alarm; the
+    /// next connection adopts it instead of leaving an unmanaged every-day alarm behind.
+    func testP10ALinkDropBeforeTheReReadLeavesACandidateTheNextConnectionAdopts() async throws {
+        let applier = applier()
+        applier.store.pending = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 7, minute: 0, days: .everyDay)),
+                                                      strapID: strapID, madeAt: clock)
+        let device = wsStrap()
+        let first = makeSession(device, applier: applier, findState: HelioFindState(), settle: false)
+        let wire = try XCTUnwrap(transport)
+        var steps = 0
+        while device.alarmCommands.count < 3, steps < 10_000, wire.step() { steps += 1 }   // read, write, re-read sent
+        XCTAssertEqual(device.alarmCommands.count, 3)
+        first.linkLost()   // out of range before the list comes back
+        XCTAssertEqual(device.alarmRecords.keys.sorted(), [0], "the strap applied it")
+        XCTAssertNil(applier.store.managed)
+        XCTAssertEqual(applier.store.candidate,
+                       ManagedStrapAlarm(strapID: strapID, alarm: ZeppAlarm(slot: 0, hour: 7, minute: 0, days: .everyDay)))
+        XCTAssertNotNil(applier.store.pending, "kept")
+
+        let before = device.alarmCommands.count
+        let link = WSLink()
+        link.session = makeSession(device, applier: applier, findState: HelioFindState())
+        XCTAssertEqual(Array(device.alarmCommands[before...]), [[0x09]], "adopted at the list read: nothing written again")
+        XCTAssertEqual(applier.store.managed?.slot, 0)
+        XCTAssertNil(applier.store.candidate)
+        XCTAssertNil(applier.store.pending)
+
+        let moved = await actions(link, applier: applier).setWakeAlarm(hour: 6, minute: 0, days: .everyDay)
+        XCTAssertEqual(moved.outcome, "set")
+        XCTAssertEqual(device.alarmRecords.keys.sorted(), [0], "moved, not a second every-day alarm")
+        XCTAssertEqual(device.alarmRecords[0]?[2], 6)
+    }
+
+    /// S2 (P13): another central changes another slot mid-write, so the re-read can't confirm the
+    /// others unchanged. The candidate is adopted at the next list read.
+    func testP13AnotherCentralChangingAnotherSlotMidWriteLeavesACandidate() throws {
+        let applier = applier()
+        let request = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 7, minute: 0, days: .once)), strapID: strapID,
+                                            madeAt: clock)
+        applier.store.pending = request
+        let device = wsStrap()
+        _ = makeSession(device, applier: applier, findState: HelioFindState(), settle: false)
+        let wire = try XCTUnwrap(transport)
+        var steps = 0
+        while device.alarmCommands.count < 2, steps < 10_000, wire.step() { steps += 1 }   // the write is out
+        device.alarmRecords[5] = [0x04, 0x05, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]   // another central: 09:00
+        wire.drain()
+        XCTAssertEqual(applier.outcome(for: request.id), .notConfirmed)
+        XCTAssertNil(applier.store.managed)
+        XCTAssertEqual(applier.store.candidate?.slot, 0)
+
+        _ = makeSession(device, applier: applier, findState: HelioFindState())
+        XCTAssertEqual(applier.store.managed, ManagedStrapAlarm(strapID: strapID, alarm: ZeppAlarm(slot: 0, hour: 7, minute: 0)))
+        XCTAssertNil(applier.store.candidate)
+        XCTAssertNil(applier.store.pending)
+        XCTAssertEqual(device.alarmRecords[5]?[2], 9, "the other central's alarm untouched")
+    }
+
+    /// S2: a candidate whose slot no longer holds exactly what was written is dropped, never adopted;
+    /// and B1's rule applies to it: the person's own write to its slot drops it.
+    func testACandidateIsDroppedWhenItsSlotChangedOrThePersonWritesIt() throws {
+        let applier = applier()
+        func unconfirmedWrite(_ device: FakeZeppDevice) throws -> HelioSession {
+            applier.store.pending = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 7, minute: 0, days: .once)),
+                                                          strapID: strapID, madeAt: clock)
+            let session = makeSession(device, applier: applier, findState: HelioFindState(), settle: false)
+            let wire = try XCTUnwrap(transport)
+            var steps = 0
+            while device.alarmCommands.count < 2, steps < 10_000, wire.step() { steps += 1 }
+            device.alarmRecords[5] = [0x04, 0x05, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+            wire.drain()
+            XCTAssertEqual(applier.store.candidate?.slot, 0)
+            return session
+        }
+
+        // Its slot changed before the next connection (someone edited it in Zepp): dropped, and the
+        // pending 07:00 goes into a free slot instead.
+        let changed = wsStrap()
+        _ = try unconfirmedWrite(changed)
+        changed.alarmRecords[0] = [0x04, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+        _ = makeSession(changed, applier: applier, findState: HelioFindState())
+        XCTAssertNil(applier.store.candidate)
+        XCTAssertEqual(applier.store.managed?.slot, 1)
+        XCTAssertEqual(changed.alarmRecords[0]?[2], 8, "the edited slot untouched")
+
+        // The person deletes its slot on the Alarms screen, on the same connection.
+        applier.store.managed = nil
+        let edited = wsStrap()
+        let session = try unconfirmedWrite(edited)
+        XCTAssertNil(session.deleteAlarm(slot: 0))
+        transport?.drain()
+        XCTAssertNil(applier.store.candidate)
+    }
+
+    /// S1 (P7): a Clear while the first Set's write is still out follows the write with the delete,
+    /// instead of saying "cancelled" while the alarm lands.
+    func testP7AClearDuringAnInFlightFirstSetDeletesItAfterTheWrite() async throws {
+        let applier = applier()
+        let request = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 7, minute: 0, days: .everyDay)), strapID: strapID,
+                                            madeAt: clock)
+        applier.store.pending = request
+        let device = wsStrap()
+        let session = makeSession(device, applier: applier, findState: HelioFindState(), settle: false)
+        let wire = try XCTUnwrap(transport)
+        var steps = 0
+        while device.alarmCommands.count < 2, steps < 10_000, wire.step() { steps += 1 }   // the set's write is out
+        XCTAssertTrue(applier.isWriting(request.id))
+        XCTAssertNil(applier.store.managed)
+
+        let link = WSLink()
+        link.session = session
+        let clear = await actions(link, applier: applier).clearWakeAlarm()
+        XCTAssertEqual(clear.outcome, "cleared")
+        XCTAssertEqual(device.alarmCommands.filter { $0.first == 0x03 || $0.first == 0x05 }.map { $0[0] }, [0x03, 0x05],
+                       "the delete followed the write")
+        XCTAssertTrue(device.alarmRecords.isEmpty)
+        XCTAssertNil(applier.store.managed)
+        XCTAssertNil(applier.store.pending)
+    }
+
+    /// S4 (P3): iOS cancels a Times = 5 action during the first buzz. The running buzz gets its stop,
+    /// no further buzz starts, and the result says how many ran.
+    func testP3ACancelledMultiBuzzStartsNoMoreAndSaysHowManyRan() async throws {
+        let device = wsStrap()
+        let link = WSLink()
+        link.session = makeSession(device, applier: applier(), findState: HelioFindState())
+        var cancelled = false
+        onPause = { cancelled = true }
+        let result = await actions(link, applier: applier(), cancelled: { cancelled }).vibrate(times: 5)
+        onPause = nil
+        XCTAssertEqual(pairs(device), [0x03, 0x06], "the running buzz stopped; none started after the cancel")
+        XCTAssertFalse(device.isBuzzing)
+        XCTAssertEqual(result.outcome, "cancelled after 1 of 5")
+        XCTAssertEqual(result.dialog, "Vibrated your Amazfit Helio Strap 1 of 5 times; iOS ended the action before the rest.")
+    }
+
+    /// S5: a pending request names its strap. One for another strap is dropped at the connection.
+    func testARequestMadeForAnotherStrapIsDroppedAtTheConnection() throws {
+        let applier = applier()
+        let request = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 6, minute: 30, days: .everyDay)),
+                                            strapID: "5B1E4C2A-0000-4000-8000-0000000000F0", madeAt: clock)
+        applier.store.pending = request
+        let device = wsStrap()
+        _ = makeSession(device, applier: applier, findState: HelioFindState())
+        XCTAssertEqual(device.alarmCommands, [[0x09]], "nothing sent")
+        XCTAssertNil(applier.store.pending)
+        XCTAssertEqual(applier.outcome(for: request.id), .noWrite(.otherStrap))
+    }
+
+    /// F2: before the first unlock after a restart the device choice reads as the ring and the key as
+    /// missing, so every action asks for an unlock and persists nothing.
+    func testBeforeTheFirstUnlockEveryActionAsksForAnUnlockAndPersistsNothing() async throws {
+        let applier = applier()
+        let link = WSLink()
+        let locked = actions(link, applier: applier, protectedData: false)
+        let buzz = await locked.vibrate(times: 1)
+        let set = await locked.setWakeAlarm(hour: 6, minute: 30, days: .once)
+        let clear = await locked.clearWakeAlarm()
+        for result in [buzz, set, clear] {
+            XCTAssertEqual(result.dialog, "Unlock your iPhone once after restarting, then try again.")
+            XCTAssertEqual(result.outcome, "protected data unavailable")
+        }
+        XCTAssertEqual(link.connects, 0)
+        XCTAssertNil(defaults.data(forKey: StrapWakeAlarmStore.key))
+    }
+
+    /// N2: a connection-time apply leaves the Alarms screen's notice alone; the screen's own edit still sets it.
+    func testAConnectionTimeApplyLeavesTheAlarmsScreensNoticeAlone() throws {
+        let applier = applier()
+        applier.store.pending = StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 6, minute: 30, days: .once)),
+                                                      strapID: strapID, madeAt: clock)
+        let device = wsStrap()
+        let session = makeSession(device, applier: applier, findState: HelioFindState())
+        XCTAssertNotNil(applier.store.managed, "applied")
+        XCTAssertNil(session.alarmNotice)
+        XCTAssertNil(session.addAlarm(hour: 9, minute: 0, days: .weekend))
+        transport?.drain()
+        XCTAssertEqual(session.alarmNotice, "Saved on the strap.")
     }
 
     // MARK: decision 1: no central, no switch, no connect unless the strap is chosen AND saved

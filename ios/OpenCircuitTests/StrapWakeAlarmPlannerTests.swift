@@ -34,11 +34,14 @@ final class StrapWakeAlarmPlannerTests: XCTestCase {
 
     /// `now` defaults to the request instant itself: nothing has expired.
     private func plan(_ alarms: [ZeppAlarm], _ record: ManagedStrapAlarm?, _ request: StrapWakeAlarmRequest.Kind,
-                      strap: String? = nil, madeAt: Date? = nil, now: Date? = nil) -> StrapWakeAlarmPlanner.Plan {
+                      strap: String? = nil, madeAt: Date? = nil, now: Date? = nil,
+                      requestedFor: String?? = .none) -> StrapWakeAlarmPlanner.Plan {
         let made = madeAt ?? evening
+        // The request is for the strap being planned on, unless a test says otherwise.
+        let target: String? = requestedFor ?? (strap ?? strapA)
         return StrapWakeAlarmPlanner.plan(alarms: alarms, strapID: strap ?? strapA, record: record,
-                                          request: StrapWakeAlarmRequest(request, madeAt: made), now: now ?? made,
-                                          calendar: utc)
+                                          request: StrapWakeAlarmRequest(request, strapID: target, madeAt: made),
+                                          now: now ?? made, calendar: utc)
     }
 
     private func hoursAfterEvening(_ hours: Double) -> Date { evening.addingTimeInterval(hours * 3600) }
@@ -252,11 +255,48 @@ final class StrapWakeAlarmPlannerTests: XCTestCase {
         XCTAssertNil(store.managedSlot(strapID: strapA, alarms: [alarm(2, 6, 45)]), "edited")
         XCTAssertNil(store.managedSlot(strapID: strapB, alarms: [alarm(2, 6, 30)]), "another strap")
         // The state round-trips through its versioned key.
-        let pending = StrapWakeAlarmRequest(.clear, madeAt: Date(timeIntervalSince1970: 1_789_900_000))
+        let pending = StrapWakeAlarmRequest(.clear, strapID: strapA, madeAt: Date(timeIntervalSince1970: 1_789_900_000))
         store.pending = pending
         XCTAssertEqual(StrapWakeAlarmStore(defaults: defaults).state,
                        .init(managed: record(alarm(2, 6, 30)), pending: pending))
-        XCTAssertNotNil(defaults.data(forKey: "helio.shortcutWakeAlarm.v1"))
+        XCTAssertNotNil(defaults.data(forKey: "helio.shortcutWakeAlarm.v2"))
+    }
+
+    /// Review-261 S5: the request names its strap, so the stored shape moved to `v2`. A `v1` record keeps
+    /// its managed slot (it names its strap) and drops its pending request (it names none, so the
+    /// apply-time rule would drop it anyway).
+    func testAVersionOneRecordKeepsItsManagedSlotAndDropsItsUnboundRequest() throws {
+        let suite = "test.StrapWakeAlarmPlannerTests.v1"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(StrapWakeAlarmStore.key, "helio.shortcutWakeAlarm.v2")
+        // A v1 record: no `strapID` in the request, no candidate (nil optionals aren't encoded).
+        let v1 = StrapWakeAlarmStore.State(managed: record(alarm(2, 6, 30)),
+                                           pending: StrapWakeAlarmRequest(.set(StrapWakeAlarmTime(hour: 7, minute: 0, days: .once)),
+                                                                          strapID: nil, madeAt: evening))
+        let data = try JSONEncoder().encode(v1)
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("strapID\":null"))
+        defaults.set(data, forKey: "helio.shortcutWakeAlarm.v1")
+
+        let store = StrapWakeAlarmStore(defaults: defaults)
+        XCTAssertEqual(store.state, .init(managed: record(alarm(2, 6, 30)), pending: nil, candidate: nil))
+        XCTAssertNil(defaults.data(forKey: "helio.shortcutWakeAlarm.v1"), "migrated once")
+        XCTAssertNotNil(defaults.data(forKey: "helio.shortcutWakeAlarm.v2"))
+    }
+
+    // MARK: review-261 S5: a request is for one strap
+
+    func testARequestForAnotherStrapOrForNoneIsDroppedAndNothingIsSent() {
+        let ours = alarm(2, 7, 0)
+        XCTAssertEqual(plan([], nil, set(6, 30), strap: strapA, requestedFor: .some(strapB)),
+                       .init(action: .none(.otherStrap), forgetRecord: false))
+        XCTAssertEqual(plan([], nil, set(6, 30), strap: strapA, requestedFor: .some(nil)),
+                       .init(action: .none(.otherStrap), forgetRecord: false))
+        XCTAssertEqual(plan([ours], record(ours), .clear, strap: strapA, requestedFor: .some(strapB)),
+                       .init(action: .none(.otherStrap), forgetRecord: false), "a clear too")
+        XCTAssertEqual(plan([], nil, set(6, 30), strap: strapA, requestedFor: .some(strapA)).action,
+                       .add(StrapWakeAlarmTime(hour: 6, minute: 30, days: .once)))
     }
 
     // MARK: the descriptor (decision 51e)

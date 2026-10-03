@@ -40,11 +40,15 @@ struct StrapWakeAlarmRequest: Codable, Equatable {
 
     let id: UUID
     let kind: Kind
+    /// The strap it was made for (`HelioSession.identityID`, the saved strap's id). A request for
+    /// another strap, or for none, is dropped at apply (review-261 S5).
+    let strapID: String?
     let madeAt: Date
 
-    init(_ kind: Kind, madeAt: Date, id: UUID = UUID()) {
+    init(_ kind: Kind, strapID: String?, madeAt: Date, id: UUID = UUID()) {
         self.id = id
         self.kind = kind
+        self.strapID = strapID
         self.madeAt = madeAt
     }
 }
@@ -101,6 +105,8 @@ enum StrapWakeAlarmPlanner {
         /// Decision 52e: a once-request whose time passed before it could be applied. Dropped, never
         /// written, so the strap is untouched and no alarm goes off a day late.
         case expired
+        /// The request was made for another strap, or for none (review-261 S5). Dropped, nothing sent.
+        case otherStrap
     }
 
     enum Refusal: Equatable {
@@ -227,6 +233,9 @@ struct StrapWakeAlarmStore {
     struct State: Codable, Equatable {
         var managed: ManagedStrapAlarm?
         var pending: StrapWakeAlarmRequest?
+        /// A set the strap may have applied but never confirmed (review-261 S2): adopted as managed at a
+        /// later list read only if its slot holds exactly this content, else dropped.
+        var candidate: ManagedStrapAlarm?
     }
 
     let defaults: UserDefaults
@@ -255,6 +264,11 @@ struct StrapWakeAlarmStore {
     var managed: ManagedStrapAlarm? {
         get { state.managed }
         nonmutating set { state.managed = newValue }
+    }
+
+    var candidate: ManagedStrapAlarm? {
+        get { state.candidate }
+        nonmutating set { state.candidate = newValue }
     }
 
     /// The managed slot on `strapID`'s list, for the Alarms screen's "Set by Shortcuts" mark: the

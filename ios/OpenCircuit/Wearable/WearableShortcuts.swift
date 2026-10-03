@@ -53,6 +53,8 @@ struct WearableShortcutEnvironment {
     /// One wait between checks (250 ms in the app; the tests move the simulated strap along instead).
     var pause: @MainActor () async -> Void
     var isCancelled: @MainActor () -> Bool = { Task.isCancelled }
+    /// False before the first unlock after a restart: UserDefaults and the Keychain read as empty then.
+    var protectedDataAvailable: @MainActor () -> Bool = { true }
 
     var store: StrapWakeAlarmStore { applier.store }
 
@@ -230,7 +232,7 @@ struct WearableShortcuts {
         guard env.savedStrapID() != nil else { return Self.noStrap(name) }
         // Decision 52b: the request is persisted FIRST, so a strap out of range, an expiry or a link
         // drop leaves it for the next connection (`StrapWakeAlarmApplier.attach`).
-        let request = StrapWakeAlarmRequest(.set(time), madeAt: env.now())
+        let request = StrapWakeAlarmRequest(.set(time), strapID: env.savedStrapID(), madeAt: env.now())
         env.store.pending = request
         let when = Self.describe(time, now: env.now())
         helioLog.notice("shortcuts: wake alarm \(when, privacy: .private) saved; applying")
@@ -277,7 +279,7 @@ struct WearableShortcuts {
             return .init(dialog: "There's no wake alarm from Shortcuts on your \(name). Alarms you made yourself are never touched.",
                          outcome: "nothing to clear")
         }
-        let request = StrapWakeAlarmRequest(.clear, madeAt: env.now())
+        let request = StrapWakeAlarmRequest(.clear, strapID: strapID, madeAt: env.now())
         env.store.pending = request
         switch await apply(request, name: name) {
         case .done(.cleared):
