@@ -163,6 +163,7 @@ enum StrapWakeAlarmPlanner {
     }
 
     /// The rules, in order:
+    /// - a request made for another strap, or for none (review-261 S5): nothing is written;
     /// - an expired once-request (decision 52e, `isExpired`): nothing is written;
     /// - a set whose exact alarm (time, days, enabled, no smart wake) the MANAGED slot already holds:
     ///   nothing is written;
@@ -178,6 +179,7 @@ enum StrapWakeAlarmPlanner {
     /// - no other slot is ever named: an add takes a free slot, and replace and delete only the managed one.
     static func plan(alarms: [ZeppAlarm], strapID: String, record: ManagedStrapAlarm?,
                      request: StrapWakeAlarmRequest, now: Date, calendar: Calendar = .current) -> Plan {
+        guard request.strapID == strapID else { return Plan(action: .none(.otherStrap), forgetRecord: false) }
         let managed = managedSlot(alarms: alarms, strapID: strapID, record: record)
         let forget = managed == .lost
         switch request.kind {
@@ -226,9 +228,14 @@ enum StrapWakeAlarmPlanner {
 
 // MARK: - Persistence
 
-/// The managed record and the pending request, under one versioned UserDefaults key (no SwiftData).
+/// The managed record, the pending request and a candidate, under one versioned UserDefaults key (no
+/// SwiftData).
 struct StrapWakeAlarmStore {
-    nonisolated static let key = "helio.shortcutWakeAlarm.v1"
+    /// v2 (review-261 S5): the pending request names its strap, and a candidate was added.
+    nonisolated static let key = "helio.shortcutWakeAlarm.v2"
+    /// v1, before the request named its strap. Read once: its managed record is kept (it names its
+    /// strap), its pending request is dropped (it names none, so the apply-time rule would drop it anyway).
+    nonisolated static let legacyKey = "helio.shortcutWakeAlarm.v1"
 
     struct State: Codable, Equatable {
         var managed: ManagedStrapAlarm?
@@ -246,9 +253,18 @@ struct StrapWakeAlarmStore {
 
     var state: State {
         get {
-            guard let data = defaults.data(forKey: Self.key),
-                  let state = try? JSONDecoder().decode(State.self, from: data) else { return State() }
-            return state
+            if let data = defaults.data(forKey: Self.key) {
+                return (try? JSONDecoder().decode(State.self, from: data)) ?? State()
+            }
+            guard let legacy = defaults.data(forKey: Self.legacyKey) else { return State() }
+            let old = try? JSONDecoder().decode(State.self, from: legacy)
+            let migrated = State(managed: old?.managed, pending: nil, candidate: nil)
+            if old?.pending != nil {
+                helioLog.notice("shortcuts: a v1 wake alarm request named no strap; dropped")
+            }
+            if let data = try? JSONEncoder().encode(migrated) { defaults.set(data, forKey: Self.key) }
+            defaults.removeObject(forKey: Self.legacyKey)
+            return migrated
         }
         nonmutating set {
             guard let data = try? JSONEncoder().encode(newValue) else { return }
@@ -287,6 +303,16 @@ struct StrapWakeAlarmStore {
 /// when the strap's re-read confirms the written slot AND every other slot unchanged
 /// (`.writeChecked(slotMatches && otherSlotsUnchanged)`). Any other outcome keeps the request pending
 /// for the next connection, and nothing is ever retried on the same connection.
+///
+/// Review-261:
+/// - B1: any alarm write that is not this applier's own, to the managed slot (or the candidate's),
+///   forgets that record. The slot is the person's from then on, even if they put an identical alarm
+///   back in it (the Alarms screen gives the lowest free slot).
+/// - S2: every set this applier sends is persisted as a candidate before it goes out. A confirming
+///   re-read promotes it to the record; otherwise it stays, and the next list read adopts it only if
+///   its slot holds exactly that content, else drops it. So an alarm the strap applied but never
+///   confirmed (a lost ack, a drop before the re-read, another central's change) isn't left unmanaged.
+/// - N2: its writes are quiet: the Alarms screen's notice is the person's own edits only.
 @MainActor
 final class StrapWakeAlarmApplier {
     static let shared = StrapWakeAlarmApplier()
@@ -392,6 +418,7 @@ final class StrapWakeAlarmApplier {
         }
 
         let strapID = session.identityID
+        reconcileCandidate(alarms: alarms, strapID: strapID)
         let plan = StrapWakeAlarmPlanner.plan(alarms: alarms, strapID: strapID, record: store.managed, request: pending,
                                               now: now(), calendar: calendar)
         if plan.forgetRecord {
@@ -404,6 +431,8 @@ final class StrapWakeAlarmApplier {
             if reason == .expired {
                 // Decision 52e: dropped, nothing sent. The outcome only: no time of day in the log.
                 helioLog.notice("shortcuts: wake alarm request expired before it could be applied; dropped, strap untouched")
+            } else if reason == .otherStrap {
+                helioLog.notice("shortcuts: wake alarm request was made for another strap; dropped, strap untouched")
             }
             finish(pending.id, .noWrite(reason))
             return .finished
@@ -411,13 +440,23 @@ final class StrapWakeAlarmApplier {
             finish(pending.id, .refused(reason))
             return .finished
         case .add(let time):
-            error = session.addAlarm(hour: time.hour, minute: time.minute, days: time.days)
+            // The editor adds in the lowest free slot (`ZeppAlarmEditor.add`); the planner saw one.
+            if let slot = editor.freeSlots.first {
+                store.candidate = ManagedStrapAlarm(strapID: strapID, alarm: ZeppAlarm(slot: slot, hour: time.hour,
+                                                                                      minute: time.minute, days: time.days))
+            }
+            error = session.addAlarm(hour: time.hour, minute: time.minute, days: time.days, quiet: true)
         case .replace(let alarm):
-            error = session.replaceAlarm(alarm)
+            store.candidate = ManagedStrapAlarm(strapID: strapID, alarm: alarm)
+            error = session.replaceAlarm(alarm, quiet: true)
         case .delete(let slot):
-            error = session.deleteAlarm(slot: slot)
+            error = session.deleteAlarm(slot: slot, quiet: true)
         }
         if let error {
+            switch plan.action {
+            case .add, .replace: store.candidate = nil   // nothing went out
+            case .delete, .none, .refuse: break
+            }
             // The editor refused before anything was sent (checked above, so not expected): pending.
             helioLog.error("shortcuts: wake alarm write not sent (\(error, privacy: .public)); kept pending")
             outcomes[pending.id] = .writeFailed
@@ -429,7 +468,9 @@ final class StrapWakeAlarmApplier {
 
     private func handle(_ event: ZeppAlarmEditor.Event, from session: HelioSession) {
         switch event {
-        case .listRead:
+        case .listRead(let alarms):
+            // A later list read (S2); not one racing this applier's own write on this session.
+            if inFlight?.session !== session { reconcileCandidate(alarms: alarms, strapID: session.identityID) }
             guard awaitingRead === session else { return }
             awaitingRead = nil
             applyPending(on: session)
@@ -437,18 +478,22 @@ final class StrapWakeAlarmApplier {
             guard awaitingRead === session else { return }
             awaitingRead = nil
             readFailed = session
-        case .changedOnStrap, .writeAcknowledged:
+        case .changedOnStrap:
             break
+        case .writeAcknowledged(let write):
+            if inFlight?.session !== session { forgetRecords(touching: write.slot, on: session) }
         case .writeFailed(let write, let failure):
-            guard let request = takeInFlight(session, write) else { return }
+            guard let request = takeInFlight(session, write) else { return forgetRecords(touching: write.slot, on: session) }
             outcomes[request.requestID] = .writeFailed
             helioLog.error("shortcuts: wake alarm write to slot \(write.slot, privacy: .public) failed (\(String(describing: failure), privacy: .public)); kept pending")
         case .writeUnverified(let write, _):
-            guard let request = takeInFlight(session, write) else { return }
+            guard let request = takeInFlight(session, write) else { return forgetRecords(touching: write.slot, on: session) }
             outcomes[request.requestID] = .notConfirmed
             helioLog.error("shortcuts: wake alarm write to slot \(write.slot, privacy: .public) not read back; kept pending")
         case .writeChecked(let check):
-            guard let request = takeInFlight(session, check.write) else { return }
+            guard let request = takeInFlight(session, check.write) else {
+                return forgetRecords(touching: check.write.slot, on: session)
+            }
             guard check.slotMatches, check.otherSlotsUnchanged else {
                 outcomes[request.requestID] = .notConfirmed
                 helioLog.error("shortcuts: wake alarm re-read: matches \(check.slotMatches, privacy: .public), others unchanged \(check.otherSlotsUnchanged, privacy: .public); kept pending")
@@ -456,7 +501,10 @@ final class StrapWakeAlarmApplier {
             }
             switch check.write {
             case .set(let alarm):
-                store.managed = ManagedStrapAlarm(strapID: request.strapID, alarm: alarm)
+                var state = store.state
+                state.managed = ManagedStrapAlarm(strapID: request.strapID, alarm: alarm)
+                state.candidate = nil
+                store.state = state
                 finish(request.requestID, .set(alarm))
             case .delete(let slot):
                 store.managed = nil
@@ -465,6 +513,37 @@ final class StrapWakeAlarmApplier {
             // A newer request that arrived while this one was out goes next, on the list just read.
             if store.pending != nil { applyPending(on: session) }
         }
+    }
+
+    /// B1: a write this applier didn't make, to the managed slot (or the candidate's) on this strap,
+    /// makes that slot the person's: the record goes, whatever the write's outcome.
+    private func forgetRecords(touching slot: UInt8, on session: HelioSession) {
+        var state = store.state
+        let strapID = session.identityID
+        var changed = false
+        if let managed = state.managed, managed.strapID == strapID, managed.slot == slot {
+            state.managed = nil
+            changed = true
+        }
+        if let candidate = state.candidate, candidate.strapID == strapID, candidate.slot == slot {
+            state.candidate = nil
+            changed = true
+        }
+        guard changed else { return }
+        store.state = state
+        helioLog.notice("shortcuts: another write reached the managed alarm slot \(slot, privacy: .public); it is no longer OpenCircuit's")
+    }
+
+    /// S2: a candidate on this strap is adopted as the record if its slot holds exactly what was written,
+    /// else dropped. A candidate for another strap waits for that strap.
+    private func reconcileCandidate(alarms: [ZeppAlarm], strapID: String) {
+        var state = store.state
+        guard let candidate = state.candidate, candidate.strapID == strapID else { return }
+        state.candidate = nil
+        let adopted = alarms.first(where: { $0.slot == candidate.slot })?.hasSameSetting(as: candidate.alarm) == true
+        if adopted { state.managed = candidate }
+        store.state = state
+        helioLog.notice("shortcuts: unconfirmed wake alarm in slot \(candidate.slot, privacy: .public) \(adopted ? "found as written; now managed" : "not on the strap as written; dropped", privacy: .public)")
     }
 
     private func takeInFlight(_ session: HelioSession, _ write: ZeppAlarmEditor.Write) -> InFlight? {

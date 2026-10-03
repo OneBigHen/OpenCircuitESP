@@ -634,6 +634,19 @@ extension HelioConnection: HelioBackgroundLink {
     func noteBackgroundRunStarted(at date: Date) {
         HelioWakeState().lastBackgroundRunStart = date
     }
+
+    /// A Shortcuts action's connect (#260, review-261 U1). A `disconnect()` with a find or a sync
+    /// running drops the session at once but cancels the link 500 ms later. A connect issued inside that
+    /// window would be cancelled by the deferred cancel, so there it re-arms on the disconnect, the way
+    /// a run's teardown does (`rearmAfterTeardown` → `rearmOnDisconnect`). Otherwise: the standing connect.
+    func reconnectForShortcut() -> Bool {
+        if state == .idle, session == nil, let peripheral,
+           peripheral.state == .connected || peripheral.state == .disconnecting {
+            rearmAfterTeardown()
+            return true
+        }
+        return reconnectKnown()
+    }
 }
 
 // MARK: - HelioTransport

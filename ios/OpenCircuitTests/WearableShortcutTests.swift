@@ -533,10 +533,11 @@ final class WearableShortcutTests: XCTestCase {
                                             madeAt: clock)
         applier.store.pending = request
         let device = wsStrap()
-        _ = makeSession(device, applier: applier, findState: HelioFindState(), settle: false)
+        let session = makeSession(device, applier: applier, findState: HelioFindState(), settle: false)
         let wire = try XCTUnwrap(transport)
         var steps = 0
         while device.alarmCommands.count < 2, steps < 10_000, wire.step() { steps += 1 }   // the write is out
+        XCTAssertEqual(session.phase, .settingUp)
         device.alarmRecords[5] = [0x04, 0x05, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]   // another central: 09:00
         wire.drain()
         XCTAssertEqual(applier.outcome(for: request.id), .notConfirmed)

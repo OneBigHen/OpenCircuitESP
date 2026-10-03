@@ -123,6 +123,12 @@ final class StrapWakeAlarmPlannerTests: XCTestCase {
                        "only the person's 06:30 fires; the record goes when the re-read confirms the delete")
         XCTAssertEqual(plan([alarm(2, 7, 0, on: false), mine], record(ours), set(6, 30)),
                        .init(action: .delete(slot: 2), forgetRecord: false), "a fired once-alarm is still ours")
+        // Review-261 S3 (its P11), closed by 52f: the person's 06:30 every day in slot 0, the managed
+        // 07:00 every day in slot 1, Set 06:30 every day → the managed 07:00 goes, so it no longer wakes them.
+        let theirsDaily = alarm(0, 6, 30, .everyDay)
+        let oursDaily = alarm(1, 7, 0, .everyDay)
+        XCTAssertEqual(plan([theirsDaily, oursDaily], record(oursDaily), set(6, 30, .everyDay)),
+                       .init(action: .delete(slot: 1), forgetRecord: false))
     }
 
     func testAnUnmanagedSlotHoldingTheRequestLeavesAManagedSlotThatNoLongerMatches() {

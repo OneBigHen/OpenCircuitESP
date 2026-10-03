@@ -1,5 +1,6 @@
 import Foundation
 import OpenCircuitKit
+import UIKit
 import ZeppKit
 
 // What the Shortcuts actions do (#260, decision 52), apart from App Intents so the tests drive it
@@ -8,13 +9,13 @@ import ZeppKit
 //
 // Reaching the strap: decision 1 first (the strap chosen AND saved, or nothing is created or
 // connected), then the session that is there, ready, or the existing standing connect
-// (`HelioConnection.reconnectKnown`, the background run's own connect), waited on for at most
+// (`HelioConnection.reconnectForShortcut` → `reconnectKnown`, the background run's own connect), waited on for at most
 // `reachTimeout`. Nothing here disconnects: a link this brings up stays up with its standing connect,
 // exactly as a background run leaves it after a sync (B.5), and a link another run holds is used as
 // it is. A buzz and an alarm write go over the chunked link (`…0016`/`…0017`, endpoints `0x001A` and
 // `0x000F`) and a history fetch over `…0004`/`…0005`: `HelioSession.buzz()` and its alarm edits don't
 // look at the fetch, and neither does the app's own Buzz button or Alarms screen, so a sync in progress
-// is not waited for (`testABuzzAndAnAlarmWriteDuringASyncLeaveTheSyncWhole` measures it).
+// is not waited for (`testABuzzAndAnAlarmWriteInsideTheFirstRoundLeaveTheSyncWhole` measures it).
 
 /// The strap's connection as the Shortcuts actions use it. `HelioConnection` in the app.
 @MainActor
@@ -27,7 +28,7 @@ protocol ShortcutStrapLink: AnyObject {
 }
 
 extension HelioConnection: ShortcutStrapLink {
-    func connectForShortcut() -> Bool { reconnectKnown() }
+    func connectForShortcut() -> Bool { reconnectForShortcut() }
 }
 
 /// The key as a Shortcut needs to know it, read before any radio work.
@@ -71,7 +72,8 @@ struct WearableShortcutEnvironment {
             ringSession: { RingScanner.shared.session },
             applier: .shared,
             now: { Date() },
-            pause: { try? await Task.sleep(for: .milliseconds(250)) })
+            pause: { try? await Task.sleep(for: .milliseconds(250)) },
+            protectedDataAvailable: { UIApplication.shared.isProtectedDataAvailable })
     }
 }
 
@@ -85,8 +87,9 @@ struct WearableShortcutResult: Equatable {
 
 @MainActor
 struct WearableShortcuts {
-    /// Decision 52 / the brief: how long an action waits for the strap to come up and be ready.
-    static let reachTimeout: TimeInterval = 20
+    /// How long an action waits for the strap to come up and be ready (review-261 Q4: 15 s, so reaching
+    /// it plus an alarm write and re-read stay under 30 s).
+    static let reachTimeout: TimeInterval = 15
     /// How long an alarm write may take once the strap is ready: the editor's ack and re-read
     /// timeouts (5 s each, `ZeppAlarmEditor.Configuration`) plus a margin.
     static let alarmWriteTimeout: TimeInterval = 12
@@ -112,6 +115,7 @@ struct WearableShortcuts {
     // MARK: Vibrate Wearable (52a)
 
     func vibrate(times requested: Int) async -> WearableShortcutResult {
+        if let locked = lockedOut("vibrate") { return locked }
         let times = min(max(requested, 1), Self.maxTimes)
         let device = env.device()
         let result: WearableShortcutResult
@@ -144,6 +148,7 @@ struct WearableShortcuts {
         }
         for index in 0..<times {
             if index > 0 { await wait(Self.ringBuzzGap) }
+            if env.isCancelled() { return Self.cancelled(name, ran: index, of: times) }
             // `vibrate` declines while the ring syncs, measures or charges (its one-writer discipline).
             guard session.vibrate(.notification) else {
                 let done = index > 0 ? " It vibrated \(index) of \(times) times first." : ""
@@ -175,6 +180,8 @@ struct WearableShortcuts {
         }
         for index in 0..<times {
             if index > 0 { await wait(Self.strapBuzzGap) }
+            // Review-261 S4: iOS ended the action. The buzz before this one already has its stop.
+            if env.isCancelled() { return Self.cancelled(name, ran: index, of: times) }
             if let refusal = session.buzz() {
                 return .init(dialog: refusal, outcome: "buzz refused")
             }
@@ -195,6 +202,7 @@ struct WearableShortcuts {
     // MARK: Set / Clear Wake Alarm (52b, 52c)
 
     func setWakeAlarm(hour: Int, minute: Int, days: ZeppAlarmDays) async -> WearableShortcutResult {
+        if let locked = lockedOut("set wake alarm") { return locked }
         let device = env.device()
         let name = device.displayName
         let result: WearableShortcutResult
@@ -214,6 +222,7 @@ struct WearableShortcuts {
     }
 
     func clearWakeAlarm() async -> WearableShortcutResult {
+        if let locked = lockedOut("clear wake alarm") { return locked }
         let device = env.device()
         let name = device.displayName
         let result: WearableShortcutResult
@@ -267,7 +276,10 @@ struct WearableShortcuts {
     private func clearOnStrap(name: String) async -> WearableShortcutResult {
         guard let strapID = env.savedStrapID() else { return Self.noStrap(name) }
         let state = env.store.state
-        guard state.managed?.strapID == strapID else {
+        // Review-261 S1: a set whose write is out now, or an unconfirmed one (a candidate), may be on the
+        // strap: the clear is queued behind it and goes through the strap, not answered "cancelled".
+        let setInFlight = state.pending.map { env.applier.isWriting($0.id) } ?? false
+        guard state.managed?.strapID == strapID || state.candidate?.strapID == strapID || setInFlight else {
             // Nothing of OpenCircuit's on this strap: no connection needed. A set still waiting for the
             // strap is withdrawn instead.
             if case .set? = state.pending?.kind {
@@ -428,6 +440,23 @@ struct WearableShortcuts {
         case .unsupported: return "Your \(name) doesn't offer what OpenCircuit needs over Bluetooth."
         case .cancelled: return "iOS ended the action before your \(name) answered."
         }
+    }
+
+    /// F2 (review-261): before the first unlock after a restart, UserDefaults and the Keychain read as
+    /// empty, so the device choice would read as the ring and the key as missing. Nothing is read or
+    /// persisted then.
+    private func lockedOut(_ action: String) -> WearableShortcutResult? {
+        guard !env.protectedDataAvailable() else { return nil }
+        let result = WearableShortcutResult(dialog: "Unlock your iPhone once after restarting, then try again.",
+                                            outcome: "protected data unavailable")
+        Self.log(action, result)
+        return result
+    }
+
+    static func cancelled(_ name: String, ran: Int, of times: Int) -> WearableShortcutResult {
+        .init(dialog: ran == 0 ? "iOS ended the action before your \(name) vibrated."
+                               : "Vibrated your \(name) \(ran) of \(times) times; iOS ended the action before the rest.",
+              outcome: "cancelled after \(ran) of \(times)")
     }
 
     static func noStrap(_ name: String) -> WearableShortcutResult {

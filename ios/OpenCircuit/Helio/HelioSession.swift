@@ -1253,15 +1253,19 @@ final class HelioSession: WearableSession {
         do {
             let out = try body(&editor)
             alarmEditor = editor
-            alarmNotice = "Saving to the strap…"
+            quietAlarmWrite = quiet
+            if !quiet { alarmNotice = "Saving to the strap…" }
             performAlarm(out)
             return nil
         } catch {
             let reason = Self.describe(error)
-            alarmNotice = reason
+            if !quiet { alarmNotice = reason }
             return reason
         }
     }
+
+    /// The write in flight is a quiet one (`addAlarm(…, quiet: true)`): its outcome leaves `alarmNotice`.
+    @ObservationIgnored private var quietAlarmWrite = false
 
     private func performAlarm(_ out: ZeppAlarmEditor.Output) {
         send(out.messages)
@@ -1281,15 +1285,20 @@ final class HelioSession: WearableSession {
             case .writeAcknowledged(let write):
                 helioLog.notice("helio: alarm slot \(write.slot, privacy: .public) acknowledged; reading back")
             case .writeFailed(let write, let failure):
-                alarmNotice = "The strap didn't confirm the change. Nothing was retried."
+                if !quietAlarmWrite { alarmNotice = "The strap didn't confirm the change. Nothing was retried." }
+                quietAlarmWrite = false
                 helioLog.error("helio: alarm slot \(write.slot, privacy: .public) write failed (\(String(describing: failure), privacy: .public))")
             case .writeChecked(let check):
-                alarmNotice = check.slotMatches && check.otherSlotsUnchanged
-                    ? "Saved on the strap."
-                    : "The strap's list doesn't match what was saved. Check it below."
+                if !quietAlarmWrite {
+                    alarmNotice = check.slotMatches && check.otherSlotsUnchanged
+                        ? "Saved on the strap."
+                        : "The strap's list doesn't match what was saved. Check it below."
+                }
+                quietAlarmWrite = false
                 helioLog.notice("helio: alarm slot \(check.write.slot, privacy: .public) re-read: matches \(check.slotMatches, privacy: .public), others unchanged \(check.otherSlotsUnchanged, privacy: .public)")
             case .writeUnverified:
-                alarmNotice = "Saved, but the strap's list couldn't be read back."
+                if !quietAlarmWrite { alarmNotice = "Saved, but the strap's list couldn't be read back." }
+                quietAlarmWrite = false
             }
             alarmEventObserver?(event)
         }
