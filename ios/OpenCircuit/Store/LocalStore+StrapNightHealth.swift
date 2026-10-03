@@ -18,7 +18,7 @@ extension LocalStore {
     /// - the strap owns it (decision 28a, the rule it was stored under);
     /// - it isn't manually edited (the edit reconcile owns those);
     /// - it has a stored hypnogram;
-    /// - it has no Health mirror record for its key;
+    /// - it has no Health mirror record for its key, in the zone it was stored in or the current one;
     /// - it began within `strapNightHealthLookback` of `now`;
     /// - a LATER stored night (any device) exists.
     ///
@@ -39,7 +39,9 @@ extension LocalStore {
         return ((try? context.fetch(descriptor)) ?? []).compactMap { row in
             guard row.inBedEnd > row.inBedStart, !row.isManuallyEdited,
                   log.owner(ofNightFrom: row.inBedStart, to: row.inBedEnd) == family,
-                  mirroredNight(night: row.night) == nil else { return nil }
+                  // Under its stored key's own zone too (#259): a time-zone change must not re-offer
+                  // a week of nights Apple Health already holds.
+                  !MirroredNightOverlay.hasRecord(storedNight: row.night) else { return nil }
             let segments = SleepHypnogramCodec.decode(row.hypnogramData)
             return segments.isEmpty ? nil : segments
         }

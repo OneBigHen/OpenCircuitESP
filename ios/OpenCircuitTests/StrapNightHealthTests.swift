@@ -435,6 +435,30 @@ final class StrapNightHealthTests: XCTestCase {
         XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(9)), [])
     }
 
+    /// #259: a night mirrored before a time-zone change is not offered again after it. Its record is
+    /// under the start of its day in the zone it was stored in, which the current zone's day key no
+    /// longer names.
+    func testATimeZoneChangeDoesNotReOfferAMirroredNight() throws {
+        ownership.install(.strapOwnsAllTime)
+        let savedZone = NSTimeZone.default
+        NSTimeZone.default = TimeZone(identifier: "America/New_York")!
+        defer { NSTimeZone.default = savedZone }
+        let store = try makeStore()
+        try saveNight(store, from: -25, to: -17)
+        try saveNight(store, from: -1, to: 7)
+        try recordMirror(try hypnogram(store, endingAt: -17), store: store)
+        let key = try XCTUnwrap(try rows(store).first { $0.inBedEnd == hour(-17) }).night
+        defer { UserDefaults.standard.removeObject(forKey: "sleep.mirror.night.\(key.timeIntervalSince1970)") }
+        let now = hour(9)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: now), [])
+
+        NSTimeZone.default = TimeZone(identifier: "Asia/Tokyo")!
+        XCTAssertNil(store.mirroredNight(night: key),
+                     "this test only means something while the current zone's key misses the record")
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: now), [],
+                       "the night Apple Health already holds is not offered again")
+    }
+
     /// Older than 7 days: stays in the app.
     func testANightOlderThanSevenDaysIsNotOffered() throws {
         ownership.install(.strapOwnsAllTime)

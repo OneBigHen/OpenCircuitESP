@@ -565,6 +565,21 @@ enum MirroredNightOverlay {
         UserDefaults.standard.set(try? JSONEncoder().encode(record), forKey: key(night))
     }
 
+    /// Whether a mirror record exists for a STORED night key (`StoredSleepSummary.night`), in the
+    /// zone it was written in or in the current one.
+    ///
+    /// #259: `key` is the start of the night's day in the CURRENT zone. A stored key is the start of
+    /// its day in the zone it was stored in, and the record was written under that same instant. After
+    /// a time-zone change the two differ, so `load` misses every night mirrored before the change, and
+    /// the 50b backstop re-offered a week of nights Apple Health already holds. The exact instant of
+    /// the stored key is where that record is, so it is checked too. It can't name another night: an
+    /// instant is the start of one day only.
+    static func hasRecord(storedNight night: Date) -> Bool {
+        if load(night: night) != nil { return true }
+        let exact = "sleep.mirror.night.\(night.timeIntervalSince1970)"
+        return exact != key(night) && UserDefaults.standard.data(forKey: exact) != nil
+    }
+
     /// One-shot night-key migration hook — see `moveNightScopedDefault`. Without it every migrated
     /// night would look "never mirrored", and the next flush would delete-and-replace it in Apple
     /// Health for no reason.
