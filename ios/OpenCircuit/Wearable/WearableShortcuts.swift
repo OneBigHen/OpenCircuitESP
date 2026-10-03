@@ -47,8 +47,18 @@ struct WearableShortcutEnvironment {
     var strapKey: @MainActor () -> StrapKeyState
     /// Only called with the strap chosen and saved (decision 1).
     var strapLink: @MainActor () -> any ShortcutStrapLink
-    /// Only called with the ring chosen; never connects (the ring path uses a ready session only).
-    var ringSession: @MainActor () -> RingSession?
+    /// A ring was connected before (`RingScanner.hasSavedRingToRestore`, UserDefaults only). Only read
+    /// with the ring chosen.
+    var ringSaved: @MainActor () -> Bool
+    /// The ring's cached generation (`RingMetadataStore`), nil when no connection ever named it. Set and
+    /// Clear decide from it: they need no connection (decision 52g).
+    var ringGeneration: @MainActor () -> RingGeneration?
+    /// Only called with the ring chosen AND saved (decision 1, 52g).
+    var ringLink: @MainActor () -> any ShortcutRingLink
+    /// The ring's wake-up alarm. Only called with the ring chosen.
+    var ringAlarm: @MainActor () -> RingAlarmController
+    /// What Shortcuts last set on it.
+    var ringShortcutStore = ShortcutRingAlarmStore()
     var applier: StrapWakeAlarmApplier
     var now: @MainActor () -> Date
     /// One wait between checks (250 ms in the app; the tests move the simulated strap along instead).
@@ -69,7 +79,10 @@ struct WearableShortcutEnvironment {
                 return keys.isRejected ? .rejected : .saved
             },
             strapLink: { HelioConnection.shared },
-            ringSession: { RingScanner.shared.session },
+            ringSaved: { RingScanner.hasSavedRingToRestore },
+            ringGeneration: { RingGeneration(rawValue: RingMetadataStore().load().generation) },
+            ringLink: { RingScanner.shared },
+            ringAlarm: { RingAlarmController.shared },
             applier: .shared,
             now: { Date() },
             pause: { try? await Task.sleep(for: .milliseconds(250)) },
@@ -133,30 +146,64 @@ struct WearableShortcuts {
         return result
     }
 
-    /// The ring's motor (Gen 3), only through a session that is already up: no reconnect logic for the
-    /// ring (decision 52a). One frame per buzz, nothing to stop afterwards; the action stays until the
-    /// last one is sent, so iOS can't suspend the app between them.
+    /// The ring's motor (Gen 3, decision 52g): only with the ring chosen AND saved, through the saved
+    /// ring's standing connect (`reconnectKnownPeripheral`) and the same bounded wait as the strap's,
+    /// for a ready, idle session whose generation is known. One frame per buzz, nothing to stop
+    /// afterwards; the action stays until the last one is sent, so iOS can't suspend the app between
+    /// them. `RingSession.vibrate` keeps its own guards (busy, charging, link): a refusal for "busy"
+    /// is waited out inside the same window, never forced.
     private func vibrateRing(times: Int, device: ActiveDeviceChoice) async -> WearableShortcutResult {
         let name = device.displayName
-        guard let session = env.ringSession(), session.ready else {
-            return .init(dialog: "Your \(name) isn't connected right now, so it didn't vibrate.", outcome: "ring not connected")
-        }
-        guard session.supportsVibration else {
+        guard env.ringSaved() else { return Self.noDevice(name, outcome: "no saved ring") }
+        let deadline = env.now().addingTimeInterval(Self.reachTimeout)
+        let session: any ShortcutRingSession
+        switch await reachRing(deadline: deadline) {
+        case .ready(let ready): session = ready
+        case .noMotor:
             var dialog = "Your \(name) doesn't have a motor OpenCircuit can drive."
             if case .someModels(let only) = device.onDemandVibration { dialog += " Only \(only) has one." }
             return .init(dialog: dialog, outcome: "ring has no motor")
+        case .unreachable(let why):
+            return .init(dialog: Self.sentence(why, name) + " It didn't vibrate.", outcome: "unreachable: \(why.label)")
         }
         for index in 0..<times {
             if index > 0 { await wait(Self.ringBuzzGap) }
             if env.isCancelled() { return Self.cancelled(name, ran: index, of: times) }
             // `vibrate` declines while the ring syncs, measures or charges (its one-writer discipline).
-            guard session.vibrate(.notification) else {
+            while !session.vibrate(.notification) {
+                if session.lastVibrationBlock == .ringBusy, env.now() < deadline, !env.isCancelled() {
+                    await env.pause()
+                    continue
+                }
                 let done = index > 0 ? " It vibrated \(index) of \(times) times first." : ""
                 return .init(dialog: Self.ringBlocked(session.lastVibrationBlock, name: name) + done,
                              outcome: "ring blocked: \(session.lastVibrationBlock?.rawValue ?? "unknown")")
             }
         }
         return Self.vibrated(name, times)
+    }
+
+    private enum RingReach {
+        case ready(any ShortcutRingSession)
+        case noMotor
+        case unreachable(Unreachable)
+    }
+
+    /// The saved ring's session once it is ready, idle and knows its generation, before `deadline`.
+    private func reachRing(deadline: Date) async -> RingReach {
+        let link = env.ringLink()
+        if link.shortcutSession?.ready != true, !link.connectForShortcut() { return .unreachable(.notConnecting) }
+        while true {
+            if let session = link.shortcutSession, session.ready, session.generationKnown {
+                guard session.supportsVibration else { return .noMotor }
+                if session.isIdleForShortcut { return .ready(session) }
+            }
+            if env.isCancelled() { return .unreachable(.cancelled) }
+            if env.now() >= deadline {
+                return .unreachable(link.shortcutSession?.ready == true ? .syncing : .timedOut)
+            }
+            await env.pause()
+        }
     }
 
     /// The strap: find start, then the stop the session's own tick sends at `buzzLength` (decision 19).
@@ -212,9 +259,11 @@ struct WearableShortcuts {
             result = .init(dialog: "That time isn't valid.", outcome: "invalid time")
         } else {
             let time = StrapWakeAlarmTime(hour: UInt8(hour), minute: UInt8(minute), days: days)
-            switch device {
-            case .helioStrap: result = await setOnStrap(time, name: name, noun: device.noun)
-            case .ringConn: result = Self.storesNoAlarms(name, alternative: nil)   // its descriptor says so above
+            switch (device.wakeAlarm, device) {
+            case (.storedOnDevice, .helioStrap): result = await setOnStrap(time, name: name, noun: device.noun)
+            case (.appDriven, .ringConn): result = setOnRing(time, name: name)
+            case (.notStored, _), (.storedOnDevice, .ringConn), (.appDriven, .helioStrap):
+                result = Self.storesNoAlarms(name, alternative: nil)   // not what today's descriptor says
             }
         }
         Self.log("set wake alarm", result)
@@ -227,14 +276,88 @@ struct WearableShortcuts {
         let name = device.displayName
         let result: WearableShortcutResult
         switch (device.wakeAlarm, device) {
-        case (.notStored, _), (.storedOnDevice, .ringConn):
+        case (.notStored, _), (.storedOnDevice, .ringConn), (.appDriven, .helioStrap):
             result = .init(dialog: "Your \(name) doesn't store alarms on itself, so there's nothing to clear.",
                            outcome: "device stores no alarms")
         case (.storedOnDevice, .helioStrap):
             result = await clearOnStrap(name: name)
+        case (.appDriven, .ringConn):
+            result = clearOnRing(name: name)
         }
         Self.log("clear wake alarm", result)
         return result
+    }
+
+    // MARK: The ring's wake-up alarm (52g)
+
+    /// Set and Clear decide from the cached generation (they need no connection): a known model
+    /// without a motor is refused, and so is an unknown one, until a connection names it.
+    private func ringAlarmRefusal(_ name: String) -> WearableShortcutResult? {
+        guard env.ringSaved() else { return Self.noDevice(name, outcome: "no saved ring") }
+        guard let generation = env.ringGeneration(), generation != .unknown else {
+            return .init(dialog: "OpenCircuit doesn't know your \(name)'s model yet. Open the app with the ring "
+                         + "connected once, then try again.", outcome: "ring model unknown")
+        }
+        guard RingVibration.isSupported(generation) else {
+            return .init(dialog: "Your \(name) (\(generation.rawValue)) doesn't have a motor OpenCircuit can drive, so "
+                         + "it can't have a wake-up alarm. Only the RingConn Gen 3 has one.", outcome: "ring has no motor")
+        }
+        return nil
+    }
+
+    /// OpenCircuit's own ring wake-up alarm (`RingAlarmController`), replaced: time, days and on; the
+    /// person's pattern, burst and backup-alert settings stay. Nothing is stored on the ring.
+    private func setOnRing(_ time: StrapWakeAlarmTime, name: String) -> WearableShortcutResult {
+        if let refusal = ringAlarmRefusal(name) { return refusal }
+        let controller = env.ringAlarm()
+        let hour = Int(time.hour), minute = Int(time.minute)
+        let once = time.days == .once
+        let current = controller.alarm
+        let when = Self.describe(time, now: env.now())
+        // Already exactly this: nothing is rewritten, because storing marks a due occurrence handled.
+        let sameSchedule = current.isEnabled && current.hour == hour && current.minute == minute
+        let alreadySet = once
+            ? sameSchedule && controller.oneShotOccurrence != nil
+                && controller.oneShotOccurrence == RingAlarmController.oneShotOccurrence(hour: hour, minute: minute,
+                                                                                          after: env.now(), calendar: .current)
+            : sameSchedule && controller.oneShotOccurrence == nil && current.weekdays == time.days.ringWeekdays
+        if alreadySet {
+            return .init(dialog: "Your \(name)'s wake-up alarm is already set for \(when). Nothing changed.", outcome: "already set")
+        }
+        let stored = controller.setFromShortcut(hour: hour, minute: minute, weekdays: time.days.ringWeekdays, once: once,
+                                                now: env.now())
+        env.ringShortcutStore.record = ShortcutRingAlarmRecord(hour: hour, minute: minute, weekdays: stored.alarm.weekdays,
+                                                               oneShot: stored.oneShot)
+        helioLog.notice("shortcuts: ring wake-up alarm \(when, privacy: .private) set")
+        let backup = stored.alarm.backupNotification
+            ? "The backup notification is on."
+            : "The backup notification is off, so nothing else goes off if the buzz is missed. Turn it on in "
+                + "OpenCircuit: Profile ▸ Device Info ▸ Vibration & alarm."
+        return .init(dialog: "Set OpenCircuit's wake-up alarm for your \(name): \(when). The app buzzes the ring; nothing "
+                     + "is stored on the ring, so the buzz can be up to 15 minutes late, or missed if the ring isn't "
+                     + "connected then. " + backup, outcome: "set")
+    }
+
+    /// Turns the ring's wake-up alarm off only while it still holds what Shortcuts last set (52c's rule).
+    private func clearOnRing(name: String) -> WearableShortcutResult {
+        if let refusal = ringAlarmRefusal(name) { return refusal }
+        let store = env.ringShortcutStore
+        guard let record = store.record else {
+            return .init(dialog: "There's no wake-up alarm from Shortcuts for your \(name). An alarm you set in the app "
+                         + "is never touched.", outcome: "nothing to clear")
+        }
+        let controller = env.ringAlarm()
+        let alarm = controller.alarm
+        store.record = nil
+        guard alarm.isEnabled else {
+            return .init(dialog: "The wake-up alarm Shortcuts set for your \(name) is already off.", outcome: "already off")
+        }
+        guard record.matches(alarm, oneShot: controller.oneShotOccurrence) else {
+            return .init(dialog: "The wake-up alarm for your \(name) was changed in OpenCircuit since Shortcuts set it, "
+                         + "so it was left as it is.", outcome: "changed in the app; left alone")
+        }
+        controller.turnOff()
+        return .init(dialog: "Turned off the wake-up alarm Shortcuts set for your \(name).", outcome: "cleared")
     }
 
     private func setOnStrap(_ time: StrapWakeAlarmTime, name: String, noun: String) async -> WearableShortcutResult {
@@ -370,6 +493,8 @@ struct WearableShortcuts {
         case keyRejected
         case unsupported
         case cancelled
+        /// The ring is up but a history drain (or a live read) held it for the whole window.
+        case syncing
 
         var label: String {
             switch self {
@@ -380,6 +505,7 @@ struct WearableShortcuts {
             case .keyRejected: return "key rejected"
             case .unsupported: return "unsupported"
             case .cancelled: return "cancelled"
+            case .syncing: return "syncing"
             }
         }
     }
@@ -439,6 +565,7 @@ struct WearableShortcuts {
         case .keyRejected: return "Your \(name) rejected its key. Replace it in OpenCircuit."
         case .unsupported: return "Your \(name) doesn't offer what OpenCircuit needs over Bluetooth."
         case .cancelled: return "iOS ended the action before your \(name) answered."
+        case .syncing: return "Your \(name) stayed busy syncing for \(Int(reachTimeout)) seconds; try again in a minute."
         }
     }
 
@@ -459,8 +586,10 @@ struct WearableShortcuts {
               outcome: "cancelled after \(ran) of \(times)")
     }
 
-    static func noStrap(_ name: String) -> WearableShortcutResult {
-        .init(dialog: "No \(name) is set up in OpenCircuit yet. Set it up in the app first.", outcome: "no saved strap")
+    static func noStrap(_ name: String) -> WearableShortcutResult { noDevice(name, outcome: "no saved strap") }
+
+    static func noDevice(_ name: String, outcome: String) -> WearableShortcutResult {
+        .init(dialog: "No \(name) is set up in OpenCircuit yet. Set it up in the app first.", outcome: outcome)
     }
 
     static func storesNoAlarms(_ name: String, alternative: String?) -> WearableShortcutResult {

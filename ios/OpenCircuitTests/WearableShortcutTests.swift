@@ -93,6 +93,13 @@ private final class WSKeyStore: HelioKeyStoring {
 }
 
 /// The strap's connection as the actions see it. `connectForShortcut` brings up `onConnect`'s session.
+/// Stands in for `RingScanner` where no ring may be reached.
+@MainActor
+final class UntouchedRingLink: ShortcutRingLink {
+    var shortcutSession: (any ShortcutRingSession)? { nil }
+    func connectForShortcut() -> Bool { false }
+}
+
 @MainActor
 private final class WSLink: ShortcutStrapLink {
     var session: HelioSession?
@@ -178,7 +185,11 @@ final class WearableShortcutTests: XCTestCase {
             savedStrapID: { [strapID] in savedStrap ? strapID : nil },
             strapKey: { .saved },
             strapLink: { link },
-            ringSession: { nil },
+            // Decision 1: with the strap chosen, no ring path runs and `RingScanner` isn't touched.
+            ringSaved: { XCTFail("the ring was read with the strap chosen"); return false },
+            ringGeneration: { XCTFail("the ring was read with the strap chosen"); return nil },
+            ringLink: { XCTFail("the ring was reached with the strap chosen"); return UntouchedRingLink() },
+            ringAlarm: { XCTFail("the ring alarm was read with the strap chosen"); return RingAlarmController(defaults: self.defaults) },
             applier: applier,
             now: { [unowned self] in self.clock },
             pause: { [unowned self] in
@@ -680,12 +691,16 @@ final class WearableShortcutTests: XCTestCase {
         let savedChoice = standard.object(forKey: ActiveDeviceChoiceStore.key)
         let savedStrap = standard.object(forKey: HelioConnection.savedPeripheralKey)
         let savedAlarm = standard.object(forKey: StrapWakeAlarmStore.key)
+        let ringAlarmBefore = standard.data(forKey: RingAlarmController.Key.alarm)
+        let ringRecordBefore = standard.data(forKey: ShortcutRingAlarmStore.key)
         defer {
             standard.set(savedChoice, forKey: ActiveDeviceChoiceStore.key)
             standard.set(savedStrap, forKey: HelioConnection.savedPeripheralKey)
             standard.set(savedAlarm, forKey: StrapWakeAlarmStore.key)
         }
         XCTAssertFalse(HelioConnection.shared.hasCentral, "the test host has the ring chosen")
+        XCTAssertFalse(RingScanner.hasSavedRingToRestore, "the test host has no saved ring")
+        let ringCentralBefore = RingScanner.shared.hasCentral
 
         for (choice, saved) in [(ActiveDeviceChoice.ringConn, true), (.ringConn, false), (.helioStrap, false)] {
             standard.set(choice.rawValue, forKey: ActiveDeviceChoiceStore.key)
@@ -708,16 +723,21 @@ final class WearableShortcutTests: XCTestCase {
             XCTAssertEqual(ActiveDeviceChoiceStore.persisted(), choice, "\(label): nothing switched")
             XCTAssertEqual(standard.data(forKey: DeviceOwnershipStore.key), logBefore, "\(label): ownership log untouched")
             XCTAssertNil(standard.data(forKey: StrapWakeAlarmStore.key), "\(label): nothing persisted for a strap")
+            XCTAssertEqual(RingScanner.shared.hasCentral, ringCentralBefore, "\(label): no ring central created (#142)")
+            XCTAssertFalse(RingScanner.shared.hasCentral, label)
+            XCTAssertEqual(standard.data(forKey: RingAlarmController.Key.alarm), ringAlarmBefore, "\(label): ring alarm untouched")
+            XCTAssertEqual(standard.data(forKey: ShortcutRingAlarmStore.key), ringRecordBefore, label)
             for result in [buzz, set, clear] {
                 XCTAssertFalse(result.dialog.contains("ring or strap"), result.dialog)
                 XCTAssertFalse(result.dialog.isEmpty, label)
             }
             switch choice {
             case .ringConn:
-                XCTAssertTrue(buzz.dialog.contains("RingConn ring"), buzz.dialog)
-                XCTAssertEqual(set.dialog, "Your RingConn ring doesn't store alarms on itself. A Gen 3 ring has "
-                               + "OpenCircuit's own wake-up alarm instead: Profile ▸ Device Info ▸ Vibration & alarm.")
-                XCTAssertEqual(clear.dialog, "Your RingConn ring doesn't store alarms on itself, so there's nothing to clear.")
+                // Decision 52g: the ring path runs only with a saved ring; the test host has none.
+                for result in [buzz, set, clear] {
+                    XCTAssertEqual(result.dialog, "No RingConn ring is set up in OpenCircuit yet. Set it up in the app first.")
+                    XCTAssertEqual(result.outcome, "no saved ring")
+                }
             case .helioStrap:
                 for result in [buzz, set, clear] {
                     XCTAssertEqual(result.dialog, "No Amazfit Helio Strap is set up in OpenCircuit yet. Set it up in the app first.")

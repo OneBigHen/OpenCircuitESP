@@ -24,6 +24,25 @@ import os
 /// relationships and no queries, and every SwiftData schema change on this project owes a
 /// migration rehearsal on real hardware (docs/RUNBOOK_SCHEMA_MIGRATION_REHEARSAL.md — a past build
 /// deleted every raw history row on upgrade). An alarm clock is not worth that risk surface.
+/// What the alarm needs from the ring to buzz it: `RingSession` in the app, a fake in the tests.
+@MainActor
+protocol RingAlarmBuzzer: AnyObject {
+    var supportsVibration: Bool { get }
+    var lastVibrationBlock: RingAlarmBlock? { get }
+    func vibrateBurst(_ pattern: VibrationPattern, count: Int, spacing: TimeInterval) -> Bool
+}
+
+extension RingSession: RingAlarmBuzzer {}
+
+/// `RingAlarmController.decide`: the Kit's decision, plus the one-shot's end (decision 52g).
+enum RingAlarmStep: Equatable {
+    case idle
+    case fire(scheduled: Date, lateBy: TimeInterval)
+    case missed(scheduled: Date)
+    /// A one-shot whose occurrence was already handled: turn it off, no buzz.
+    case expired
+}
+
 @MainActor
 final class RingAlarmController {
     static let shared = RingAlarmController()
@@ -42,6 +61,9 @@ final class RingAlarmController {
         /// Mirror app notifications onto the ring's motor. OFF by default — this is an opt-in
         /// haptic, and a ring that starts buzzing after an update is a support ticket.
         static let buzzAlerts = "vibration.buzzAlerts"
+        /// A Shortcuts "Once" alarm (#260, decision 52g): the one occurrence it fires for. Absent for
+        /// every repeating alarm, so an alarm set on the screen behaves exactly as before.
+        static let oneShot = "alarm.ring.oneShotOccurrence.v1"
     }
 
     /// Identifier for the OS-scheduled backup alert.
@@ -62,13 +84,95 @@ final class RingAlarmController {
             return decoded
         }
         set {
-            guard let data = try? JSONEncoder().encode(newValue) else { return }
-            defaults.set(data, forKey: Key.alarm)
-            // Changing the time must not leave the OLD occurrence looking unhandled (which would
-            // fire the moment the user finished editing) nor the new one looking handled.
-            defaults.set(Date().timeIntervalSince1970, forKey: Key.lastHandled)
-            refreshBackupNotification(for: newValue)
+            // A one-shot stays one only while its time, days and on/off are untouched: a pattern or
+            // backup-alert change keeps it, a schedule edit makes it an ordinary alarm.
+            let old = alarm
+            let keep = oneShotOccurrence.flatMap { occurrence in
+                (old.hour, old.minute, old.weekdays, old.isEnabled)
+                    == (newValue.hour, newValue.minute, newValue.weekdays, newValue.isEnabled) ? occurrence : nil
+            }
+            store(newValue, oneShot: keep)
         }
+    }
+
+    /// Stores the alarm and its one-shot occurrence (nil: repeating), then re-places the backup alert.
+    private func store(_ newValue: RingAlarm, oneShot: Date?) {
+        guard let data = try? JSONEncoder().encode(newValue) else { return }
+        defaults.set(data, forKey: Key.alarm)
+        if let oneShot {
+            defaults.set(oneShot.timeIntervalSince1970, forKey: Key.oneShot)
+        } else {
+            defaults.removeObject(forKey: Key.oneShot)
+        }
+        // Changing the time must not leave the OLD occurrence looking unhandled (which would
+        // fire the moment the user finished editing) nor the new one looking handled.
+        defaults.set(Date().timeIntervalSince1970, forKey: Key.lastHandled)
+        refreshBackupNotification(for: newValue)
+    }
+
+    /// The one occurrence a Shortcuts "Once" alarm fires for; nil for a repeating alarm.
+    var oneShotOccurrence: Date? {
+        let t = defaults.double(forKey: Key.oneShot)
+        return t > 0 ? Date(timeIntervalSince1970: t) : nil
+    }
+
+    /// Shortcuts' Set Wake Alarm (#260, decision 52g): the time, days and on, keeping the person's
+    /// pattern, burst and backup-alert settings. `once`: fire for the first occurrence at or after
+    /// `now` only (its minute included), then turn off; the days are that occurrence's weekday.
+    /// Returns the alarm as stored and its one-shot occurrence.
+    @discardableResult
+    func setFromShortcut(hour: Int, minute: Int, weekdays: Set<Int>, once: Bool, now: Date = Date(),
+                         calendar: Calendar = .current) -> (alarm: RingAlarm, oneShot: Date?) {
+        var next = alarm
+        next.isEnabled = true
+        next.hour = hour
+        next.minute = minute
+        var oneShot: Date?
+        if once, let occurrence = Self.oneShotOccurrence(hour: hour, minute: minute, after: now, calendar: calendar) {
+            oneShot = occurrence
+            next.weekdays = [calendar.component(.weekday, from: occurrence)]
+        } else {
+            next.weekdays = weekdays
+        }
+        store(next, oneShot: oneShot)
+        return (next, oneShot)
+    }
+
+    /// Turns the alarm off (Shortcuts' Clear, or a one-shot that is done), keeping everything else.
+    func turnOff() {
+        var off = alarm
+        off.isEnabled = false
+        store(off, oneShot: nil)
+    }
+
+    /// The first `hour:minute` at or after `now`'s minute (decision 52g: "the first at or after the
+    /// moment it was set").
+    static func oneShotOccurrence(hour: Int, minute: Int, after now: Date, calendar: Calendar) -> Date? {
+        guard let thisMinute = calendar.dateInterval(of: .minute, for: now)?.start,
+              let today = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: now) else { return nil }
+        if today >= thisMinute { return today }
+        guard let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) else { return nil }
+        return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: tomorrow)
+    }
+
+    /// The Kit's `RingAlarmSchedule.decide` for a repeating alarm, unchanged. A one-shot fires for its
+    /// one occurrence only, within the same grace, and never for a later one (decision 52g, after 52e):
+    /// past the grace it is missed, and once handled it is expired. Either way it then turns off.
+    static func decide(alarm: RingAlarm, oneShot: Date?, now: Date, lastHandledAt: Date?,
+                       grace: TimeInterval = RingAlarmSchedule.defaultGrace,
+                       calendar: Calendar = .current) -> RingAlarmStep {
+        guard let oneShot else {
+            switch RingAlarmSchedule.decide(alarm: alarm, now: now, lastHandledAt: lastHandledAt, grace: grace,
+                                            calendar: calendar) {
+            case .idle: return .idle
+            case .fire(let scheduled, let lateBy): return .fire(scheduled: scheduled, lateBy: lateBy)
+            case .missed(let scheduled): return .missed(scheduled: scheduled)
+            }
+        }
+        guard alarm.isEnabled, now >= oneShot else { return .idle }
+        if let lastHandledAt, lastHandledAt >= oneShot { return .expired }
+        let lateBy = now.timeIntervalSince(oneShot)
+        return lateBy <= grace ? .fire(scheduled: oneShot, lateBy: lateBy) : .missed(scheduled: oneShot)
     }
 
     private var lastHandledOccurrence: Date? {
@@ -99,6 +203,7 @@ final class RingAlarmController {
     func nextFireDate(now: Date = Date()) -> Date? {
         let a = alarm
         guard a.isEnabled else { return nil }
+        if let oneShot = oneShotOccurrence { return oneShot > now ? oneShot : nil }
         return RingAlarmSchedule.nextOccurrence(after: now, alarm: a)
     }
 
@@ -106,17 +211,23 @@ final class RingAlarmController {
 
     /// Decide and act. Cheap, idempotent, and safe to call from anywhere that has runtime — that
     /// is the whole strategy: we can't pick the moment, so we take every moment offered.
-    func evaluate(session: RingSession?, now: Date = Date()) {
+    func evaluate(session: (any RingAlarmBuzzer)?, now: Date = Date()) {
         let a = alarm
-        switch RingAlarmSchedule.decide(alarm: a, now: now, lastHandledAt: lastHandledOccurrence) {
+        let oneShot = oneShotOccurrence
+        switch Self.decide(alarm: a, oneShot: oneShot, now: now, lastHandledAt: lastHandledOccurrence) {
         case .idle:
             return
+
+        case .expired:
+            turnOff()
+            log.notice("one-shot alarm already handled; turned off")
 
         case .missed(let scheduled):
             markHandled(scheduled)
             setOutcome("Missed the \(Self.clock(scheduled)) alarm — the app got no chance to run "
                 + "near that time, so the ring was never told to buzz.")
             log.notice("alarm MISSED for \(scheduled, privacy: .public) — no runtime inside the grace window")
+            if oneShot != nil { turnOff() }   // a one-shot never fires for a later occurrence (52g)
 
         case .fire(let scheduled, let lateBy):
             guard let session, session.supportsVibration else {
@@ -136,13 +247,17 @@ final class RingAlarmController {
             markHandled(scheduled)
             setOutcome(Self.firedMessage(scheduled: scheduled, lateBy: lateBy, bursts: a.clampedBurstCount))
             log.notice("alarm FIRED for \(scheduled, privacy: .public), \(Int(lateBy), privacy: .public)s late")
+            if oneShot != nil { turnOff() }   // its one occurrence is done (52g)
         }
     }
 
     /// The upcoming alarm if we are inside its warm-up window — the cue for `RingSession` to start
     /// holding the link open. nil at every other moment, including when the alarm is off.
     func warmUpTarget(now: Date = Date()) -> Date? {
-        RingAlarmSchedule.warmUpTarget(alarm: alarm, now: now)
+        let target = RingAlarmSchedule.warmUpTarget(alarm: alarm, now: now)
+        // A one-shot warms up for its own occurrence only.
+        if let oneShot = oneShotOccurrence, target != oneShot { return nil }
+        return target
     }
 
     /// Whether this occurrence has already been fired or written off, so the warm-up can stop
@@ -198,6 +313,10 @@ final class RingAlarmController {
         center.removePendingNotificationRequests(
             withIdentifiers: [Self.notificationID] + (1...7).map { "\(Self.notificationID).\($0)" })
         guard a.isEnabled, a.backupNotification else { return }
+        // A one-shot's backup alert is one non-repeating notification at its one occurrence (52g).
+        let oneShot = alarm == nil || alarm == self.alarm ? oneShotOccurrence : nil
+
+        let triggers = Self.backupTriggers(alarm: a, oneShot: oneShot)
 
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else { return }
@@ -205,30 +324,28 @@ final class RingAlarmController {
             content.title = "Alarm"
             content.body = "Time to wake up."
             content.sound = .default
-            // Repeating calendar trigger, one per weekday the alarm runs on. An empty `weekdays`
-            // set means every day, which is a single hour/minute trigger with no weekday component.
-            var requests: [UNNotificationRequest] = []
-            if a.weekdays.isEmpty {
-                var comps = DateComponents()
-                comps.hour = a.hour
-                comps.minute = a.minute
-                requests.append(UNNotificationRequest(
-                    identifier: Self.notificationID,
+            for trigger in triggers {
+                center.add(UNNotificationRequest(
+                    identifier: trigger.identifier,
                     content: content,
-                    trigger: UNCalendarNotificationTrigger(dateMatching: comps, repeats: true)))
-            } else {
-                for weekday in a.weekdays.sorted() {
-                    var comps = DateComponents()
-                    comps.weekday = weekday
-                    comps.hour = a.hour
-                    comps.minute = a.minute
-                    requests.append(UNNotificationRequest(
-                        identifier: "\(Self.notificationID).\(weekday)",
-                        content: content,
-                        trigger: UNCalendarNotificationTrigger(dateMatching: comps, repeats: true)))
-                }
+                    trigger: UNCalendarNotificationTrigger(dateMatching: trigger.components, repeats: trigger.repeats)))
             }
-            for request in requests { center.add(request) }
+        }
+    }
+
+    /// The backup alert's calendar triggers. A one-shot (decision 52g): ONE non-repeating trigger at its
+    /// one occurrence. Otherwise repeating, one per weekday the alarm runs on; an empty `weekdays` set
+    /// means every day, which is a single hour/minute trigger with no weekday component.
+    static func backupTriggers(alarm a: RingAlarm, oneShot: Date?,
+                               calendar: Calendar = .current) -> [(identifier: String, components: DateComponents, repeats: Bool)] {
+        if let oneShot {
+            return [(notificationID, calendar.dateComponents([.year, .month, .day, .hour, .minute], from: oneShot), false)]
+        }
+        if a.weekdays.isEmpty {
+            return [(notificationID, DateComponents(hour: a.hour, minute: a.minute), true)]
+        }
+        return a.weekdays.sorted().map { weekday in
+            ("\(notificationID).\(weekday)", DateComponents(hour: a.hour, minute: a.minute, weekday: weekday), true)
         }
     }
 

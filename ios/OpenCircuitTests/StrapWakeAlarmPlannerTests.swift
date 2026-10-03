@@ -320,8 +320,8 @@ final class StrapWakeAlarmPlannerTests: XCTestCase {
         for device in ActiveDeviceChoice.allCases {
             switch device {
             case .ringConn:
-                XCTAssertEqual(device.wakeAlarm, .notStored(alternative: "A Gen 3 ring has OpenCircuit's own wake-up "
-                    + "alarm instead: Profile ▸ Device Info ▸ Vibration & alarm."))
+                // Decision 52g: the app's own alarm, buzzed at the time on a Gen 3; nothing on the ring.
+                XCTAssertEqual(device.wakeAlarm, .appDriven(models: "the RingConn Gen 3"))
                 XCTAssertFalse(device.wakeAlarm.isStoredOnDevice)
             case .helioStrap:
                 XCTAssertEqual(device.wakeAlarm, .storedOnDevice)

@@ -36,14 +36,12 @@ enum ActiveDeviceChoice: String, CaseIterable, Sendable {
         }
     }
 
-    /// Whether the device stores alarms and fires them by itself: Shortcuts' Set and Clear Wake Alarm
-    /// (decision 52b, 52c). Exhaustive (decision 51e). The strap keeps up to 10 alarms (§12); the ring
+    /// How the device's wake alarm works: Shortcuts' Set and Clear Wake Alarm (decision 52b, 52c, 52g).
+    /// Exhaustive (decision 51e). The strap keeps up to 10 alarms and fires them itself (§12); the ring
     /// stores none, and its wake-up alarm is the app's own buzz on a Gen 3 (`RingAlarmController`).
     var wakeAlarm: DeviceWakeAlarm {
         switch self {
-        case .ringConn:
-            return .notStored(alternative: "A Gen 3 ring has OpenCircuit's own wake-up alarm instead: "
-                + "Profile ▸ Device Info ▸ Vibration & alarm.")
+        case .ringConn: return .appDriven(models: "the RingConn Gen 3")
         case .helioStrap: return .storedOnDevice
         }
     }
@@ -65,6 +63,9 @@ enum DeviceWakeAlarm: Equatable {
     case storedOnDevice
     /// It doesn't. `alternative` says where OpenCircuit offers a wake-up alarm for it instead, if anywhere.
     case notStored(alternative: String?)
+    /// Nothing is stored on the device: OpenCircuit buzzes it at the time, best-effort, on the models
+    /// named (`RingAlarmController`, decision 52g).
+    case appDriven(models: String)
 
     var isStoredOnDevice: Bool { self == .storedOnDevice }
 }

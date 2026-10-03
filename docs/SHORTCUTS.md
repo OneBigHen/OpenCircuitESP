@@ -6,9 +6,9 @@ reacts to the event, and runs one of OpenCircuit's actions.
 
 | Action | What it does | Devices |
 |---|---|---|
-| **Vibrate Wearable** (Times 1–5, default 1) | Buzzes the wearable in use that many times, with a short gap. The strap's buzz is a find-device start and its stop (§13.2; decision 19, 2 s). The action returns only after the stop (`06`) was sent, plus 0.5 s for it to leave the radio. | Strap; a RingConn Gen 3 ring whose link is already up (no ring reconnect). |
-| **Set Wake Alarm on Wearable** (Time, Repeat: once by default) | Stores ONE alarm on the strap itself, which then fires it on its own (§12: 60 s of vibration, tap to stop, 🟡 Amazfit's own documentation, not yet observed by us), with no phone needed at wake time. Only the time's hour and minute are used. | Strap only. The ring stores no alarms: the action says so and points to the ring's own wake-up alarm (Profile ▸ Device Info ▸ Vibration & alarm). |
-| **Clear Wake Alarm on Wearable** | Deletes that one alarm, only while it is still as OpenCircuit wrote it. | Strap only. |
+| **Vibrate Wearable** (Times 1–5, default 1) | Buzzes the wearable in use that many times, with a short gap. The strap's buzz is a find-device start and its stop (§13.2; decision 19, 2 s). The action returns only after the stop (`06`) was sent, plus 0.5 s for it to leave the radio. | Strap; a RingConn Gen 3 (decision 52g: the saved ring's standing connect, then up to 15 s for a ready, idle session). |
+| **Set Wake Alarm on Wearable** (Time, Repeat: once by default) | Stores ONE alarm on the strap itself, which then fires it on its own (§12: 60 s of vibration, tap to stop, 🟡 Amazfit's own documentation, not yet observed by us), with no phone needed at wake time. Only the time's hour and minute are used. | Strap: stored on the strap. RingConn Gen 3: sets OpenCircuit's own ring wake-up alarm (Profile ▸ Device Info ▸ Vibration & alarm), which the app buzzes at the time; nothing is stored on the ring (see "The ring" below). |
+| **Clear Wake Alarm on Wearable** | Strap: deletes that one alarm, only while it is still as OpenCircuit wrote it. Ring: turns the app's ring alarm off, only while it still holds what Shortcuts set. | Strap; RingConn Gen 3. |
 
 The actions run in the background (`openAppWhenRun = false`) and on a locked phone
 (`authenticationPolicy = .alwaysAllowed`): they disclose no health data. Every name and dialog comes
@@ -64,6 +64,42 @@ your wake time, Repeat: Once ▸ Done.
   still out queues behind it and removes it once written. Writes made for Shortcuts leave the Alarms
   screen's status line alone. The Alarms screen marks the slot "Set by Shortcuts".
 - **Logs**: `helio` log lines prefixed `shortcuts:`; the outcome is public, any time of day private.
+
+## The ring (RingConn Gen 3, decision 52g)
+
+**Untested on hardware**: no Gen 3 was available while this was built; everything below runs against
+fakes in `RingShortcutTests`.
+
+- **Gen 3 only.** Vibrate decides from the connected session (`supportsVibration`); Set and Clear decide
+  from the cached model (`RingMetadataStore`) and need no connection. A Gen 2 or Gen 2 Air is refused
+  ("doesn't have a motor OpenCircuit can drive"); an unknown model asks to open the app with the ring
+  connected once.
+- **Vibrate** runs only with the ring chosen AND a saved ring: `RingScanner.reconnectKnownPeripheral()`
+  (no central without a saved ring, #142), then up to 15 s for a session that is ready, knows its model
+  and is idle (no drain, live read, workout or calibration). `RingSession.vibrate` keeps its own guards;
+  a "busy" refusal is waited out inside the same 15 s, never forced. Buzzes are 2 s apart.
+- **A ring that has just (re)connected often drains first** (read from the code, not a capture): with the
+  app in the background (as it is when a Shortcut runs), the first descriptor frame (`0x10`/`0x87`, the
+  answer to the keepalive's first `07` fetch, sent ~0.25 s after it starts) goes through
+  `maybeDrainOnBackgroundWake` → `evaluatePeriodicDrain`, which starts a history drain whenever the last
+  drain is older than 1 h by day (3 h in battery saver), outside the sleep window. With the app in front, `ContentView`'s
+  activation sync can also start one. Overnight (the sleep window) no automatic drain runs, so a
+  night-time buzz is not held up this way. A drain's length on a Gen 3 isn't measured here; a drain longer
+  than the 15 s window makes Vibrate answer "stayed busy syncing; try again in a minute" without buzzing.
+- **Set Wake Alarm** replaces OpenCircuit's one ring alarm (`RingAlarmController`): time, days and on,
+  keeping the person's pattern, burst and backup-alert settings. Repeat maps onto its weekdays (Every Day
+  = all, Weekdays = Mon–Fri, Weekends = Sat and Sun). **Once** is a one-shot: it fires only for the first
+  occurrence at or after the moment it was set, inside the same 15-minute grace, then turns itself off
+  (its backup notification is a single non-repeating one at that occurrence). It never fires for a later
+  occurrence. A one-shot stays one while only the pattern or backup alert is edited on the alarm screen;
+  a time, day or on/off edit makes it the person's ordinary alarm.
+- **Clear** turns the ring alarm off only while it still holds what Shortcuts last set
+  (`shortcuts.ringAlarm.v1`); an alarm changed in the app since is left alone.
+- The ring alarm screen shows one line: "Once" for a one-shot, "Set by Shortcuts" while it still matches.
+- **The honest limits** (`docs/RELEASE_NOTES_b51.md`): the ring has no alarm of its own (🔴 none known), so
+  OpenCircuit buzzes it at the first moment it hears from the ring at or after the time. That can be up to
+  15 minutes late, and is skipped if the ring is charging, disconnected, or the app was swiped closed. The
+  backup notification is the guaranteed part; the Set dialog says whether it is on.
 
 ## Limits
 
