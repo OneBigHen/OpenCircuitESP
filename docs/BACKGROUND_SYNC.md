@@ -230,9 +230,12 @@ record may be late (`ZEPP_PROTOCOL.md` §21.4). The pending date is persisted (s
 seconds (review-225e SF-3); it is cleared once it passes or a flush finds no night waiting. A
 foreground flush also counts the newest stored strap night that hasn't reached Apple Health while it
 is inside its margin, even when its sync no longer carries it (decision 57b, #262). Without that, an
-app opened just after a background wake stored the night cleared that wake's refresh. Once settled,
-such a night waits for 57a's backstop: every strap flush offers it more than 3 h after its end
-(`LocalStore.strapNightsAwaitingHealth`). The ring's requests are unchanged.
+app opened just after a background wake stored the night cleared that wake's refresh. Every strap
+flush also offers the newest stored night from the store (`LocalStore.strapNightsAwaitingHealth`,
+decision 57). A night that ended near the sleep schedule's wake time (no earlier than an hour before
+it, and before noon) goes once its margin has passed, so that refresh writes it. One that ended
+earlier, such as a mid-night awakening that may still be stitched to a later sleep (28f), waits until
+3 h after its end. The ring's requests are unchanged.
 
 **Opening the app syncs an idle strap session** (review-225e SF-1): a link that came back in the
 background (a teardown's re-arm, a reconnect or restoration inside the wake gates, a connect that
