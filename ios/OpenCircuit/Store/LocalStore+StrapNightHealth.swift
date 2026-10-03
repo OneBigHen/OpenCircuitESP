@@ -27,7 +27,7 @@ extension LocalStore {
 
     /// The sleep schedule's wake time, in minutes after local midnight: the value
     /// `BackgroundRefreshScheduler.defaultWindow` reads (06:30 until the person sets one).
-    static func scheduledWakeMinutes(_ defaults: UserDefaults = .standard) -> Int {
+    nonisolated static func scheduledWakeMinutes(_ defaults: UserDefaults = .standard) -> Int {
         SleepScheduleDefaults.register(defaults)
         return defaults.integer(forKey: SleepScheduleDefaults.wakeMinutes)
     }
@@ -37,7 +37,7 @@ extension LocalStore {
     /// `SleepNightKey.wakeWindowEndHour`), in `calendar`'s zone. The noon bound keeps a time of day
     /// read in another zone than the night's (after travel; stored rows keep no zone) from passing as
     /// a morning. Wake times inside the slack of midnight make every morning end pass.
-    static func strapNightEndsNearScheduledWake(_ end: Date, wakeMinutes: Int, calendar: Calendar = .current) -> Bool {
+    nonisolated static func strapNightEndsNearScheduledWake(_ end: Date, wakeMinutes: Int, calendar: Calendar = .current) -> Bool {
         let clock = calendar.dateComponents([.hour, .minute], from: end)
         let hour = clock.hour ?? 0
         guard hour < SleepNightKey.wakeWindowEndHour else { return false }
