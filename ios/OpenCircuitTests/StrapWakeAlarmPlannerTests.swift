@@ -170,6 +170,20 @@ final class StrapWakeAlarmPlannerTests: XCTestCase {
                        .init(action: .none(.expired), forgetRecord: false), "the managed slot is untouched too")
     }
 
+    /// Review-261b U-A (a): a disabled once-alarm at the record's slot and time is the fired one,
+    /// whatever repeat byte the strap wrote into it.
+    func testAFiredOnceAlarmIsRecognisedWhateverItsRepeatByte() {
+        let written = alarm(1, 6, 30)
+        let fired = alarm(1, 6, 30, .monday, on: false)
+        XCTAssertEqual(plan([fired], record(written), set(6, 30)),
+                       .init(action: .replace(alarm(1, 6, 30)), forgetRecord: false))
+        XCTAssertEqual(plan([fired], record(written), .clear), .init(action: .delete(slot: 1), forgetRecord: false))
+        XCTAssertEqual(plan([alarm(1, 6, 45, .monday, on: false)], record(written), set(6, 30)).forgetRecord, true,
+                       "another time is an edit")
+        XCTAssertEqual(plan([alarm(1, 6, 30, .monday, on: true)], record(written), set(6, 30)).forgetRecord, true,
+                       "an enabled one with other days is an edit")
+    }
+
     func testARepeatingRequestAppliedLateIsWritten() {
         for days in [ZeppAlarmDays.everyDay, .weekdays, .weekend] {
             XCTAssertEqual(plan([], nil, set(6, 30, days), madeAt: evening, now: hoursAfterEvening(72)).action,

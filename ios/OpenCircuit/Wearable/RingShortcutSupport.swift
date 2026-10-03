@@ -32,12 +32,17 @@ extension RingSession: ShortcutRingSession {
 @MainActor
 protocol ShortcutRingLink: AnyObject {
     var shortcutSession: (any ShortcutRingSession)? { get }
-    /// Arm a connect to the saved ring; false when there is none (no central is created then, #142).
+    /// A ring is the active saved one (`RingScanner.persistedActiveRingID`), so a connect that isn't
+    /// issued yet (the central not powered on) is still armed (review-261b S-C).
+    var hasActiveRing: Bool { get }
+    /// Arm a connect to the saved ring; false when none was issued now (no central is created without
+    /// a saved ring, #142).
     func connectForShortcut() -> Bool
 }
 
 extension RingScanner: ShortcutRingLink {
     var shortcutSession: (any ShortcutRingSession)? { session }
+    var hasActiveRing: Bool { Self.persistedActiveRingID != nil }
     func connectForShortcut() -> Bool { reconnectKnownPeripheral() }
 }
 

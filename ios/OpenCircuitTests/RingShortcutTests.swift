@@ -38,13 +38,16 @@ private final class FakeRing: ShortcutRingSession, RingAlarmBuzzer {
 private final class FakeRingLink: ShortcutRingLink {
     var ring: FakeRing?
     var shortcutSession: (any ShortcutRingSession)? { ring }
+    var hasActiveRing = true
+    /// What `reconnectKnownPeripheral()` returns: false while a fresh central isn't powered on yet.
+    var connectIssued = true
     private(set) var connects = 0
     var onConnect: (() -> Void)?
 
     func connectForShortcut() -> Bool {
         connects += 1
         onConnect?()
-        return true
+        return connectIssued
     }
 }
 
@@ -207,6 +210,38 @@ final class RingShortcutTests: XCTestCase {
         let result = await actions(link, cancelled: { cancelled }).vibrate(times: 3)
         XCTAssertEqual(ring.buzzes, 1)
         XCTAssertEqual(result.outcome, "cancelled after 1 of 3")
+    }
+
+    /// Review-261b S-C: a cold launch's ring central isn't powered on yet, so `reconnectKnownPeripheral()`
+    /// returns false while the connect is armed for power-on. With an active ring the action waits.
+    func testAConnectNotIssuedYetIsWaitedOutWhenARingIsActive() async {
+        let link = FakeRingLink()
+        link.connectIssued = false
+        let ring = FakeRing()
+        ring.ready = false
+        var pauses = 0
+        onPause = { pauses += 1; if pauses == 6 { link.ring = ring; ring.ready = true } }
+        let result = await actions(link).vibrate(times: 1)
+        XCTAssertEqual(result.outcome, "vibrated 1")
+        XCTAssertEqual(ring.buzzes, 1)
+
+        let none = FakeRingLink()
+        none.connectIssued = false
+        none.hasActiveRing = false
+        let refused = await actions(none).vibrate(times: 1)
+        XCTAssertEqual(refused.outcome, "unreachable: no connection", "no active ring: nothing to wait for")
+    }
+
+    /// Review-261b N-B (R8): a ready ring whose model is never named says so, not "busy syncing".
+    func testARingThatNeverNamesItsModelSaysSo() async {
+        let link = FakeRingLink()
+        let ring = FakeRing()
+        ring.generationKnown = false
+        link.ring = ring
+        let result = await actions(link).vibrate(times: 1)
+        XCTAssertEqual(result.outcome, "unreachable: model unknown")
+        XCTAssertEqual(result.dialog, "Your RingConn ring hasn't said which model it is yet. Open OpenCircuit with the ring connected once, then try again. It didn't vibrate.")
+        XCTAssertEqual(ring.buzzes, 0)
     }
 
     func testWithNoSavedRingNothingIsReached() async {
@@ -373,12 +408,26 @@ final class RingShortcutTests: XCTestCase {
         XCTAssertEqual(ring.bursts, [])
     }
 
-    func testAOneShotSetAtItsOwnMinuteIsDueNow() {
-        let occurrence = RingAlarmController.oneShotOccurrence(hour: 7, minute: 0, after: at(1, 7, 0).addingTimeInterval(20),
-                                                               calendar: calendar)
-        XCTAssertEqual(occurrence, at(1, 7, 0), "at or after the moment it was set, its minute included")
-        XCTAssertEqual(RingAlarmController.oneShotOccurrence(hour: 7, minute: 0, after: at(1, 7, 1), calendar: calendar),
-                       at(2, 7, 0))
+    /// Review-261b S-B: a Once set inside its own minute goes to the next day, as the strap's does
+    /// (`nextDate(after:)`), so both devices agree; set before the minute, it is today's.
+    func testAOnceSetInsideItsOwnMinuteGoesToTheNextDayLikeTheStrap() {
+        let madeAt = at(1, 7, 0).addingTimeInterval(20)
+        let ring = RingAlarmController.oneShotOccurrence(hour: 7, minute: 0, after: madeAt, calendar: calendar)
+        let strap = calendar.nextDate(after: madeAt, matching: DateComponents(hour: 7, minute: 0), matchingPolicy: .nextTime)
+        XCTAssertEqual(ring, at(2, 7, 0))
+        XCTAssertEqual(ring, strap, "the ring and the strap agree")
+        XCTAssertEqual(RingAlarmController.oneShotOccurrence(hour: 7, minute: 0, after: at(1, 6, 59), calendar: calendar),
+                       at(1, 7, 0))
+
+        // Through the controller: no buzz this minute, then it fires the next morning.
+        controller.setFromShortcut(hour: 7, minute: 0, weekdays: [], once: true, now: madeAt)
+        let buzzer = FakeRing()
+        controller.evaluate(session: buzzer, now: at(1, 7, 1))
+        XCTAssertEqual(buzzer.bursts, [])
+        XCTAssertTrue(controller.alarm.isEnabled, "still waiting for tomorrow")
+        controller.evaluate(session: buzzer, now: at(2, 7, 1))
+        XCTAssertEqual(buzzer.bursts, [5])
+        XCTAssertFalse(controller.alarm.isEnabled)
     }
 
     func testAOneShotWarmsUpOnlyForItsOwnOccurrence() {
