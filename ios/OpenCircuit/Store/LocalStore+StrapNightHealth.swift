@@ -6,7 +6,8 @@ import SwiftData
 // flush carried it. A sync hands a night to its flush only through `HelioSyncResult.nights`, which
 // covers that one sync (and is gone after a relaunch), so a night whose every re-delivery after its
 // first store was kept as thinner, or that any other path left behind, was never offered again.
-// Decision 57 (#262): the newest stored night too, once it has clearly stopped growing.
+// Decision 57 (#262): the newest stored night too: once settled when it ended near the scheduled wake,
+// else 3 hours after its end.
 
 extension LocalStore {
 
@@ -14,10 +15,34 @@ extension LocalStore {
     static let strapNightHealthLookback: TimeInterval = 7 * 86_400
 
     /// Decision 57a (#262): how long after its end the NEWEST stored night must have stayed the newest
-    /// before the backstop may claim it. Juan's choice (1 h / 3 h / 6 h). Well past the 20-minute
-    /// settle margin and any plausible same-day doze; a night's first Health write is permanent (28f),
-    /// so don't shorten it without asking Juan.
+    /// before the backstop may claim it, when its end isn't near the sleep schedule's wake time (see
+    /// `strapNewestNightWakeSlack`). Juan's choice (1 h / 3 h / 6 h). A night's first Health write is
+    /// permanent (28f), so don't shorten it without asking Juan.
     static let strapNewestNightHealthBuffer: TimeInterval = 3 * 3600
+
+    /// Decision 57 option B (#262, Juan): a newest night whose end is at least this close before the
+    /// sleep schedule's wake time (or after it) reads as the morning's final wake, and is claimed as
+    /// soon as its settle margin has passed.
+    static let strapNewestNightWakeSlack: TimeInterval = 60 * 60
+
+    /// The sleep schedule's wake time, in minutes after local midnight: the value
+    /// `BackgroundRefreshScheduler.defaultWindow` reads (06:30 until the person sets one).
+    static func scheduledWakeMinutes(_ defaults: UserDefaults = .standard) -> Int {
+        SleepScheduleDefaults.register(defaults)
+        return defaults.integer(forKey: SleepScheduleDefaults.wakeMinutes)
+    }
+
+    /// Whether a night that ended at `end` ended near the morning's final wake: at or after the
+    /// schedule's wake time minus `strapNewestNightWakeSlack`, and before noon (28d's wake window,
+    /// `SleepNightKey.wakeWindowEndHour`), in `calendar`'s zone. The noon bound keeps a time of day
+    /// read in another zone than the night's (after travel; stored rows keep no zone) from passing as
+    /// a morning. Wake times inside the slack of midnight make every morning end pass.
+    static func strapNightEndsNearScheduledWake(_ end: Date, wakeMinutes: Int, calendar: Calendar = .current) -> Bool {
+        let clock = calendar.dateComponents([.hour, .minute], from: end)
+        let hour = clock.hour ?? 0
+        guard hour < SleepNightKey.wakeWindowEndHour else { return false }
+        return hour * 60 + (clock.minute ?? 0) >= wakeMinutes - Int(strapNewestNightWakeSlack / 60)
+    }
 
     /// The stored hypnograms of the strap's nights that never reached Apple Health, for
     /// `HelioConnection.flushStrap` to offer next to its sync's own nights (decision 50b). A night
@@ -27,22 +52,26 @@ extension LocalStore {
     /// - it has a stored hypnogram;
     /// - it has no Health mirror record for its key;
     /// - it began within `strapNightHealthLookback` of `now`;
-    /// - a LATER stored night (any device) exists, or, for the newest night itself (decision 57),
-    ///   more than `strapNewestNightHealthBuffer` has passed since its end.
+    /// - a LATER stored night (any device) exists, or, for the newest night itself (decision 57), one
+    ///   of two paths holds. Its end is the later of the row's `inBedEnd` and its hypnogram's last
+    ///   segment.
+    ///   - Its end is near the morning's final wake (`strapNightEndsNearScheduledWake`, from the sleep
+    ///     schedule's wake time, `wakeMinutes`), and its 20-minute settle margin has passed
+    ///     (`SleepHealthGate.isSettled`, the margin every other write path uses).
+    ///   - Otherwise, more than `strapNewestNightHealthBuffer` (3 h) has passed since its end.
     ///
-    /// The last rule is the guard. The newest row can be a stale partial copy of a night still in
-    /// progress (a sync whose sleep round ran out of time), and mirrored, 28f's "the written night
-    /// stands" would keep the full night out for good. A night with a later night after it can't
-    /// still be growing. Without one, only real time can say so: 50a offers the newest night only
-    /// while the strap keeps re-delivering it, and once it stops, nothing else would until the next
-    /// night is stored, up to a day later (#262). The end it is judged on is the later of the row's
-    /// `inBedEnd` and its hypnogram's last segment.
+    /// Why two paths: the strap delivers a sleep only once it has ended, and 28f stitches sessions up
+    /// to an hour apart (a longer later sleep replaces the row). After a mid-night awakening (stored
+    /// 23:00–02:00, back to bed at 02:30), the margin alone would let the 02:20 margin refresh write
+    /// the first part, and "the written night stands" would keep the whole night out for good. A
+    /// night that ends near the scheduled wake is the common morning case, and goes as soon as it has
+    /// settled; one that ends far earlier waits the 3 hours.
     ///
-    /// `now` must be the real wall clock at the check (`flushStrap`'s default), never a sync's start:
-    /// the buffer is the only thing standing between a night in progress and a permanent write.
+    /// `now` must be the real wall clock at the check (`flushStrap`'s default), never a sync's start.
     ///
     /// Empty with an empty ownership log (a ring-only install): no query runs.
-    func strapNightsAwaitingHealth(timeline: SyncDeviceID, now: Date) -> [[SleepSegment]] {
+    func strapNightsAwaitingHealth(timeline: SyncDeviceID, now: Date,
+                                   wakeMinutes: Int = LocalStore.scheduledWakeMinutes()) -> [[SleepSegment]] {
         let log = Self.ownershipLog()
         guard !log.isEmpty, let newest = try? latestSleepSummary()?.night else { return [] }
         let family = DeviceOwnershipLog.Family(timeline: timeline)
@@ -54,6 +83,10 @@ extension LocalStore {
             guard let segments = strapSegmentsAwaitingHealth(row, log: log, family: family) else { return nil }
             if row.night < newest { return segments }
             let end = max(row.inBedEnd, segments.map(\.end).max() ?? row.inBedEnd)
+            if Self.strapNightEndsNearScheduledWake(end, wakeMinutes: wakeMinutes),
+               SleepHealthGate.isSettled(latestSegmentEnd: end, now: now) {
+                return segments
+            }
             return now.timeIntervalSince(end) > Self.strapNewestNightHealthBuffer ? segments : nil
         }
     }
