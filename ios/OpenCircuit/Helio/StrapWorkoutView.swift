@@ -287,6 +287,13 @@ struct StrapWorkoutView: View {
                                 ? "Active calories are an ESTIMATE (from your heart rate, active time, age and body mass; not strap sensor data)."
                                 : "Active calories are an ESTIMATE (from GPS distance x body mass; no heart rate was recorded).")
                     }
+                    if summary.hrSampleCount > 0 {
+                        // Diagnostic (on-demand HRV needs beat-to-beat intervals; whether the Helio
+                        // sends them is unknown, ZEPP_PROTOCOL.md §7.1).
+                        noteRow("waveform.path.ecg", .secondary, recorder.rrIntervalCount > 0
+                                ? "The strap sent beat-to-beat (RR) intervals during this workout (\(recorder.rrIntervalCount))."
+                                : "The strap sent no beat-to-beat (RR) intervals during this workout, only heart rate.")
+                    }
                     if summary.hasRoute {
                         noteRow("location.fill", .blue, saved ? "GPS route captured and saved to Apple Health." : "GPS route captured.")
                     } else if summary.sport.isOutdoor {

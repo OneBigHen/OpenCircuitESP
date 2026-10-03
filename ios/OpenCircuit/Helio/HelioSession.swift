@@ -183,6 +183,11 @@ final class HelioSession: WearableSession {
     private(set) var charging = false
     private(set) var liveHR: Int?
     private(set) var liveHRAt: Date?
+    /// Beat-to-beat (RR) intervals received in `0x2A37` frames on this connection (§7.1 flag bit 4).
+    /// Whether the Helio sends them at all is 🔴 (ZEPP_PROTOCOL.md §7.1, §10 item 11); the strap's
+    /// workout summary reports this count so a phone can answer it. Not observed: it changes every
+    /// second during a stream and nothing renders it live.
+    @ObservationIgnored private(set) var rrIntervalsReceived = 0
     /// The authenticated heart-rate stream (§7.1) is running.
     private(set) var liveHeartRateRunning = false
     /// Who started the running stream: the Measure control (90 s), or a workout (until it ends, #227).
@@ -482,6 +487,7 @@ final class HelioSession: WearableSession {
                   LiveHR.validBPM.contains(measurement.beatsPerMinute) else { return }
             liveHR = measurement.beatsPerMinute
             liveHRAt = now
+            rrIntervalsReceived += measurement.rrIntervals.count
             if !isAuthenticated { tierZeroHeartRateSeen = true }
             heartRateObserver?(measurement.beatsPerMinute, now)
         case .chunkedRead, .chunkedWrite:

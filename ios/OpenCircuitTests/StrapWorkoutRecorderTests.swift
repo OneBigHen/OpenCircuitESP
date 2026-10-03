@@ -22,6 +22,7 @@ private final class FakeHRSource: StrapWorkoutHeartRateSource {
     var syncing = false
     var canStreamHeartRate = true
     var heartRateObserver: (@MainActor (Int, Date) -> Void)?
+    var rrIntervalsReceived = 0
     private(set) var starts = 0
     private(set) var stops = 0
     private(set) var syncRequests = 0
@@ -319,6 +320,22 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         rig.recorder.reset()
         XCTAssertNil(rig.recorder.vo2MaxOutcome)
         XCTAssertNil(rig.recorder.vo2MaxHealthStatus)
+    }
+
+    func testRRIntervalsAreCountedFromWhenTheWorkoutAttached() async throws {
+        let source = makeSource()
+        source.rrIntervalsReceived = 7                                  // before the workout: not counted
+        let rig = makeRig(source: { source })
+        rig.recorder.selectedSport = .runningIndoor
+        rig.recorder.start()
+        source.rrIntervalsReceived += 2
+        await stream(rig, source, from: 0, to: 1, bpm: 120)
+        source.rrIntervalsReceived += 3
+        await stream(rig, source, from: 1, to: 2, bpm: 120)
+        XCTAssertEqual(rig.recorder.rrIntervalCount, 5)
+        await rig.recorder.end()
+        rig.recorder.reset()
+        XCTAssertEqual(rig.recorder.rrIntervalCount, 0)
     }
 
     func testAnIndoorRunHasNoVO2MaxEstimate() async throws {

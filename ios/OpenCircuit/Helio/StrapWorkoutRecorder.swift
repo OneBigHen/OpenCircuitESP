@@ -43,6 +43,8 @@ protocol StrapWorkoutHeartRateSource: AnyObject {
     var syncing: Bool { get }
     var canStreamHeartRate: Bool { get }
     var heartRateObserver: (@MainActor (Int, Date) -> Void)? { get set }
+    /// Beat-to-beat (RR) intervals received on this connection so far (a running total).
+    var rrIntervalsReceived: Int { get }
     func startWorkoutHeartRate()
     func stopWorkoutHeartRate()
     /// Send the `04 00` a killed process's stream is owed (`StrapWorkoutOrphanStop`), if it is owed and
@@ -181,6 +183,11 @@ final class StrapWorkoutRecorder {
     private(set) var liveZoneBreakdown = WorkoutZoneBreakdown()
     private(set) var hrSampleCount = 0
     private(set) var ledger: WorkoutActivityLedger?
+    /// Beat-to-beat (RR) intervals the strap sent during this workout. A diagnostic: whether the Helio
+    /// sends them at all is unknown (ZEPP_PROTOCOL.md §7.1), and an on-demand HRV reading needs them.
+    private(set) var rrIntervalCount = 0
+    /// The attached session's running total when last read, so a reconnect's new session counts from 0.
+    @ObservationIgnored private var rrIntervalsRead = 0
     /// The finished outdoor run's VO₂ max estimate, or why there is none (#232). nil for any other
     /// sport, and while no workout has finished.
     private(set) var vo2MaxOutcome: VO2MaxEstimate.Outcome?
@@ -324,6 +331,7 @@ final class StrapWorkoutRecorder {
         tickCount = 0
         vo2MaxOutcome = nil
         vo2MaxHealthStatus = nil
+        rrIntervalCount = 0
         // Review-238 N1: an interrupted workout still waiting for the person's answer ("Not now") is set
         // aside, never deleted; the next launch offers it again.
         if journal.loadJournal() != nil { journal.parkRunning() } else { journal.clearRunning() }
@@ -427,6 +435,7 @@ final class StrapWorkoutRecorder {
     private func attach(_ session: any StrapWorkoutHeartRateSource, now: Date) {
         attached = session
         session.heartRateObserver = { [weak self] bpm, at in self?.receive(bpm: bpm, at: at) }
+        rrIntervalsRead = session.rrIntervalsReceived
         session.startWorkoutHeartRate()
         if var ledger, ledger.isInGap {
             ledger.endGap(at: now)
@@ -440,6 +449,10 @@ final class StrapWorkoutRecorder {
         guard state == .active, let ledger, LiveHR.validBPM.contains(bpm) else { return }
         currentHR = bpm
         currentHRAt = at
+        if let total = attached?.rrIntervalsReceived {
+            rrIntervalCount += max(0, total - rrIntervalsRead)
+            rrIntervalsRead = total
+        }
         guard !ledger.isPaused, at > ledger.start, at > (lastRecordedAt ?? .distantPast) else { return }
         lastRecordedAt = at
         let sample = HRSample(bpm: bpm, start: at.addingTimeInterval(-StrapWorkoutSampleLine.span), end: at)
@@ -571,6 +584,7 @@ final class StrapWorkoutRecorder {
         liveZoneBreakdown = WorkoutZoneBreakdown()
         vo2MaxOutcome = nil
         vo2MaxHealthStatus = nil
+        rrIntervalCount = 0
     }
 
     // MARK: Journal
