@@ -65,6 +65,9 @@ struct ContentView: View {
     /// Built once, on first use (review-238 N2), idle and inert unless a strap workout starts.
     private var strapWorkouts: StrapWorkoutRecorder { .shared }
     @State private var showStrapWorkout = false
+    /// A workout Live Activity link that arrived while the onboarding cover was up (#258), replayed
+    /// once the cover has closed and any "Interrupted workout" alert has been answered.
+    @State private var pendingWorkoutLink: WorkoutLinkTarget?
     @State private var showCalibration = false
     @StateObject private var calibration = CalibrationSessionManager()
     /// Raw-capture export state for the activity-channel probe (debug / RE — issue #93).
@@ -279,7 +282,10 @@ struct ContentView: View {
             .fullScreenCover(isPresented: Binding(
                 get: { !onboardingCompleted },
                 set: { _ in }),   // only onDone finishes: a forced dismissal never marks it seen (F2)
-                onDismiss: { resolveOrphanedWorkoutSnapshot() }) {   // the orphan check waited for it (F2)
+                onDismiss: {
+                    resolveOrphanedWorkoutSnapshot()   // the orphan check waited for it (F2)
+                    replayPendingWorkoutLink()         // then the link it held (#258)
+                }) {
                 OnboardingView { onboardingCompleted = true }
             }
             .task {
@@ -434,6 +440,15 @@ struct ContentView: View {
                 Button("Not now", role: .cancel) { recoverableWorkout = nil }
             } message: {
                 if let recoverableWorkout { Text(recoveryMessage(recoverableWorkout)) }
+            }
+            // A link held under the onboarding cover waits for the recovery alert's answer (#258).
+            .onChange(of: workoutRecoveryAlertShowing) { _, showing in
+                guard !showing, pendingWorkoutLink != nil else { return }
+                // Let the alert finish dismissing first: a sheet asked for in the same turn can be dropped.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(400))
+                    replayPendingWorkoutLink()
+                }
             }
             // The correction sheet for a JUST-BANKED quick log. The row is already stored by the
             // time this appears (see `handleQuickLogLink`), so dismissing without saving still
@@ -938,10 +953,45 @@ struct ContentView: View {
     /// the user somewhere that makes sense rather than back on Today.
     @MainActor
     private func handleActiveWorkoutLink() {
-        selectedTab = .activity
+        // Not under the onboarding cover (#258): a sheet presented from under it forced the cover
+        // down, was never shown itself, and left `showWorkout` stuck true (a dead WORKOUT card).
+        // Held instead, and replayed from the cover's `onDismiss`. Read fresh, as in
+        // `resolveOrphanedWorkoutSnapshot`.
         // The strap's workout has its own sheet (#227); never recording for a ring-only user.
-        if strapWorkouts.isRecording { showStrapWorkout = true; return }
-        showWorkout = true
+        switch WorkoutLinkGate.onLink(
+            onboardingCompleted: UserDefaults.standard.bool(forKey: OnboardingView.completedKey),
+            strapRecording: strapWorkouts.isRecording) {
+        case .hold(let target):
+            pendingWorkoutLink = target
+        case .open(let target):
+            openWorkoutSheet(target)
+        }
+    }
+
+    @MainActor
+    private func openWorkoutSheet(_ target: WorkoutLinkTarget) {
+        selectedTab = .activity
+        switch target {
+        case .strap: showStrapWorkout = true
+        case .ring: showWorkout = true
+        }
+    }
+
+    /// Either "Interrupted workout" alert (the ring's or the strap's) still waiting for an answer.
+    private var workoutRecoveryAlertShowing: Bool {
+        recoverableWorkout != nil || strapWorkouts.recoverable != nil
+    }
+
+    /// Open the sheet a link held under the onboarding cover asked for (#258), once nothing is in
+    /// its way; otherwise keep it pending for the next call.
+    @MainActor
+    private func replayPendingWorkoutLink() {
+        guard let target = WorkoutLinkGate.replay(
+            pending: pendingWorkoutLink,
+            onboardingCompleted: UserDefaults.standard.bool(forKey: OnboardingView.completedKey),
+            recoveryAlertShowing: workoutRecoveryAlertShowing) else { return }
+        pendingWorkoutLink = nil
+        openWorkoutSheet(target)
     }
 
     /// Look for a workout the previous process was running when it died and, if there is a
