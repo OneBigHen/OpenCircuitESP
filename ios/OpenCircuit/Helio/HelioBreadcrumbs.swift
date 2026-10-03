@@ -210,11 +210,29 @@ final class HelioBreadcrumbs {
     }
 
     /// Review-224e S-2: a strap sleep more than 60 min from the rest of its night was kept out (the
-    /// night's longer part holds the key) and is stored nowhere until strap naps (#231). No time, no
-    /// length. At most one line per night per 12 h window: every sync re-delivers the sessions.
-    func strapSleepKeptOut(nightKey: Date) {
-        keyed("sleep-kept-out-\(Int(nightKey.timeIntervalSince1970))", .sync, perWindow: 1) {
-            "a strap sleep was kept out of its night (over 60 min from the night's longer part); not stored until strap naps (#231)"
+    /// night's longer part holds the key). Since #231 such a sleep is judged as a nap: `storedAsNap`
+    /// says whether it was stored as one (it isn't while it is under 20 min, still settling, or not
+    /// wholly in the strap's time). No time, no length. At most one line of each kind per night per
+    /// 12 h window: every sync re-delivers the sessions.
+    func strapSleepKeptOut(nightKey: Date, storedAsNap: Bool) {
+        let night = Int(nightKey.timeIntervalSince1970)
+        if storedAsNap {
+            keyed("sleep-kept-out-nap-\(night)", .sync, perWindow: 1) {
+                "a strap sleep was kept out of its night (over 60 min from the night's longer part); stored as a nap (#231)"
+            }
+        } else {
+            keyed("sleep-kept-out-\(night)", .sync, perWindow: 1) {
+                "a strap sleep was kept out of its night (over 60 min from the night's longer part); not stored as a nap yet (#231)"
+            }
+        }
+    }
+
+    /// #231 (ZEPP_PROTOCOL.md §21.5 step 4): the strap sent a sleep under 20 minutes. Amazfit says it
+    /// doesn't record these, so one arriving says the phone-side nap rule is wrong. No time, no length.
+    /// At most one line per day per 12 h window.
+    func strapSleepTooShort(day: Date) {
+        keyed("sleep-too-short-\(Int(day.timeIntervalSince1970))", .sync, perWindow: 1) {
+            "the strap sent a sleep under 20 min; not a nap (§21.5: Amazfit doesn't record these)"
         }
     }
 

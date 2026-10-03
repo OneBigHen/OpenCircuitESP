@@ -81,11 +81,21 @@ stores and writes what it measured for time it owned:
     then stitched into one night (`HelioSleepSelection.stitch`, 28f): segments exactly as reported,
     the gap left a gap. (Stitching before that check let a doze from before a ring → strap switch
     drag the strap's night into ring time, so neither device kept it: review-224e S-1, fixed in
-    #225.) Anything else gets a log line and no row, so it never takes a night key (strap naps as
-    `StoredNap` are a follow-up);
+    #225.) Anything else gets a log line and never takes a night key; it may be a nap (below);
   - a sleep more than 60 min from the rest of its night is not stitched, and its night key already
-    holds the longer part, so until strap naps (#231) the smaller part is stored nowhere and doesn't
-    reach Health. A `helio-link` breadcrumb notes that it happened (no time, no length);
+    holds the longer part. A `helio-link` breadcrumb notes that it happened and whether it was
+    stored as a nap (no time, no length);
+  - strap naps (#231, `ZEPP_PROTOCOL.md` §21.5, `HelioSleepSelection.naps`): a strap sleep that is no
+    night (the gates above kept it from being one, or another night holds its key) is a nap when it
+    is 20 min or longer, more than 60 min from every main sleep, and ended at least 60 min ago. The
+    main sleeps are every stored night, either device's (edited windows too), and, for a day whose
+    00:00–08:00 window no stored night covers, the longest sleep in that window, which is never a
+    nap. Only a nap the strap owned ALL of is kept (`DeviceOwnershipLog.ownsWholly`). It is stored as
+    a `StoredNap` like the ring's (no schema change), shown in the same nap views and written by the
+    same `flushNaps` as ordinary `sleepAnalysis` samples with the strap's stages, naming the device
+    that owned its start (the strap). A nap never displaces a night: naps are judged after the
+    sync's nights are stored, `saveNap` refuses one that overlaps a stored night, and a night stored
+    later prunes an auto nap it overlaps, so the ring's night after a switch is kept either way;
   - a strap night already written to Health stands: a later sync can't grow it by stitching or
     replace it with another sleep for its key (#225); a night not yet written still stitches;
   - the strap's gate is the ring's pass 1 only: the ring's second pass (a night whose onset was

@@ -88,6 +88,14 @@ public struct DeviceOwnershipLog: Codable, Equatable, Sendable {
         owner(at: inBedStart)
     }
 
+    /// Whether `family` owns all of `[start, end)`: it owns `start` and no switch falls inside. A strap
+    /// nap counts only then (#231): a nap is short, so unlike a night (28a) it isn't kept across a
+    /// switch. An empty window is owned by no one. With an empty log the ring owns every window.
+    public func ownsWholly(_ family: Family, from start: Date, to end: Date) -> Bool {
+        guard end > start, owner(at: start) == family else { return false }
+        return !entries.contains { $0.since > start && $0.since < end }
+    }
+
     public static func midpoint(_ start: Date, _ end: Date) -> Date {
         end > start ? start.addingTimeInterval(end.timeIntervalSince(start) / 2) : start
     }

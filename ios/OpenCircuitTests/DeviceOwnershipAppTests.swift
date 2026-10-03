@@ -1135,10 +1135,10 @@ extension DeviceOwnershipAppTests {
         XCTAssertEqual(health.count, 1)
     }
 
-    /// Review-224e S-2 (the rule stands): a sleep 61 min from the rest of its night isn't stitched, its
-    /// key holds the longer part, and it is stored nowhere until strap naps (#231). A breadcrumb says it
-    /// happened, with no time or length.
-    func testASleepOverAnHourFromItsNightIsKeptOutWithABreadcrumb() throws {
+    /// Review-224e S-2 (the rule stands): a sleep 61 min from the rest of its night isn't stitched and its
+    /// key holds the longer part. Since #231 it is a nap (§21.5: more than 60 min from the main sleep),
+    /// stored as one. A breadcrumb says it happened, with no time or length.
+    func testASleepOverAnHourFromItsNightIsKeptOutAndStoredAsANap() throws {
         let store = try makeStore()
         let observability = ObservabilityStore(defaults)
         let breadcrumbs = HelioBreadcrumbs(observability: observability, defaults: defaults, clock: { [unowned self] in self.clock })
@@ -1146,8 +1146,141 @@ extension DeviceOwnershipAppTests {
                          breadcrumbs: breadcrumbs)
         let rows = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
         XCTAssertEqual(rows.map(\.asleepMin), [240], "the longer half keeps the night (the rule as decided)")
+        let naps = try store.context.fetch(FetchDescriptor<StoredNap>())
+        XCTAssertEqual(naps.map(\.start), [localHour(4).addingTimeInterval(60)], "04:01–07:00")
+        XCTAssertEqual(naps.map(\.end), [localHour(7)])
         let lines = observability.metricRecords().filter { $0.source == HelioBreadcrumbs.source }.map(\.detail)
-        XCTAssertEqual(lines, ["a strap sleep was kept out of its night (over 60 min from the night's longer part); not stored until strap naps (#231)"])
+        XCTAssertEqual(lines, ["a strap sleep was kept out of its night (over 60 min from the night's longer part); stored as a nap (#231)"])
+    }
+}
+
+// MARK: - #231: naps from the strap (ZEPP_PROTOCOL.md §21.5)
+
+extension DeviceOwnershipAppTests {
+    private func napRows(_ store: LocalStore) throws -> [String] {
+        try store.context.fetch(FetchDescriptor<StoredNap>(sortBy: [SortDescriptor(\.start)])).map {
+            "\($0.start.timeIntervalSince(localHour(0)) / 3600)…\($0.end.timeIntervalSince(localHour(0)) / 3600) asleep=\($0.asleepMin)"
+        }
+    }
+
+    /// An afternoon nap on a strap-only install: stored like the ring's naps, with the strap's stages, and
+    /// offered to Apple Health. The night is stored exactly as before.
+    func testAStrapAfternoonNapIsStoredBesideTheNight() throws {
+        let store = try makeStore()
+        ownership.install(.strapOwnsAllTime)
+        let device = makeStrap()
+        device.fetchData[.sleepSession] = (stamp(localHour(0).timeIntervalSince1970 - 86_400),
+                                           localSession(-1, 7, stages: [(-1, 7, 0x04)])
+                                           + localSession(14, 15, stages: [(14, 14.5, 0x04), (14.5, 15, 0x05)]))
+        clock = localHour(17)
+        let (session, _) = connect(device, store: store)
+        XCTAssertEqual(session.lastSyncResult?.nights.map(\.window), [DateInterval(start: localHour(-1), end: localHour(7))],
+                       "only the night is a night")
+        XCTAssertEqual(try nightRows(store), ["-1.0…7.0 asleep=480"])
+        XCTAssertEqual(try napRows(store), ["14.0…15.0 asleep=60"])
+        let nap = try XCTUnwrap(try store.context.fetch(FetchDescriptor<StoredNap>()).first)
+        XCTAssertEqual(nap.stagedSegments?.map(\.stage), [.asleepCore, .asleepDeep], "the strap's own stages")
+        XCTAssertFalse(nap.isManuallyAdded || nap.isManuallyEdited)
+        XCTAssertEqual(try store.pendingNaps().map(\.start), [localHour(14)], "offered to Apple Health")
+        XCTAssertEqual(try store.naps(on: localHour(14)).map(\.start), [localHour(14)], "the Sleep card's nap list")
+
+        // Named the strap: the nap's Health write names the device that owned its start, as the strap's
+        // nights do.
+        let synced = try XCTUnwrap(session.lastSyncResult?.identity)
+        let active = ActiveWearable(session: { nil }, fallbackDeviceID: { nil }, identityStore: WearableIdentityStore(defaults),
+                                    ringFallbackID: { self.ringID }, strapFallbackID: { self.strapID },
+                                    ownership: { .strapOwnsAllTime })
+        active.recordIdentity(synced)
+        let named = try XCTUnwrap(HealthKitWriter.wearableDevice(ownerAt: nap.start, wearable: active))
+        XCTAssertEqual(named.localIdentifier, session.timeline.rawValue)
+        XCTAssertEqual(named.manufacturer, "Amazfit")
+
+        // A re-sync re-delivers both sessions: still one nap, one night.
+        _ = connect(device, store: store)
+        XCTAssertEqual(try napRows(store), ["14.0…15.0 asleep=60"])
+        XCTAssertEqual(try nightRows(store), ["-1.0…7.0 asleep=480"])
+    }
+
+    /// The evening doze: 20:00–22:00, then the night from 23:30 (90 min apart). The night is stored
+    /// exactly as before and the doze, which never takes the night's key, is a nap.
+    func testAnEveningDozeIsANapAndTheNightIsStillTheNight() throws {
+        let store = try makeStore()
+        let nights = try strapSync([(-4, -2), (-0.5, 7)], now: localHour(9), log: .strapOwnsAllTime, store: store)
+        XCTAssertEqual(nights, [DateInterval(start: localHour(-0.5), end: localHour(7))])
+        XCTAssertEqual(try nightRows(store), ["-0.5…7.0 asleep=450"])
+        XCTAssertEqual(try napRows(store), ["-4.0…-2.0 asleep=120"])
+    }
+
+    /// Synced soon after a nap: under an hour since it ended, it isn't judged yet (a session starting
+    /// within the hour would still stitch it into a longer sleep). An hour after, it is a nap.
+    func testASleepIsNotANapUntilAnHourAfterItEnded() throws {
+        let store = try makeStore()
+        _ = try strapSync([(-1, 7), (13, 14)], now: localHour(14.5), log: .strapOwnsAllTime, store: store)
+        XCTAssertEqual(try napRows(store), [])
+        XCTAssertEqual(try nightRows(store), ["-1.0…7.0 asleep=480"])
+        _ = try strapSync([(-1, 7), (13, 14)], now: localHour(15), log: .strapOwnsAllTime, store: store)
+        XCTAssertEqual(try napRows(store), ["13.0…14.0 asleep=60"])
+    }
+
+    /// §21.5 step 4: a sleep under 20 minutes is no nap; one arriving is logged in the breadcrumbs.
+    func testASleepUnderTwentyMinutesIsNoNapAndIsLogged() throws {
+        let store = try makeStore()
+        let observability = ObservabilityStore(defaults)
+        let breadcrumbs = HelioBreadcrumbs(observability: observability, defaults: defaults, clock: { [unowned self] in self.clock })
+        _ = syncSessions([(-1, 7), (13, 13.25)], now: localHour(16), log: .strapOwnsAllTime, store: store,
+                         breadcrumbs: breadcrumbs)
+        XCTAssertEqual(try napRows(store), [])
+        let lines = observability.metricRecords().filter { $0.source == HelioBreadcrumbs.source }.map(\.detail)
+        XCTAssertEqual(lines, ["the strap sent a sleep under 20 min; not a nap (§21.5: Amazfit doesn't record these)"])
+    }
+
+    /// Sleeping in after a morning switch: the ring kept 23:00–07:00; the wearer switched to the strap at
+    /// 07:15 and slept again 08:30–10:30. In either sync order the ring keeps its night and the strap's
+    /// sleep-in is a nap.
+    func testSleepingInAfterAMorningSwitchIsANapAndTheRingKeepsItsNight() throws {
+        let strapTime = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: localHour(7.25))])
+
+        // The ring's night first.
+        let store = try makeStore()
+        ownership.install(strapTime)
+        XCTAssertEqual(try saveRingNight(store, from: localHour(-1), to: localHour(7)), .inserted)
+        XCTAssertEqual(try strapSync([(8.5, 10.5)], now: localHour(12), log: strapTime, store: store), [])
+        XCTAssertEqual(try nightRows(store), ["-1.0…7.0 asleep=480"], "the ring keeps its night")
+        XCTAssertEqual(try napRows(store), ["8.5…10.5 asleep=120"])
+
+        // The strap first: its nap never stops the ring's night from being kept.
+        let other = try makeStore()
+        XCTAssertEqual(try strapSync([(8.5, 10.5)], now: localHour(12), log: strapTime, store: other), [])
+        XCTAssertEqual(try napRows(other), ["8.5…10.5 asleep=120"])
+        ownership.install(strapTime)
+        XCTAssertEqual(try saveRingNight(other, from: localHour(-1), to: localHour(7)), .inserted)
+        XCTAssertTrue(HealthKitWriter.ringOwnsNight(ringNight(from: localHour(-1), to: localHour(7)), store: other))
+        XCTAssertEqual(try nightRows(other), ["-1.0…7.0 asleep=480"])
+        XCTAssertEqual(try napRows(other), ["8.5…10.5 asleep=120"], "and the nap, which doesn't overlap it, stays")
+    }
+
+    /// Back to sleep within the hour of the ring's night (07:30–10:00 after 23:00–07:00): part of the
+    /// main sleep (§21.5 step 3), so no nap, and still no strap night on the ring's key.
+    func testBackToSleepWithinTheHourOfTheRingsNightIsNoNap() throws {
+        let strapTime = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: localHour(7.25))])
+        let store = try makeStore()
+        ownership.install(strapTime)
+        XCTAssertEqual(try saveRingNight(store, from: localHour(-1), to: localHour(7)), .inserted)
+        XCTAssertEqual(try strapSync([(7.5, 10)], now: localHour(12), log: strapTime, store: store), [])
+        XCTAssertEqual(try nightRows(store), ["-1.0…7.0 asleep=480"])
+        XCTAssertEqual(try napRows(store), [])
+    }
+
+    /// Decision 28 for naps: a strap nap is the strap's only in the strap's time, and the ring's nap
+    /// detection still stores nothing there.
+    func testTheRingStoresNoNapInTheStrapsTimeAndTheStrapNoneInTheRings() throws {
+        let store = try makeStore()
+        ownership.install(.strapOwnsAllTime)
+        try store.saveNap(start: localHour(14), end: localHour(15), asleepMin: 60, isLongNap: false)
+        XCTAssertEqual(try napRows(store), [], "the ring's detection in the strap's time")
+        ownership.install(DeviceOwnershipLog())
+        try store.saveNap(start: localHour(14), end: localHour(15), asleepMin: 60, isLongNap: false, family: .zeppOS)
+        XCTAssertEqual(try napRows(store), [], "the strap's nap in the ring's time")
     }
 }
 
