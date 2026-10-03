@@ -8,7 +8,8 @@
 //   - time the wearer entered (an edited night's asserted segments) is drawn faded and labelled, so
 //     it never passes for something the ring measured;
 //   - the "duration may read high" caveat is carried over from `SleepConfidence`.
-// Stage colours are the Sleep card's own (Deep indigo, Light teal, REM purple, Awake orange).
+// Stage colours are the Sleep card's own (Deep indigo, Light teal, REM purple, Awake orange); the
+// chart itself is `SleepHypnogramChart`, shared with the Sleep card.
 
 import SwiftUI
 import SwiftData
@@ -146,8 +147,7 @@ private struct NightDetail: View {
                         .font(.footnote).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Hypnogram(segments: segs)
-                        .frame(height: 150)
+                    SleepHypnogramChart(segments: segs)
                     if segs.contains(where: { $0.provenance != .measured }) {
                         Text("Faded blocks are time you entered when editing this night, not something the ring measured.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -241,60 +241,5 @@ private struct NightDetail: View {
             }
         }
         .padding(.top, 4)
-    }
-}
-
-// MARK: - Hypnogram
-
-/// Stage-by-time chart: one row per stage (Awake on top, Deep at the bottom), each segment a block
-/// in its stage colour. Asserted (wearer-entered) segments are faded.
-private struct Hypnogram: View {
-    let segments: [SleepSegment]
-
-    private enum Row: String, CaseIterable {
-        case awake = "Awake", rem = "REM", light = "Light", deep = "Deep"
-        var color: Color {
-            switch self {
-            case .awake: return .orange
-            case .rem:   return .purple
-            case .light: return .teal
-            case .deep:  return .indigo
-            }
-        }
-    }
-
-    private func row(_ s: SleepStage) -> Row? {
-        switch s {
-        case .awake:      return .awake
-        case .asleepREM:  return .rem
-        case .asleepCore: return .light
-        case .asleepDeep: return .deep
-        case .inBed:      return nil
-        }
-    }
-
-    var body: some View {
-        let plotted = segments.compactMap { s in row(s.stage).map { (seg: s, row: $0) } }
-        Chart(Array(plotted.enumerated()), id: \.offset) { _, item in
-            RectangleMark(xStart: .value("Start", item.seg.start), xEnd: .value("End", item.seg.end),
-                          y: .value("Stage", item.row.rawValue), height: .ratio(0.8))
-                .foregroundStyle(item.row.color.opacity(item.seg.provenance == .measured ? 1 : 0.4))
-                .cornerRadius(2)
-        }
-        .chartYScale(domain: Row.allCases.map(\.rawValue))
-        .chartXAxis {
-            AxisMarks(values: .stride(by: .hour, count: 2)) { _ in
-                AxisGridLine()
-                AxisValueLabel(format: .dateTime.hour())
-            }
-        }
-        .accessibilityElement()
-        .accessibilityLabel(summary(plotted.map(\.seg)))
-    }
-
-    private func summary(_ segs: [SleepSegment]) -> String {
-        guard let first = segs.map(\.start).min(), let last = segs.map(\.end).max() else { return "No stages" }
-        let awakenings = segs.filter { $0.stage == .awake }.count
-        return "Sleep stages from \(first.formatted(date: .omitted, time: .shortened)) to \(last.formatted(date: .omitted, time: .shortened)), \(awakenings) awake periods"
     }
 }

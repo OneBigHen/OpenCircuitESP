@@ -263,8 +263,8 @@ struct StrapWorkoutView: View {
                 }
                 .padding(.horizontal)
 
-                // Training load, and the VO₂ max estimate for an outdoor run (#232), as on the ring's
-                // summary.
+                // Training load, and the VO₂ max estimate for an outdoor run (#232) — the ring's
+                // section, over the strap's heart rate.
                 WorkoutTrainingMetricsSection(summary: summary,
                                               vo2Outcome: recorder.vo2MaxOutcome,
                                               vo2HealthStatus: recorder.vo2MaxHealthStatus,
@@ -273,7 +273,7 @@ struct StrapWorkoutView: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     noteRow("iphone", .secondary,
-                            "Duration, calories, zones and training metrics are OpenCircuit's own, worked out on your phone from the strap's live heart rate\(summary.hasRoute ? " and your phone's location" : ""). The strap made no record of this workout.")
+                            "Duration, calories and zones are OpenCircuit's own, worked out on your phone from the strap's live heart rate\(summary.hasRoute ? " and your phone's location" : ""). The strap made no record of this workout.")
                     if !result.pauses.isEmpty {
                         noteRow("pause.circle", .secondary,
                                 "Paused \(result.pauses.count) time\(result.pauses.count == 1 ? "" : "s") for \(Self.duration(result.pauses.reduce(0) { $0 + $1.duration })) in total; that time isn't counted.")
@@ -286,6 +286,13 @@ struct StrapWorkoutView: View {
                         noteRow("info.circle", .secondary, summary.hrSampleCount > 0
                                 ? "Active calories are an ESTIMATE (from your heart rate, active time, age and body mass; not strap sensor data)."
                                 : "Active calories are an ESTIMATE (from GPS distance x body mass; no heart rate was recorded).")
+                    }
+                    if summary.hrSampleCount > 0 {
+                        // Diagnostic (on-demand HRV needs beat-to-beat intervals; whether the Helio
+                        // sends them is unknown, ZEPP_PROTOCOL.md §7.1).
+                        noteRow("waveform.path.ecg", .secondary, recorder.rrIntervalCount > 0
+                                ? "The strap sent beat-to-beat (RR) intervals during this workout (\(recorder.rrIntervalCount))."
+                                : "The strap sent no beat-to-beat (RR) intervals during this workout, only heart rate.")
                     }
                     if summary.hasRoute {
                         noteRow("location.fill", .blue, saved ? "GPS route captured and saved to Apple Health." : "GPS route captured.")

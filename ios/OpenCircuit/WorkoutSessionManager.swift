@@ -648,8 +648,7 @@ final class WorkoutSessionManager: NSObject {
         recordingState = .finished(summary: summary)
         if saved, case .estimate(let estimate)? = vo2MaxOutcome {
             Task { [weak self] in
-                let status = await VO2MaxHealthWriter().save(estimate, workoutEnd: summary.endDate,
-                                                             timeline: .ringConn)
+                let status = await VO2MaxHealthWriter().save(estimate, workoutEnd: summary.endDate)
                 // Only report into the summary it belongs to (the user may have moved on).
                 guard let self, case .finished(let shown) = self.recordingState,
                       shown.startDate == summary.startDate else { return }
@@ -658,19 +657,22 @@ final class WorkoutSessionManager: NSObject {
         }
     }
 
-    /// The inputs `VO2MaxEstimate` needs, gathered from this session through the helpers the strap's
-    /// workout shares (`WorkoutVO2MaxInputs`): the GPS fixes as cumulative distance (the same running
-    /// sum as `distanceMeters`), the age only if the user set one (the profile's 35 placeholder is not
-    /// an age), and the daily resting HR from the stored history outside this workout's own window.
+    /// The inputs `VO2MaxEstimate` needs, gathered from this session: the GPS fixes as cumulative
+    /// distance (the same running sum as `distanceMeters`), the age only if the user set one (the
+    /// profile's 35 placeholder is not an age), and the daily resting HR from the stored history
+    /// outside this workout's own window.
     private func vo2MaxEstimate(summary: WorkoutSummary, hrSamples: [HRSample],
                                 route: [CLLocation]) -> VO2MaxEstimate.Outcome {
-        let restingHR = store.flatMap {
-            WorkoutVO2MaxInputs.restingHR(store: $0, start: summary.startDate, end: summary.endDate)
+        let points = VO2MaxInputs.routePoints(route)
+        let age = VO2MaxInputs.userSetAge()
+        var restingHR: Double?
+        if let store {
+            restingHR = VO2MaxInputs.restingHR(store: store, workoutStart: summary.startDate,
+                                               workoutEnd: summary.endDate)
         }
         return VO2MaxEstimate.estimate(VO2MaxEstimate.Input(
             sport: summary.sport, start: summary.startDate, end: summary.endDate,
-            heartRate: hrSamples, route: WorkoutVO2MaxInputs.routePoints(route),
-            age: WorkoutVO2MaxInputs.storedAge(), restingHR: restingHR))
+            heartRate: hrSamples, route: points, age: age, restingHR: restingHR))
     }
 
     /// Discard the session without writing to HealthKit.

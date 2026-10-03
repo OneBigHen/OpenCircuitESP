@@ -17,8 +17,10 @@ import OpenCircuitKit
 /// vitals rows. Once the link drops, `liveSegments` is empty and the @Query store fallback
 /// carries the same night forward.
 ///
-/// Stages (Deep/Light/REM/Awake) are an on-device ESTIMATE — the ring doesn't transmit a
-/// hypnogram (PROTOCOL.md §5.3) — so the card labels them "est.".
+/// Stages (Deep/Light/REM/Awake) are an on-device ESTIMATE for the ring — it doesn't transmit a
+/// hypnogram (PROTOCOL.md §5.3) — so the card labels them "est.". A Helio Strap night carries the
+/// strap's own staging (its sleep-session record, ZEPP_PROTOCOL.md §6.6), the same stages Zepp draws.
+/// Either way the timeline is drawn as a hypnogram under the headline (`SleepHypnogramChart`).
 struct SleepCardView: View {
     @Environment(\.modelContext) private var modelContext
     /// Temperature display unit (#83). Syncs with the Units section in UserProfileSettingsView.
@@ -52,6 +54,12 @@ struct SleepCardView: View {
     /// off-render-path task has resolved it, and on every night that has none — which is every
     /// unedited night, so the bar and legend are byte-identical to before for almost all of them.
     @State private var assertedStages: AssertedStages?
+    /// The displayed night's stage timeline, for the hypnogram under the headline — the stages-over-
+    /// time graph the Zepp app shows for the strap. Resolved by `refreshStageProvenance` from the SAME
+    /// timeline the stage minutes came from (live staging or the stored row's `hypnogramData`), so
+    /// the decode stays off the render path. Tagged with its night for the reason `coverage` is.
+    /// nil (or empty segments) draws no graph: a night without a stored timeline keeps the bar alone.
+    @State private var hypnogram: (nightKey: Date, segments: [SleepSegment])?
     /// Freshly staged segments from the just-finished sync (empty when none / after disconnect).
     /// Preferred over the store so a completed sync updates the card immediately.
     var liveSegments: [SleepSegment]
@@ -544,6 +552,7 @@ struct SleepCardView: View {
             Spacer()
             if let score = latest?.sleepScore, score > 0 { scoreBadge(score) }
         }
+        stageTimeline(night)
         stageBar(night, m)
         stageLegend(night, m)
         // When we actually fell asleep / woke (distinct from the bedtime window) + latency — this is
@@ -837,6 +846,7 @@ struct SleepCardView: View {
     private func refreshStageProvenance() async {
         guard let resolved = night else {
             assertedStages = nil
+            hypnogram = nil
             return
         }
         let segments: [SleepSegment]
@@ -848,10 +858,12 @@ struct SleepCardView: View {
             // screen may speak for it.
             guard let row = latest, row.night == resolved.nightKey else {
                 assertedStages = nil
+                hypnogram = nil
                 return
             }
             segments = SleepHypnogramCodec.decode(row.hypnogramData)
         }
+        hypnogram = (resolved.nightKey, segments)
         let b = SleepProvenanceBreakdown(segments: segments)
         // `.asserted` ONLY, matching `hasAssertedTime` — `.assertedCoverageUnknown` behaves exactly
         // as this app behaved before provenance existed, and hatching it would put a mark on every
@@ -883,6 +895,22 @@ struct SleepCardView: View {
         let out = (light: mins(a.light, cap: m.light), deep: mins(a.deep, cap: m.deep),
                    rem: mins(a.rem, cap: m.rem), awake: mins(a.awake, cap: m.awake))
         return (out.light + out.deep + out.rem + out.awake) > 0 ? out : nil
+    }
+
+    /// The night's stages over time (`SleepHypnogramChart`), when its timeline is known. Nothing at
+    /// all otherwise — the bar and legend below still give the totals, and a timeline is never drawn
+    /// from the totals alone.
+    @ViewBuilder
+    private func stageTimeline(_ night: Night) -> some View {
+        if let h = hypnogram, h.nightKey == night.nightKey, !SleepHypnogramChart.plotted(h.segments).isEmpty {
+            SleepHypnogramChart(segments: h.segments, height: 130)
+                .padding(.top, 4)
+            if h.segments.contains(where: { $0.provenance != .measured }) {
+                Text("Faded blocks are time you entered when editing this night, not something the device measured.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     /// A gap rendered at the precision the measurement supports — whole minutes under an hour, then

@@ -58,9 +58,10 @@ struct VO2MaxHealthWriter {
     /// representative grant, is off): a VO₂-max-only sheet would be the first Health prompt they see,
     /// out of context, and their workout itself wasn't written either.
     ///
-    /// `timeline` is the device whose heart rate the estimate came from: `.ringConn` for the ring's
-    /// workout, the strap's own `zeppos:` timeline for the strap's (#227). The sample names that device.
-    func save(_ estimate: VO2MaxEstimate.Estimate, workoutEnd: Date, timeline: SyncDeviceID) async -> Status {
+    /// `timeline` is the wearable whose heart rate the estimate came from: the ring for a ring workout,
+    /// the strap for a strap workout (#232 on the strap).
+    func save(_ estimate: VO2MaxEstimate.Estimate, workoutEnd: Date,
+              timeline: SyncDeviceID = .ringConn) async -> Status {
         guard HKHealthStore.isHealthDataAvailable() else { return .healthNotConnected }
         guard HealthKitWriter().isShareAuthorized else { return .healthNotConnected }
 
@@ -88,9 +89,9 @@ struct VO2MaxHealthWriter {
             HKMetadataKeyWasUserEntered: false,
             Self.methodMetadataKey: Self.methodMetadataValue,
         ]
-        // The estimate comes from the workout's heart rate, so it names the device that measured it
-        // (the ring's timeline or the strap's), like BP and the distance estimate (review-224b N-2):
-        // attribution follows the data, never the current device choice (decision 28).
+        // The estimate names the wearable whose heart rate it came from (the ring's or the strap's
+        // workout), like BP and the distance estimate (review-224b N-2): attribution follows the
+        // data, never the current device choice (decision 28).
         let sample = HKQuantitySample(type: Self.vo2MaxType, quantity: quantity,
                                       start: workoutEnd, end: workoutEnd,
                                       device: HealthKitWriter.wearableDevice(forTimeline: timeline, wearable: .shared),
