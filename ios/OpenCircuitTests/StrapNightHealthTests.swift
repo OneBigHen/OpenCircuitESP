@@ -191,9 +191,13 @@ final class StrapNightHealthTests: XCTestCase {
                                spanStart: row.inBedStart, spanEnd: row.inBedEnd)
     }
 
+    /// Whether the writer stopped before its write step: nothing to do, or a refusal (#259 split the
+    /// refusals out as `.declined`).
     private func isUnchanged(_ outcome: HealthKitWriter.MirrorOutcome) -> Bool {
-        if case .unchanged = outcome { return true }
-        return false
+        switch outcome {
+        case .unchanged, .declined: return true
+        case .wrote, .failed: return false
+        }
     }
 
     /// The first sync stores the night 13 minutes after it ended, inside the settle margin.
@@ -457,6 +461,45 @@ final class StrapNightHealthTests: XCTestCase {
                      "this test only means something while the current zone's key misses the record")
         XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: now), [],
                        "the night Apple Health already holds is not offered again")
+    }
+
+    /// #259: a stored night the writer declined is not offered on every flush after, until its
+    /// stored hypnogram changes.
+    func testANightTheWriterDeclinedIsNotOfferedAgainUntilItChanges() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try saveNight(store, from: -25, to: -17)
+        try saveNight(store, from: -1, to: 7)
+        let row = try XCTUnwrap(try rows(store).first { $0.inBedEnd == hour(-17) })
+        defer { StrapNightDeclinedOverlay.clear(storedNight: row.night) }
+        let stranded = try hypnogram(store, endingAt: -17)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(9)), [stranded])
+
+        // A declined offer that is NOT the stored hypnogram notes nothing.
+        store.noteStrapNightDeclined(Array(stranded.prefix(1)))
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(9)), [stranded])
+
+        store.noteStrapNightDeclined(stranded)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(9)), [],
+                       "the same stored night would meet the same refusal")
+
+        // The stored night changes: a different offer, so it is offered again.
+        let changed = [SleepSegment(start: hour(-25), end: hour(-21), stage: .asleepCore),
+                       SleepSegment(start: hour(-21), end: hour(-17), stage: .asleepREM)]
+        row.hypnogramData = SleepHypnogramCodec.encode(changed)
+        try store.context.save()
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(9)), [changed])
+    }
+
+    /// #259: the writer reports a refusal the same staging would meet again (here, thinner than the
+    /// card) as `declined`, not `unchanged`, so the strap flush can note it.
+    func testTheWriterReportsAThinnerStagingAsDeclined() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try saveNight(store, from: -25, to: -17)
+        let thinner = Array(try hypnogram(store, endingAt: -17).prefix(1))
+        let outcome = await HealthKitWriter().mirrorSettledNight(local: store, segments: thinner)
+        guard case .declined = outcome else { return XCTFail("expected .declined, got \(outcome)") }
     }
 
     /// Older than 7 days: stays in the app.

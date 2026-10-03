@@ -487,7 +487,7 @@ final class HealthKitWriter {
             case .wrote(let count):
                 result.sleepSegments = count
                 writtenKinds.insert(.sleep)
-            case .unchanged:
+            case .unchanged, .declined:
                 break
             case .failed:
                 // A denied .sleepAnalysis type (or a transient write error) — surface it (#135)
@@ -506,6 +506,11 @@ final class HealthKitWriter {
                 writtenKinds.insert(.sleep)
             case .unchanged:
                 break
+            case .declined:
+                // #259: the 50b backstop would otherwise offer this stored night again on every
+                // strap flush for a week, to the same refusal. Noted against its stored hypnogram,
+                // so a night that changes is offered again.
+                store.noteStrapNightDeclined(night)
             case .failed:
                 pendingFlushFailures.insert(.sleep)
             }
@@ -2364,7 +2369,12 @@ final class HealthKitWriter {
         return surviving
     }
 
-    enum MirrorOutcome { case wrote(Int); case unchanged; case failed }
+    /// `declined` (#259) is a refusal that the same segments would meet again on every flush —
+    /// another device keeps the night, the staging is thinner than the card, or it carries asserted
+    /// time — and that leaves no mirror record. `unchanged` is "nothing to do" (no segments, an
+    /// edited night, or Health already holds this staging). `failed` may pass (a denied type, a
+    /// transient write error) and is retried.
+    enum MirrorOutcome { case wrote(Int); case unchanged; case declined; case failed }
 
     /// Mirror a SETTLED, non-edited night into Apple Health so it tracks the CARD — the merge-protected
     /// `StoredSleepSummary`, not the raw drain. The ordinary flush used to append behind the forward
@@ -2417,7 +2427,7 @@ final class HealthKitWriter {
         // other device keeps. The segments' device is the one chosen when they began. Every caller is
         // covered here, not only the ring's guard. Always passes with an empty log.
         let family = LocalStore.ownershipLog().owner(ofNightFrom: start, to: end)
-        guard local.nightKeeping(family, inBedStart: start, inBedEnd: end, night: row?.night).keep else { return .unchanged }
+        guard local.nightKeeping(family, inBedStart: start, inBedEnd: end, night: row?.night).keep else { return .declined }
         // Don't let a thinner drain fragment shrink Health below the merge-protected card: if the card
         // (summary) is fuller than this staging, `SleepSummaryMerge` kept the older, fuller night — so
         // this staging is a partial re-drain, not a correction. Skip it (a hair of epoch tolerance
@@ -2425,7 +2435,7 @@ final class HealthKitWriter {
         if let row {
             let currentAsleep = SleepStaging.totalAsleep(segments)
             let cardAsleep = TimeInterval(row.asleepMin) * 60
-            if currentAsleep + TimeInterval(BulkRecord.epochSeconds) < cardAsleep { return .unchanged }
+            if currentAsleep + TimeInterval(BulkRecord.epochSeconds) < cardAsleep { return .declined }
         }
         // Sleep sharing EXPLICITLY denied → we can never write; surface as a failure (the card's
         // "hasn't synced" note). `.notDetermined` falls through and the write throws until granted.
@@ -2442,7 +2452,7 @@ final class HealthKitWriter {
         // (Nothing is withheld as of 2026-08-24, so the shrink is currently unreachable from either
         // path — this stays because the bail is ALSO the ownership rule, and the ownership rule is
         // what keeps asserted nights on the one path that tags them and tracks their sample UUIDs.)
-        if segments.containsAssertedTime { return .unchanged }
+        if segments.containsAssertedTime { return .declined }
 
         let signature = Self.sleepSignature(segments)
         let last = local.mirroredNight(night: night)
