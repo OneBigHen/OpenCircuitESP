@@ -502,6 +502,20 @@ final class StrapNightHealthTests: XCTestCase {
         guard case .declined = outcome else { return XCTFail("expected .declined, got \(outcome)") }
     }
 
+    /// #259: a future-dated night (a device clock set ahead) does not become the newest-night guard
+    /// and hold back every night before it. The guard reads every device's nights alike, so the
+    /// future row here is the strap's; the suspected source is a ring with a mis-set clock.
+    func testAFutureKeyedNightDoesNotStallTheBackstop() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try saveNight(store, from: -25, to: -17)
+        try saveNight(store, from: -1, to: 7)
+        try saveNight(store, from: 47, to: 55)        // keyed two days ahead of `now`
+        let stranded = try hypnogram(store, endingAt: -17)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(9)), [stranded],
+                       "last night is still the newest real night, so it alone is held back")
+    }
+
     /// Older than 7 days: stays in the app.
     func testANightOlderThanSevenDaysIsNotOffered() throws {
         ownership.install(.strapOwnsAllTime)

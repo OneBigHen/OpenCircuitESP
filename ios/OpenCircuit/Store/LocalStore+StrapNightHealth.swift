@@ -20,7 +20,7 @@ extension LocalStore {
     /// - it has a stored hypnogram;
     /// - it has no Health mirror record for its key, in the zone it was stored in or the current one;
     /// - it began within `strapNightHealthLookback` of `now`;
-    /// - a LATER stored night (any device) exists.
+    /// - a LATER stored night (any device) exists, keyed no later than `now` (#259).
     ///
     /// The last rule is the guard, and it must stay a stored-night rule, not a clock rule: the newest
     /// row can be a stale partial copy of a night still in progress (a sync whose sleep round ran out
@@ -30,7 +30,7 @@ extension LocalStore {
     /// Empty with an empty ownership log (a ring-only install): no query runs.
     func strapNightsAwaitingHealth(timeline: SyncDeviceID, now: Date) -> [[SleepSegment]] {
         let log = Self.ownershipLog()
-        guard !log.isEmpty, let newest = try? latestSleepSummary()?.night else { return [] }
+        guard !log.isEmpty, let newest = newestSleepNightKey(notAfter: now) else { return [] }
         let family = DeviceOwnershipLog.Family(timeline: timeline)
         let since = now.addingTimeInterval(-Self.strapNightHealthLookback)
         let descriptor = FetchDescriptor<StoredSleepSummary>(
@@ -47,6 +47,21 @@ extension LocalStore {
             let segments = SleepHypnogramCodec.decode(row.hypnogramData)
             return segments.isEmpty ? nil : segments
         }
+    }
+
+    /// The newest stored night key that is not after `now`, from any device: the backstop's guard.
+    ///
+    /// #259: it was `latestSleepSummary()`, the newest key of all. A key is the start of the day the
+    /// night ended on, so a real night's key is never after the moment it is read: its wake has
+    /// passed. A key after `now` can only come from a future-dated night (a device clock set ahead),
+    /// and as the newest key it would hold back every night before it until real time caught up.
+    /// Such a row is not judged here; it is just not allowed to be the guard.
+    private func newestSleepNightKey(notAfter now: Date) -> Date? {
+        var descriptor = FetchDescriptor<StoredSleepSummary>(
+            predicate: #Predicate { $0.night <= now },
+            sortBy: [SortDescriptor(\.night, order: .reverse)])
+        descriptor.fetchLimit = 1
+        return (try? context.fetch(descriptor))?.first?.night
     }
 
     /// Note that the writer declined `segments` (`HealthKitWriter.MirrorOutcome.declined`) when they
