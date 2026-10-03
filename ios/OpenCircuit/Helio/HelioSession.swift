@@ -247,6 +247,12 @@ final class HelioSession: WearableSession {
     @ObservationIgnored var heartRateObserver: (@MainActor (Int, Date) -> Void)?
     /// The `04 00` owed after an interrupted workout (#227, review-238 SF2).
     @ObservationIgnored var orphanStop = StrapWorkoutOrphanStop()
+    /// Every alarm editor event, after the session's own handling: Shortcuts' wake alarm (#260, decision
+    /// 52b) records its slot only from the re-read that confirms its write (`StrapWakeAlarmApplier`).
+    @ObservationIgnored var alarmEventObserver: (@MainActor (ZeppAlarmEditor.Event) -> Void)?
+    /// Called right after setup's alarm list read, once per connection (the clock was set before it):
+    /// where a Shortcuts wake alarm saved while the strap was away is applied (decision 52b).
+    @ObservationIgnored var onSetupAlarmsRead: (@MainActor () -> Void)?
 
     // MARK: Protocol state
 
@@ -1261,6 +1267,7 @@ final class HelioSession: WearableSession {
             switch event {
             case .listRead(let alarms):
                 helioLog.notice("helio: alarm list read, \(alarms.count, privacy: .public) alarm(s)")
+                if currentStep == .alarms { onSetupAlarmsRead?() }
                 advance(from: .alarms)
             case .listUnreadable(let error):
                 alarmNotice = "Couldn't read the strap's alarms."
@@ -1282,6 +1289,7 @@ final class HelioSession: WearableSession {
             case .writeUnverified:
                 alarmNotice = "Saved, but the strap's list couldn't be read back."
             }
+            alarmEventObserver?(event)
         }
     }
 

@@ -335,6 +335,9 @@ final class HelioConnection: NSObject {
         session.appInBackground = !Self.appIsActive
         made.session = session
         self.session = session
+        // Shortcuts' wake alarm (#260, decision 52b): a request saved while the strap was away is
+        // applied right after this connection's setup reads the alarm list.
+        StrapWakeAlarmApplier.shared.attach(to: session)
         session.start()
     }
 
