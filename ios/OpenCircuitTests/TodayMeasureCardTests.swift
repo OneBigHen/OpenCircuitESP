@@ -173,6 +173,33 @@ final class VitalMeasureStateTests: XCTestCase {
         XCTAssertTrue(s.isLive)
     }
 
+    // MARK: Whether the card is drawn (#259)
+
+    /// With no device ready the card still shows the latest recorded reading and its age; only the
+    /// button is gone. It disappears only when there is nothing recorded either.
+    func testWithNoDeviceReadyTheLatestReadingStillShowsWithoutAButton() {
+        let notReady = [
+            VitalMeasureState.resolve(.heartRate, ring: RingMeasureFacts(), strap: nil),
+            VitalMeasureState.resolve(.heartRate, ring: nil, strap: StrapMeasureFacts(canMeasure: false)),
+            VitalMeasureState.resolve(.heartRate, ring: nil, strap: nil),
+            VitalMeasureState.resolve(.spo2, ring: nil, strap: nil),
+        ]
+        for s in notReady {
+            XCTAssertEqual(s.control, .none, "the button stays gated on a ready device")
+            XCTAssertTrue(s.showsCard(hasLatestReading: true), "the latest reading and its age still show")
+            XCTAssertFalse(s.showsCard(hasLatestReading: false), "no empty card")
+        }
+    }
+
+    /// A ready device, or a running stream, draws the card even before anything is recorded.
+    func testAReadyDeviceOrALiveStreamDrawsTheCardWithNothingRecorded() {
+        XCTAssertTrue(VitalMeasureState.resolve(.heartRate, ring: readyRing, strap: nil)
+            .showsCard(hasLatestReading: false))
+        XCTAssertTrue(VitalMeasureState.resolve(.heartRate, ring: nil,
+                                                strap: StrapMeasureFacts(canMeasure: false, measuring: true))
+            .showsCard(hasLatestReading: false))
+    }
+
     // MARK: Settled heart rate
 
     /// The card must not render whichever poll frame arrived last. The repo's only real capture
@@ -258,6 +285,14 @@ final class VitalMeasureStateTests: XCTestCase {
         XCTAssertEqual(TodayTile.Metric.spo2.measuredVital, .spo2)
         for m: TodayTile.Metric in [.hrv, .respiratoryRate, .skinTemp, .steps] {
             XCTAssertNil(m.measuredVital, "\(m) has no on-demand read on either device")
+        }
+    }
+
+    /// #259: a tap on Today's live card opens the detail that carries the SAME vital's Measure card,
+    /// because that card's button is the stop control.
+    func testTodaysLiveCardOpensTheDetailThatCanStopIt() {
+        for vital in MeasuredVital.allCases {
+            XCTAssertEqual(vital.detailMetric.measuredVital, vital, "\(vital)")
         }
     }
 

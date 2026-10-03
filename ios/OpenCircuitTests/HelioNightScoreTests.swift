@@ -52,10 +52,15 @@ final class HelioNightScoreTests: XCTestCase {
         calendar.date(byAdding: .day, value: -daysAgo, to: calendar.startOfDay(for: Date()))!
     }
 
-    /// A strap night that woke an hour ago and went to bed eight hours before that, so it both
-    /// "ended today" for the Readiness card and lies wholly in the past for `ingest`'s future guard.
+    /// A strap night of eight hours whose wake is ALWAYS inside today and never in the future, so it
+    /// both "ended today" for the Readiness card and lies wholly in the past for `ingest`'s future
+    /// guard. #259: the wake used to be `now − 1 h`, which falls on yesterday between local 00:00
+    /// and 01:00, so the test failed in that hour. Now it is an hour ago, or halfway between
+    /// midnight and now when an hour ago would be yesterday.
     private func lastNightWindow() -> DateInterval {
-        let end = Date().addingTimeInterval(-3600)
+        let now = Date()
+        let today = calendar.startOfDay(for: now)
+        let end = max(now.addingTimeInterval(-3600), today.addingTimeInterval(now.timeIntervalSince(today) / 2))
         return DateInterval(start: end.addingTimeInterval(-8 * 3600), end: end)
     }
 
@@ -289,6 +294,55 @@ final class HelioNightScoreTests: XCTestCase {
         XCTAssertEqual(fingerprint(try row(store, w)), before)
     }
 
+    /// #259: a sync that dies between the sleep round and the HRV round stores a Sleep Score and no
+    /// stress score. The pass fills the recovery number, leaves the Sleep Score exactly as stored,
+    /// and a second run changes nothing.
+    func testThePassFillsAMissingStressScoreAndKeepsTheStoredSleepScore() throws {
+        let store = try makeStore()
+        let w = window(daysAgo: 1)
+        _ = try store.ingest(heartRate(w), device: strap)
+        _ = try store.ingest(hrv(w), device: strap)
+        // A stored Sleep Score no recomputation would produce, so an overwrite would show.
+        try storeUnscored(store, w, sleepScore: 13)
+
+        XCTAssertEqual(try store.scoreUnscoredHelioNights(), [try row(store, w).night])
+        let repaired = try row(store, w)
+        XCTAssertEqual(repaired.sleepScore, 13, "a stored Sleep Score is never recomputed over")
+        XCTAssertEqual(repaired.stressScore, SleepStress.overnightScore(rmssd: [41, 44, 47]))
+        let before = fingerprint(repaired)
+
+        XCTAssertEqual(try store.scoreUnscoredHelioNights(), [], "idempotent")
+        XCTAssertEqual(fingerprint(try row(store, w)), before)
+    }
+
+    /// #259: a candidate whose missing score still can't be computed (a scored night with no HRV)
+    /// is left byte-identical, `updatedAt` included, and is not reported as changed.
+    func testACandidateThatGainsNothingKeepsItsUpdatedAt() throws {
+        let store = try makeStore()
+        let w = window(daysAgo: 1)
+        _ = try store.ingest(heartRate(w), device: strap)
+        try storeUnscored(store, w, sleepScore: 64)
+        let before = fingerprint(try row(store, w))
+
+        XCTAssertEqual(try store.scoreUnscoredHelioNights(), [])
+        XCTAssertEqual(fingerprint(try row(store, w)), before, "nothing moved, including updatedAt")
+    }
+
+    /// #259: one summary breadcrumb per pass, not one per night.
+    func testThePassWritesOneSummaryBreadcrumb() throws {
+        let store = try makeStore()
+        for k in 1...3 {
+            let w = window(daysAgo: k)
+            _ = try store.ingest(hrv(w), device: strap)
+            try storeUnscored(store, w)
+        }
+        let start = Date()
+        XCTAssertEqual(try store.scoreUnscoredHelioNights().count, 3)
+        let lines = ObservabilityStore().metricRecords(since: start).filter { $0.source == "sleep-score-strap" }
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(lines.first?.detail.hasPrefix("SCORED 3 strap night(s)") ?? false)
+    }
+
     /// The pass works on a night from ANY Zepp OS timeline, because `StoredSleepSummary` has no
     /// device column: a stored night can only ever be attributed to a family (decision 28).
     func testASecondStrapsNightIsScoredToo() throws {
@@ -364,6 +418,39 @@ final class HelioNightScoreTests: XCTestCase {
         _ = try saved.ingest(temperatures(tonight, celsius: 34.4), device: strap)
         _ = try saved.saveHelioNight(night(tonight), device: strap)
         XCTAssertEqual(repaired, try row(saved, tonight).sleepScore)
+    }
+
+    /// #259: an old night is scored against the nights BEFORE it, never the ones after it — the
+    /// baseline the save path had when that night was the newest one stored.
+    func testThePassBaselineUsesOnlyNightsOlderThanTheOneBeingScored() throws {
+        let store = try makeStore()
+        // Older strap nights at the night's own temperature, later ones far below it.
+        for k in 6...9 { try storeStrapNight(store, daysAgo: k, celsius: 34.4) }
+        for k in 1...4 { try storeStrapNight(store, daysAgo: k, celsius: 31.4) }
+        let target = window(daysAgo: 5)
+        _ = try store.ingest(heartRate(target), device: strap)
+        try storeUnscored(store, target, skinTempC: 34.4)
+
+        XCTAssertEqual(try store.scoreUnscoredHelioNights(), [try row(store, target).night])
+
+        func priors(_ days: [Int], celsius: Double) -> [SkinTempBaseline.NightlyTemp] {
+            days.map {
+                let w = window(daysAgo: $0)
+                return SkinTempBaseline.NightlyTemp(night: SleepNightKey.night(inBedStart: w.start, inBedEnd: w.end),
+                                                    celsius: celsius)
+            }
+        }
+        func sleepScore(_ priors: [SkinTempBaseline.NightlyTemp]) -> Int? {
+            StoredNightScore.scores(.init(
+                segments: segments(target),
+                heartRate: heartRate(target).map { HRSample(bpm: Int($0.value.rounded()), start: $0.start, end: $0.end) },
+                skinTempC: 34.4, priorNights: priors)).sleepScore
+        }
+        let older = priors(Array(6...9), celsius: 34.4)
+        let withLater = older + priors(Array(1...4), celsius: 31.4)
+        XCTAssertNotEqual(sleepScore(withLater), sleepScore(older),
+                          "this test only means something while the later nights would move the score")
+        XCTAssertEqual(try row(store, target).sleepScore, sleepScore(older))
     }
 
     /// A ring night's heart rate and HRV never feed a strap night's score. The ring's catch-up rows

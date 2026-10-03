@@ -682,7 +682,8 @@ struct SleepCardView: View {
                                                        measuredInBed: night.summary.inBed)
             }()
             let truncated = isLikelyTruncated(night)
-            let rows = SleepConfidence.hints(assessment, clock: Self.clock).filter { hint in
+            let rows = SleepConfidence.hints(assessment, clock: Self.clock,
+                                             device: recordingDevice(night).noun).filter { hint in
                 switch hint.reason {
                 case .durationLikelyHigh:        return contiguous && !truncated
                 case .noRecordingBeforeBedtime:  return !truncated
@@ -704,7 +705,13 @@ struct SleepCardView: View {
     /// opposite of the "duration may read high" case. (The cause is the ring not handing off the whole
     /// night — a contended/interrupted resume pointer, NOT a ~4.75 h buffer overflow: the ring buffers
     /// for days, PROTOCOL §3.)
+    ///
+    /// RING NIGHTS ONLY (#257). Every cause above, and every lever `captureHint` names, is the ring's
+    /// hand-off. A strap night's in-bed start is the strap's own staged sleep start
+    /// (`HelioSleepSelection`), not a resume pointer, so a short strap night is not evidence of a
+    /// truncated transfer and must not tell its wearer to close the RingConn app.
     private func isLikelyTruncated(_ night: Night) -> Bool {
+        guard recordingDevice(night) == .ringConn else { return false }
         // Scheduled bedtime for this night, only when the user enabled a manual schedule — without it
         // we can't tell a truncated night from a genuinely short one, so no hint (see SleepCaptureCoverage).
         let bedtime: Date? = {
@@ -715,6 +722,16 @@ struct SleepCardView: View {
         guard let onset = night.inBedStart else { return false }
         return SleepCaptureCoverage.classify(capturedOnset: onset, capturedInBed: night.summary.inBed,
                                              scheduledBedtime: bedtime) == .likelyTruncated
+    }
+
+    /// The device that recorded `night`: the device you went to bed with keeps it (decision 28a,
+    /// `DeviceOwnershipLog.owner(ofNightFrom:to:)`), which after a switch need not be the one in use.
+    /// The ring with an empty log (a ring-only install). A legacy rollup with no clock times is
+    /// judged at its night key.
+    private func recordingDevice(_ night: Night) -> ActiveDeviceChoice {
+        let start = night.inBedStart ?? night.nightKey
+        let family = LocalStore.ownershipLog().owner(ofNightFrom: start, to: night.inBedEnd ?? start)
+        return SharedScreenCopy.device(owning: family)
     }
 
     /// Actionable tip when last night looks truncated: the ring didn't hand off the whole night. The

@@ -375,14 +375,18 @@ struct OpenCircuitAppShortcuts: AppShortcutsProvider {
         // single `AppShortcutsProvider`, and a second declaration makes every shortcut — including
         // the headache ones above — silently disappear from Shortcuts. The intent itself is in
         // Export/ExportDataIntent.swift.
+        //
+        // Device-neutral title and phrase (#257), because the export holds every device's data. The
+        // ring phrase stays as an ADDITIONAL phrase so a user's existing Siri phrase keeps working.
         AppShortcut(
             intent: ExportRingDataIntent(),
             phrases: [
                 "Export my \(.applicationName) data",
-                "Export my ring data with \(.applicationName)",
+                "Export my wearable data with \(.applicationName)",
                 "Export health data from \(.applicationName)",
+                "Export my ring data with \(.applicationName)",
             ],
-            shortTitle: "Export Ring Data",
+            shortTitle: "Export Wearable Data",
             systemImageName: "square.and.arrow.up")
 
         // The wearable's actions (#260, decision 52), in this provider for the same reason. The intents

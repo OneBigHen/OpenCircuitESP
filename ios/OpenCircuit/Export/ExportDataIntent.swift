@@ -1,4 +1,4 @@
-// ExportDataIntent.swift — "Export Ring Data" from Shortcuts, Siri or an automation (#80 v3).
+// ExportDataIntent.swift — "Export Wearable Data" from Shortcuts, Siri or an automation (#80 v3).
 //
 // The point of the intent is UNATTENDED export: a nightly automation that files the last night's
 // data into iCloud Drive, mails it to a clinician, or drops it into a shared folder without anybody
@@ -125,13 +125,18 @@ private func exportStore() throws -> LocalStore {
 
 // MARK: - The intent
 
-/// Export stored ring data as a file Shortcuts can route anywhere.
+/// Export stored wearable data (every device's rows, as `ExportBuilder` reads them) as a file
+/// Shortcuts can route anywhere.
+///
+/// The TYPE keeps its old name on purpose (#257): an App Intent's identifier is its type name, so
+/// renaming it would break every shortcut and automation a user already built on it. Only the
+/// user-facing title and description are device-neutral.
 struct ExportRingDataIntent: AppIntent {
-    static let title: LocalizedStringResource = "Export Ring Data"
+    static let title: LocalizedStringResource = "Export Wearable Data"
     static let description = IntentDescription(
         // One literal, not a `+` concatenation: the parameter is a LocalizedStringResource, which
         // only a literal converts to — a concatenation is already a String and does not compile.
-        "Exports your stored ring data as a CSV or JSON file. Nothing leaves your device unless the shortcut you build sends it somewhere. “New sleep sessions” marks nights as exported only when OpenCircuit saves the file into an export folder you picked in the app — it cannot tell whether a later Shortcuts action succeeded.",
+        "Exports your stored wearable data as a CSV or JSON file. Nothing leaves your device unless the shortcut you build sends it somewhere. “New sleep sessions” marks nights as exported only when OpenCircuit saves the file into an export folder you picked in the app — it cannot tell whether a later Shortcuts action succeeded.",
         categoryName: "Data Export",
         searchKeywords: ["export", "backup", "csv", "json", "sleep", "data"])
 

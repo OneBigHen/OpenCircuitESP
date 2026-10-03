@@ -57,6 +57,20 @@ final class DeviceOwnershipTests: XCTestCase {
         XCTAssertEqual(log.ownershipStart(at: .distantFuture), t0 + 3600)
     }
 
+    /// #231: a strap nap counts only when the strap owns all of it.
+    func testOwningAWholeWindowMeansNoSwitchInsideIt() {
+        XCTAssertTrue(DeviceOwnershipLog().ownsWholly(.ringConn, from: t0, to: t0 + 3600), "empty log: the ring's")
+        XCTAssertFalse(DeviceOwnershipLog().ownsWholly(.zeppOS, from: t0, to: t0 + 3600))
+        let log = DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: t0), .init(family: .ringConn, since: t0 + 7200)])
+        XCTAssertTrue(log.ownsWholly(.zeppOS, from: t0, to: t0 + 3600), "a switch at the window's start is before it")
+        XCTAssertTrue(log.ownsWholly(.zeppOS, from: t0 + 3600, to: t0 + 7200), "a switch at its end is after it")
+        XCTAssertFalse(log.ownsWholly(.zeppOS, from: t0 + 3600, to: t0 + 7201), "a switch inside it")
+        XCTAssertFalse(log.ownsWholly(.zeppOS, from: t0 - 60, to: t0 + 3600), "began in the ring's time")
+        XCTAssertFalse(log.ownsWholly(.ringConn, from: t0 - 60, to: t0 + 60))
+        XCTAssertTrue(log.ownsWholly(.ringConn, from: t0 + 7200, to: t0 + 9000))
+        XCTAssertFalse(log.ownsWholly(.zeppOS, from: t0 + 60, to: t0 + 60), "an empty window")
+    }
+
     func testAClockThatMovedBackIsClampedToTheLastEntry() {
         var log = DeviceOwnershipLog()
         log.record(.zeppOS, since: t0)

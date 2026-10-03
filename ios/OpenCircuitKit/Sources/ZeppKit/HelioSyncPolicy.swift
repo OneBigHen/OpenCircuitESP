@@ -374,6 +374,121 @@ public enum HelioSleepSelection {
             }
         }
     }
+
+    // MARK: Naps (#231, ZEPP_PROTOCOL.md §21.5)
+
+    /// §21.1 / §21.5 step 4: Amazfit doesn't record sleep shorter than this, so it is never a nap.
+    public static let minNapLength: TimeInterval = 20 * 60
+
+    /// §21.5 step 3: a sleep more than this from the main sleep is a nap; one this close or closer
+    /// belongs to the main sleep. The same 60 minutes as `stitchGap`, so a sleep `stitch` keeps apart
+    /// from its own night is always far enough from it.
+    public static let napGap: TimeInterval = stitchGap
+
+    /// §21.5 step 2: the main-sleep window, as hours of the recorded local day: 00:00–08:00, what the
+    /// strap uses without a sleep plan. OpenCircuit can't read Zepp's sleep plan (no known config arg).
+    public static let defaultMainSleepHours: Range<Int> = 0..<8
+
+    /// A sleep is judged as a nap only once this long has passed since it ended: until then a later
+    /// session can still start within `stitchGap` of it and stitch it into a night (28f).
+    ///
+    /// SPEC-GAP: §21.4 can't say when the strap writes a session record (🔴), so a later session can
+    /// still arrive after this. A stored nap that a night later absorbs is removed by the night's own
+    /// store (`LocalStore.saveSleepSummary` prunes the auto naps its window overlaps).
+    public static let napSettleTime: TimeInterval = stitchGap
+
+    /// What `naps(from:mainSleeps:now:)` made of each sleep.
+    public struct NapSplit: Equatable {
+        /// The naps, oldest first: sleeps of `minNapLength` or more, more than `napGap` from every
+        /// main sleep, and settled (`napSettleTime`).
+        public var naps: [Night] = []
+        /// The sleeps taken as the main sleep of a day no known main sleep covered (§21.5 step 2):
+        /// never naps, whatever else is true of them.
+        public var mainSleeps: [Night] = []
+        /// Sleeps that overlap a main sleep or lie `napGap` or less from one: they belong to the main
+        /// sleep (§21.5 step 3), so they are no nap.
+        public var nearMainSleep: [Night] = []
+        /// §21.5 step 4: shorter than `minNapLength`. The strap shouldn't send these; one that arrives
+        /// says the rule is wrong, so the caller logs it.
+        public var tooShort: [Night] = []
+        /// Naps in every other respect that ended less than `napSettleTime` ago: judged again later.
+        public var unsettled: [Night] = []
+
+        public init() {}
+    }
+
+    /// §21.5: which of `sleeps` are naps.
+    ///
+    /// 1. The sleeps are stitched first (`stitch`, 28f): sessions 60 min or less apart are one sleep.
+    /// 2. A main sleep is a known one (`mainSleeps`: the nights already stored, by either device), or,
+    ///    for a day whose main-sleep window (`mainSleepHours` of the day, in the zone the sleep was
+    ///    recorded in) no known main sleep overlaps, the longest of these sleeps that overlaps it.
+    ///    Such a sleep is never a nap: a night not stored yet (in progress, or a save that failed)
+    ///    can't turn into one.
+    /// 3. Any other sleep that overlaps a main sleep, or lies `napGap` or less from one, belongs to it.
+    /// 4. Of the rest, one shorter than `minNapLength` is `tooShort`; one that ended less than
+    ///    `napSettleTime` before `now` is `unsettled`; every other one is a nap.
+    ///
+    /// A nap never displaces a night: a sleep is a nap only when it is no main sleep, and nothing here
+    /// changes which sleep is a night.
+    public static func naps(from sleeps: [Night], mainSleeps known: [DateInterval], now: Date,
+                            mainSleepHours: Range<Int> = defaultMainSleepHours) -> NapSplit {
+        let stitchedSleeps = stitch(sleeps)
+        // Step 2: the provisional main sleep of each main-sleep window no known main sleep covers.
+        var longestByWindow: [Date: (index: Int, window: DateInterval)] = [:]
+        for (index, sleep) in stitchedSleeps.enumerated() {
+            for window in mainSleepWindows(touching: sleep, hours: mainSleepHours)
+            where overlaps(window, sleep.window) && !known.contains(where: { overlaps($0, window) }) {
+                if let best = longestByWindow[window.start],
+                   stitchedSleeps[best.index].window.duration >= sleep.window.duration { continue }
+                longestByWindow[window.start] = (index, window)
+            }
+        }
+        let provisional = Set(longestByWindow.values.map { $0.index })
+        let anchors = known + provisional.sorted().map { stitchedSleeps[$0].window }
+
+        var split = NapSplit()
+        for (index, sleep) in stitchedSleeps.enumerated() {
+            if provisional.contains(index) {
+                split.mainSleeps.append(sleep)
+            } else if anchors.contains(where: { gap($0, sleep.window) <= napGap }) {
+                split.nearMainSleep.append(sleep)
+            } else if sleep.window.duration < minNapLength {
+                split.tooShort.append(sleep)
+            } else if now < sleep.window.end.addingTimeInterval(napSettleTime) {
+                split.unsettled.append(sleep)
+            } else {
+                split.naps.append(sleep)
+            }
+        }
+        return split
+    }
+
+    /// The main-sleep windows (`hours` of a local day, in the sleep's recorded zone) of the days the
+    /// sleep starts and ends on. A sleep is at most `maxNightLength` (20 h) long, so no other day's
+    /// window can lie inside it.
+    static func mainSleepWindows(touching sleep: Night, hours: Range<Int>) -> [DateInterval] {
+        let calendar = sleep.recordedCalendar
+        var days = [calendar.startOfDay(for: sleep.window.start)]
+        let lastDay = calendar.startOfDay(for: sleep.window.end)
+        if lastDay != days[0] { days.append(lastDay) }
+        return days.compactMap { day in
+            guard let start = calendar.date(byAdding: .hour, value: hours.lowerBound, to: day),
+                  let end = calendar.date(byAdding: .hour, value: hours.upperBound, to: day),
+                  end > start else { return nil }
+            return DateInterval(start: start, end: end)
+        }
+    }
+
+    /// Whether two windows share some time (touching edges don't).
+    static func overlaps(_ a: DateInterval, _ b: DateInterval) -> Bool {
+        a.start < b.end && b.start < a.end
+    }
+
+    /// The time between two windows: zero or less when they touch or overlap.
+    static func gap(_ a: DateInterval, _ b: DateInterval) -> TimeInterval {
+        max(b.start.timeIntervalSince(a.end), a.start.timeIntervalSince(b.end))
+    }
 }
 
 // MARK: - Fetch plan and watermarks

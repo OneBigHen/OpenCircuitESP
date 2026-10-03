@@ -61,10 +61,16 @@ struct ContentView: View {
     /// Apple Health, or discard). Non-nil presents the recovery alert. See
     /// `WorkoutSessionRecovery` for what the app is allowed to claim about it.
     @State private var recoverableWorkout: RecoveredWorkout?
+    /// The one-time "local history was reset" notice (#243), non-nil while it is waiting to be seen.
+    /// Its flag is cleared only when the user dismisses it; see `HistoryResetNotice`.
+    @State private var historyResetNotice: HistoryResetNotice?
     /// The strap's workout (#227): the app's one recorder, outliving every sheet as `workoutManager` does.
     /// Built once, on first use (review-238 N2), idle and inert unless a strap workout starts.
     private var strapWorkouts: StrapWorkoutRecorder { .shared }
     @State private var showStrapWorkout = false
+    /// A workout Live Activity link that arrived while the onboarding cover was up (#258), replayed
+    /// once the cover has closed and any "Interrupted workout" alert has been answered.
+    @State private var pendingWorkoutLink: WorkoutLinkTarget?
     @State private var showCalibration = false
     @StateObject private var calibration = CalibrationSessionManager()
     /// Raw-capture export state for the activity-channel probe (debug / RE — issue #93).
@@ -210,7 +216,10 @@ struct ContentView: View {
             // reads ~25 k rows (🟢 measured). A finished sync is never debounced; see the policy.
             .task { await loadTrends(.appeared) }
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active { Task { await loadTrends(.foregrounded) } }
+                guard phase == .active else { return }
+                Task { await loadTrends(.foregrounded) }
+                // Also covers a process launched in the background that the user then opens (#243).
+                surfaceHistoryResetNotice()
             }
             .onChange(of: session?.syncing) { _, syncing in
                 if syncing == false { Task { await loadTrends(.syncFinished) } }
@@ -279,7 +288,11 @@ struct ContentView: View {
             .fullScreenCover(isPresented: Binding(
                 get: { !onboardingCompleted },
                 set: { _ in }),   // only onDone finishes: a forced dismissal never marks it seen (F2)
-                onDismiss: { resolveOrphanedWorkoutSnapshot() }) {   // the orphan check waited for it (F2)
+                onDismiss: {
+                    resolveOrphanedWorkoutSnapshot()   // the orphan check waited for it (F2)
+                    replayPendingWorkoutLink()         // then the link it held (#258)
+                    surfaceHistoryResetNotice()        // and the reset notice (#243)
+                }) {
                 OnboardingView { onboardingCompleted = true }
             }
             .task {
@@ -318,6 +331,9 @@ struct ContentView: View {
                 // and the workout would be stranded. Keyed on the snapshot instead, which survives
                 // until it is explicitly resolved.
                 resolveOrphanedWorkoutSnapshot()
+                // Tell the user if the last-resort store wipe ran (#243). Held back by its alert
+                // while the interrupted-workout offer above is up, then shown.
+                surfaceHistoryResetNotice()
                 // Reflect any prior Health authorization so the UI shows the mirrored state,
                 // and backfill anything the background refresh persisted while we were away.
                 // Runs in `.task` (after first frame), never `.onAppear` — a synchronous store
@@ -435,6 +451,20 @@ struct ContentView: View {
             } message: {
                 if let recoverableWorkout { Text(recoveryMessage(recoverableWorkout)) }
             }
+            // A link held under the onboarding cover waits for the recovery alert's answer (#258).
+            .onChange(of: workoutRecoveryAlertShowing) { _, showing in
+                guard !showing, pendingWorkoutLink != nil else { return }
+                // Let the alert finish dismissing first: a sheet asked for in the same turn can be dropped.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(400))
+                    replayPendingWorkoutLink()
+                }
+            }
+            // The one-time "local history was reset" notice (#243). SwiftUI will not present it over
+            // the alert above or a sheet, so it waits for those to close.
+            .modifier(HistoryResetNoticeAlert(
+                notice: $historyResetNotice,
+                heldBack: recoverableWorkout != nil || showWorkout || showStrapWorkout || quickLogged != nil))
             // The correction sheet for a JUST-BANKED quick log. The row is already stored by the
             // time this appears (see `handleQuickLogLink`), so dismissing without saving still
             // leaves the label captured — that is the point of the whole path.
@@ -553,6 +583,7 @@ struct ContentView: View {
                                 emptyText: "Hold still — getting a reading…")
                     .frame(height: 150)
             }
+            .modifier(OpensMeasureDetail { path.append(.metric((isHR ? MeasuredVital.heartRate : .spo2).detailMetric)) })
         } else if let strapLive, strapLive.measuring {
             // The strap's measurement on the same card (decision 30); heart rate only, no SpO₂.
             OCCard {
@@ -564,6 +595,7 @@ struct ContentView: View {
                     .frame(height: 150)
                 Text(StrapLiveHeartRate.durationCopy).font(.caption2).foregroundStyle(.secondary)
             }
+            .modifier(OpensMeasureDetail { path.append(.metric(MeasuredVital.heartRate.detailMetric)) })
         }
     }
 
@@ -901,7 +933,8 @@ struct ContentView: View {
                                                strapStress: strapStress,
                                                onStress: { path.append(.strapStress) },
                                                strapPAI: strapPAI,
-                                               onPAI: { showPAIInfo = true })
+                                               onPAI: { showPAIInfo = true },
+                                               strain: trends.todayStrain)
         case .vitalsStatus: vitalsStatusCard
         case .calories:     caloriesCard
         case .goals:        card { GoalsCardView() }
@@ -938,10 +971,45 @@ struct ContentView: View {
     /// the user somewhere that makes sense rather than back on Today.
     @MainActor
     private func handleActiveWorkoutLink() {
-        selectedTab = .activity
+        // Not under the onboarding cover (#258): a sheet presented from under it forced the cover
+        // down, was never shown itself, and left `showWorkout` stuck true (a dead WORKOUT card).
+        // Held instead, and replayed from the cover's `onDismiss`. Read fresh, as in
+        // `resolveOrphanedWorkoutSnapshot`.
         // The strap's workout has its own sheet (#227); never recording for a ring-only user.
-        if strapWorkouts.isRecording { showStrapWorkout = true; return }
-        showWorkout = true
+        switch WorkoutLinkGate.onLink(
+            onboardingCompleted: UserDefaults.standard.bool(forKey: OnboardingView.completedKey),
+            strapRecording: strapWorkouts.isRecording) {
+        case .hold(let target):
+            pendingWorkoutLink = target
+        case .open(let target):
+            openWorkoutSheet(target)
+        }
+    }
+
+    @MainActor
+    private func openWorkoutSheet(_ target: WorkoutLinkTarget) {
+        selectedTab = .activity
+        switch target {
+        case .strap: showStrapWorkout = true
+        case .ring: showWorkout = true
+        }
+    }
+
+    /// Either "Interrupted workout" alert (the ring's or the strap's) still waiting for an answer.
+    private var workoutRecoveryAlertShowing: Bool {
+        recoverableWorkout != nil || strapWorkouts.recoverable != nil
+    }
+
+    /// Open the sheet a link held under the onboarding cover asked for (#258), once nothing is in
+    /// its way; otherwise keep it pending for the next call.
+    @MainActor
+    private func replayPendingWorkoutLink() {
+        guard let target = WorkoutLinkGate.replay(
+            pending: pendingWorkoutLink,
+            onboardingCompleted: UserDefaults.standard.bool(forKey: OnboardingView.completedKey),
+            recoveryAlertShowing: workoutRecoveryAlertShowing) else { return }
+        pendingWorkoutLink = nil
+        openWorkoutSheet(target)
     }
 
     /// Look for a workout the previous process was running when it died and, if there is a
@@ -1004,6 +1072,20 @@ struct ContentView: View {
             text += " No heart-rate readings were captured before it stopped."
         }
         return text
+    }
+
+    /// Pick up the "local history was reset" notice if the last-resort wipe left one (#243).
+    /// Foreground only: a scene can connect while the app is still in the background, and that
+    /// launch must neither show nor clear it. Not under onboarding either, for the reason
+    /// `resolveOrphanedWorkoutSnapshot` gives (an alert raised under the cover dismisses it).
+    /// Reading is not clearing: the flag goes only when the alert is dismissed, so a launch that
+    /// never presents it does not lose it.
+    @MainActor
+    private func surfaceHistoryResetNotice() {
+        guard historyResetNotice == nil,
+              UserDefaults.standard.bool(forKey: OnboardingView.completedKey) else { return }
+        historyResetNotice = HistoryResetNotice.pending(
+            isBackground: UIApplication.shared.applicationState == .background)
     }
 
     @MainActor
@@ -2648,6 +2730,29 @@ private struct HelioDashboardHooks: ViewModifier {
             .onChange(of: liveHRAt) { _, _ in onLiveReading() }
             .onChange(of: liveRunning) { _, _ in onLiveRunningChanged() }
             .sheet(isPresented: $showSetup) { NavigationStack { HelioSetupView() } }
+    }
+}
+
+/// The one-time "local history was reset" alert (#243). Not presented while `heldBack` (another
+/// alert or a sheet is up); dismissing it is the acknowledgement that clears the flag and its date.
+private struct HistoryResetNoticeAlert: ViewModifier {
+    @Binding var notice: HistoryResetNotice?
+    let heldBack: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .alert(HistoryResetNotice.title, isPresented: Binding(
+                get: { notice != nil && !heldBack },
+                set: { shown in
+                    guard !shown, notice != nil else { return }
+                    HistoryResetNotice.acknowledge()
+                    notice = nil
+                })
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                if let notice { Text(notice.message()) }
+            }
     }
 }
 

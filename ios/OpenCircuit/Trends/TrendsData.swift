@@ -33,6 +33,10 @@ struct TrendsData {
     var ownership = DeviceOwnershipLog()
     /// Decision 29: each night point's device (`owner(ofNightFrom:)`), keyed by the point's date.
     var nightOwners: [Date: DeviceOwnershipLog.Family] = [:]
+    /// Today's strain so far (#216), for the Today Strain tile: today's heart rate from this same load
+    /// through `DailyStrain` (→ `Strain.calculate`), against today's resting HR from `restingHR` above,
+    /// so it never disagrees with the Resting HR tile. nil only before the first load lands.
+    var todayStrain: DailyStrain.Reading?
 
     /// The device a night point (`date` = its start of day) belongs to; the ring with an empty log.
     func nightOwner(_ date: Date) -> DeviceOwnershipLog.Family {
@@ -135,10 +139,26 @@ struct TrendsData {
         let nightOwners = inputs.summaryByNight.mapValues {
             ownership.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd)
         }
+        let todayStrain = await Task.detached { computeTodayStrain(inputs, restingHR: restingHR) }.value
         return TrendsData(points: points, recentRows: recentRows,
                           goalDays: goalDays, goalSummary: GoalHistory.summarize(goalDays, now: Date()),
                           restingHR: restingHR, newestSampleAt: newestSample(inputs),
-                          ownership: ownership, nightOwners: nightOwners)
+                          ownership: ownership, nightOwners: nightOwners, todayStrain: todayStrain)
+    }
+
+    /// Today's strain so far (#216): midnight → now, from the HR this load already fetched (already
+    /// filtered to each time's own device, decision 29). Resting HR is today's `RestingHR` value — the
+    /// Resting HR tile's headline — or, before today has one, the newest earlier day's.
+    nonisolated private static func computeTodayStrain(_ i: Inputs, restingHR: [RestingHR.DailyValue],
+                                                       now: Date = Date(),
+                                                       calendar: Calendar = .current) -> DailyStrain.Reading {
+        let today = calendar.startOfDay(for: now)
+        let window = DateInterval(start: today, end: max(now, today))
+        let hr = i.hr.filter { $0.value > 0 && window.contains($0.start) }
+            .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
+        let rhr = restingHR.first { $0.day == today }?.bpm
+            ?? restingHR.filter { $0.day < today }.max { $0.day < $1.day }?.bpm
+        return DailyStrain.reading(hr: hr, window: window, age: i.profile.age, restingHR: rhr)
     }
 
     /// Newest reading start across every series the window fetched.

@@ -313,6 +313,137 @@ final class HelioSleepSelectionTests: XCTestCase {
     }
 }
 
+// MARK: - Naps (#231, ZEPP_PROTOCOL.md §21.5)
+
+final class HelioNapRuleTests: XCTestCase {
+    private typealias Night = HelioSleepSelection.Night
+
+    /// Hours from 2026-09-30 00:00 UTC, the recorded zone of every sleep here: −1 is 23:00 the evening before.
+    private func at(_ hour: Double) -> Date { date(midnight + hour * 3600) }
+
+    private func span(_ from: Double, _ to: Double) -> DateInterval { DateInterval(start: at(from), end: at(to)) }
+
+    /// A whole-asleep strap sleep recorded in UTC.
+    private func sleep(_ from: Date, _ to: Date) -> Night {
+        Night(segments: [SleepSegment(start: from, end: to, stage: .asleepCore)],
+              window: DateInterval(start: from, end: to), strapScore: 70,
+              recordedTimeZone: TimeZone(secondsFromGMT: 0))
+    }
+
+    private func sleep(_ from: Double, _ to: Double) -> Night { sleep(at(from), at(to)) }
+
+    private func naps(_ sleeps: [Night], known: [DateInterval] = [], now: Double) -> HelioSleepSelection.NapSplit {
+        HelioSleepSelection.naps(from: sleeps, mainSleeps: known, now: at(now))
+    }
+
+    func testAnAfternoonNapIsANap() {
+        let split = naps([sleep(-1, 7), sleep(14, 15)], now: 17)
+        XCTAssertEqual(split.mainSleeps.map(\.window), [span(-1, 7)], "the night overlaps 00:00–08:00")
+        XCTAssertEqual(split.naps.map(\.window), [span(14, 15)])
+        XCTAssertEqual(split.naps.first?.segments, sleep(14, 15).segments, "the nap keeps its stages as reported")
+    }
+
+    /// The evening doze: 20:00–21:30 on the sofa, then the night from 23:00. More than 60 min from the
+    /// night, so the doze is a nap, and the night stays the main sleep.
+    func testAnEveningDozeIsANapAndNeverTakesTheNightsPlace() {
+        let split = naps([sleep(-4, -2.5), sleep(-1, 7)], now: 9)
+        XCTAssertEqual(split.mainSleeps.map(\.window), [span(-1, 7)])
+        XCTAssertEqual(split.naps.map(\.window), [span(-4, -2.5)])
+        XCTAssertTrue(split.nearMainSleep.isEmpty && split.tooShort.isEmpty && split.unsettled.isEmpty)
+
+        // Synced before bed: no night yet, and the doze is a nap all the same (no main-sleep window).
+        XCTAssertEqual(naps([sleep(-4, -2.5)], now: -1.25).naps.map(\.window), [span(-4, -2.5)])
+
+        // The night as an already stored row: the doze is still a nap, and no sleep is a main sleep of ours.
+        let stored = naps([sleep(-4, -2.5), sleep(-1, 7)], known: [span(-1, 7)], now: 9)
+        XCTAssertEqual(stored.naps.map(\.window), [span(-4, -2.5)])
+        XCTAssertEqual(stored.nearMainSleep.map(\.window), [span(-1, 7)], "the stored night itself is no nap")
+
+        // A doze ending an hour or less before the night is part of it (28f stitches it): no nap.
+        let close = naps([sleep(-3, -2), sleep(-1, 7)], now: 9)
+        XCTAssertEqual(close.mainSleeps.map(\.window), [span(-3, 7)])
+        XCTAssertTrue(close.naps.isEmpty)
+    }
+
+    /// Sleeping in after a morning switch: the ring kept 23:00–06:00 (stored, a known main sleep); the
+    /// wearer switched to the strap and slept again 07:30–09:30. The strap's sleep-in is a nap, and it
+    /// never becomes the day's main sleep in the ring night's place.
+    func testSleepingInAfterAMorningSwitchIsANapAndTheRingKeepsTheNight() {
+        let ringNight = span(-1, 6)
+        let split = naps([sleep(7.5, 9.5)], known: [ringNight], now: 11)
+        XCTAssertEqual(split.naps.map(\.window), [span(7.5, 9.5)])
+        XCTAssertTrue(split.mainSleeps.isEmpty, "the ring's night is the main sleep")
+
+        // Back to sleep within the hour: it belongs to the ring's night, so it is no nap.
+        let close = naps([sleep(6.5, 9)], known: [ringNight], now: 11)
+        XCTAssertEqual(close.nearMainSleep.map(\.window), [span(6.5, 9)])
+        XCTAssertTrue(close.naps.isEmpty)
+
+        // Before the ring has stored its night, a sleep-in overlapping 00:00–08:00 is that day's main
+        // sleep as far as anything here knows: never a nap.
+        let unknown = naps([sleep(7.5, 9.5)], now: 11)
+        XCTAssertEqual(unknown.mainSleeps.map(\.window), [span(7.5, 9.5)])
+        XCTAssertTrue(unknown.naps.isEmpty)
+    }
+
+    /// §21.5 step 2: of two sleeps in the main-sleep window, the longer is the main sleep; the other,
+    /// more than 60 min from it, is a nap.
+    func testOfTwoSleepsInTheMainWindowTheLongerIsTheNight() {
+        let split = naps([sleep(-1, 2), sleep(3.5, 7.5)], now: 10)
+        XCTAssertEqual(split.mainSleeps.map(\.window), [span(3.5, 7.5)])
+        XCTAssertEqual(split.naps.map(\.window), [span(-1, 2)])
+    }
+
+    /// A night delivered while it is still going on (§21.4) is the day's main sleep, never a nap.
+    func testANightInProgressIsNeverANap() {
+        let split = naps([sleep(-1, 2)], now: 2.5)
+        XCTAssertEqual(split.mainSleeps.map(\.window), [span(-1, 2)])
+        XCTAssertTrue(split.naps.isEmpty && split.unsettled.isEmpty)
+    }
+
+    /// A sleep overlapping a stored night (an edited window, the other device's night) is never a nap.
+    func testASleepOverlappingAStoredNightIsNoNap() {
+        let split = naps([sleep(6, 8)], known: [span(-2, 7)], now: 12)
+        XCTAssertEqual(split.nearMainSleep.map(\.window), [span(6, 8)])
+        XCTAssertTrue(split.naps.isEmpty && split.mainSleeps.isEmpty)
+    }
+
+    /// §21.5 step 4 and the settle time: under 20 min is never a nap; 20 min is. A nap is judged only
+    /// once 60 min have passed since it ended, so a later session can still stitch it into a night.
+    func testShortAndUnsettledSleepsAreNotNapsYet() {
+        let twentyMinutes = sleep(at(13), at(13).addingTimeInterval(20 * 60))
+        // The short sleep sits over an hour from every other one, so stitching never joins it to a neighbour.
+        let split = naps([sleep(-1, 7), sleep(10, 10.25), twentyMinutes, sleep(15, 16)], now: 16.5)
+        XCTAssertEqual(split.tooShort.map(\.window), [span(10, 10.25)])
+        XCTAssertEqual(split.naps.map(\.window), [twentyMinutes.window])
+        XCTAssertEqual(split.unsettled.map(\.window), [span(15, 16)])
+        XCTAssertEqual(naps([sleep(-1, 7), sleep(15, 16)], now: 17).naps.map(\.window), [span(15, 16)],
+                       "60 min after it ended, it is a nap")
+    }
+
+    /// Every sleep lands in exactly one bucket, and the main sleeps are never naps.
+    func testEverySleepIsJudgedOnce() {
+        let sleeps = [sleep(-4, -2.5), sleep(-1, 7), sleep(8.5, 8.6), sleep(13, 14), sleep(17, 18)]
+        let split = naps(sleeps, now: 18.5)
+        let all = split.naps + split.mainSleeps + split.nearMainSleep + split.tooShort + split.unsettled
+        XCTAssertEqual(Set(all.map(\.window)), Set(sleeps.map(\.window)))
+        XCTAssertEqual(all.count, sleeps.count)
+        XCTAssertEqual(split.naps.map(\.window), [span(-4, -2.5), span(13, 14)])
+    }
+
+    /// Through the record parser: a night session and an afternoon session of one day.
+    func testParsedSessionsGiveTheNightAndTheNap() throws {
+        let night = sessionRecord(stages: [(1380, 1500, 0x04), (1500, 1860, 0x05)])   // 23:00–07:00
+        let nap = sessionRecord(stages: [(2280, 2310, 0x04), (2310, 2340, 0x05)])     // 14:00–15:00
+        let now = date(midnight + 17 * 3600)
+        let sleeps = try parseSessions([night, nap]).compactMap { HelioSleepSelection.night(from: $0, now: now) }
+        let split = HelioSleepSelection.naps(from: sleeps, mainSleeps: [], now: now)
+        XCTAssertEqual(split.mainSleeps.map(\.window), [DateInterval(start: sessionTime(1380), end: sessionTime(1860))])
+        XCTAssertEqual(split.naps.map(\.window), [DateInterval(start: sessionTime(2280), end: sessionTime(2340))])
+        XCTAssertEqual(split.naps.first?.segments.map(\.stage), [.asleepCore, .asleepDeep])
+    }
+}
+
 // MARK: - Fetch plan and watermarks
 
 final class HelioFetchPlanTests: XCTestCase {

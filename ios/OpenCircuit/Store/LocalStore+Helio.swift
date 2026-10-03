@@ -9,7 +9,8 @@ import ZeppKit
 //   • samples through `ingest(_:device:)`, deduplicated by the timeline's per-kind cursors;
 //   • per-minute steps into `StoredStepSample` / `StoredDaily`, deduplicated by a step cursor;
 //   • each history type's fetch watermark as a `StoredCursor` row (`HelioFetchPlan.cursorName`);
-//   • nights through `saveSleepSummary`, which already refuses to overwrite a manually edited night.
+//   • nights through `saveSleepSummary`, which already refuses to overwrite a manually edited night;
+//   • naps (#231) through `saveNap`, as `StoredNap` rows like the ring's (`saveHelioNap`).
 
 extension LocalStore {
 
@@ -158,6 +159,51 @@ extension LocalStore {
         return DateInterval(start: record.spanStart, end: record.spanEnd)
     }
 
+    // MARK: Naps (#231)
+
+    /// Every stored night's window near `[start, end]`, whichever device stored it: the recorded in-bed
+    /// window and, for an edited night, the edited one too. The main sleeps a strap nap is judged
+    /// against (`HelioSleepSelection.naps(from:mainSleeps:now:)`), so a nap never sits in or beside a
+    /// night either device keeps.
+    func storedNightWindows(from start: Date, to end: Date) -> [DateInterval] {
+        let lo = Calendar.current.date(byAdding: .day, value: -2, to: start) ?? start
+        let hi = Calendar.current.date(byAdding: .day, value: 2, to: end) ?? end
+        let rows = (try? sleepSummaries(from: lo, to: hi)) ?? []
+        var windows: [DateInterval] = []
+        for row in rows {
+            if row.inBedEnd > row.inBedStart { windows.append(DateInterval(start: row.inBedStart, end: row.inBedEnd)) }
+            if row.isManuallyEdited, row.editedInBedEnd > row.editedInBedStart {
+                windows.append(DateInterval(start: row.editedInBedStart, end: row.editedInBedEnd))
+            }
+        }
+        return windows
+    }
+
+    /// Whether a stored nap other than the one keyed at `window.start` overlaps `window`: a nap the
+    /// person added or edited (theirs, never replaced by a detection), or an earlier detection under
+    /// another start. Either way the strap's nap is not stored beside it, so no sleep is counted twice.
+    func otherNapOverlaps(_ window: DateInterval) -> Bool {
+        let lo = window.start.addingTimeInterval(-86_400)
+        let hi = window.end.addingTimeInterval(86_400)
+        let rows = (try? naps(from: lo, to: hi)) ?? []
+        return rows.contains { nap in
+            guard nap.start != window.start || nap.isManuallyAdded || nap.isManuallyEdited else { return false }
+            let start = min(nap.start, nap.effectiveStart)
+            let end = max(nap.end, nap.effectiveEnd)
+            return start < window.end && window.start < end
+        }
+    }
+
+    /// Store one of the strap's naps (#231) exactly as the ring's are (`saveNap`): keyed by its start,
+    /// the strap's stages as its hypnogram, so Apple Health gets them as ordinary sleep (§21.5 step 5)
+    /// on the next flush (`HealthKitWriter.flushNaps`), named after the strap.
+    func saveHelioNap(_ nap: HelioSleepSelection.Night) throws {
+        try saveNap(start: nap.window.start, end: nap.window.end,
+                    asleepMin: Int((SleepStaging.totalAsleep(nap.segments) / 60).rounded()),
+                    isLongNap: nap.window.duration >= NapDetection.longNapDuration,
+                    segments: nap.segments, family: .zeppOS)
+    }
+
     /// `device`'s stored skin temperatures in `window` (already gated when stored).
     func helioTemperatures(in window: DateInterval, device: SyncDeviceID) -> [TemperatureSample] {
         let kindRaw = MetricKind.temperature.rawValue
@@ -190,6 +236,11 @@ final class HelioStoreSink: HelioHistorySink {
     private var notOvernightLogged: Set<DateInterval> = []
     /// Sleeps kept out of a night already written to Apple Health (28f), logged once per sync.
     private var keptApartLogged: Set<DateInterval> = []
+    /// #231: what the store made of each overnight sleep offered as a night this sync, by window. Only an
+    /// overnight sleep another night kept out of its key (`nightKeptOut`) may be judged as a nap.
+    private var nightOutcomes: [DateInterval: SleepPersistOutcome] = [:]
+    /// #231: nap verdicts already logged this sync, so a re-run logs each once.
+    private var napLogged: Set<DateInterval> = []
     private var latestStress: HelioReading?
     private var latestPAI: HelioReading?
 
@@ -234,6 +285,8 @@ final class HelioStoreSink: HelioHistorySink {
         keptFullerNights = []
         notOvernightLogged = []
         keptApartLogged = []
+        nightOutcomes = [:]
+        napLogged = []
         latestStress = nil
         latestPAI = nil
     }
@@ -345,7 +398,8 @@ final class HelioStoreSink: HelioHistorySink {
             // a different night for its key (the stitched one, or another sleep that would replace it)
             // is kept out, so Health gets no second write of the night and nothing written is silently
             // replaced. A night not yet written still stitches. The later session is not stored as a
-            // row of its own in v1 (strap naps are 28c's follow-up): an open question for Juan.
+            // row of its own: it is 60 min or less from the night, so §21.5 makes it part of the main
+            // sleep, never a nap (#231, `storeNaps` never sees it).
             if let written = store.writtenNightSpan(for: night),
                abs(written.start.timeIntervalSince(night.window.start)) > 1 || abs(written.end.timeIntervalSince(night.window.end)) > 1 {
                 if keptApartLogged.insert(night.window).inserted {
@@ -354,6 +408,7 @@ final class HelioStoreSink: HelioHistorySink {
                 continue
             }
             let outcome = try store.saveHelioNight(night, device: timeline)
+            nightOutcomes[night.window] = outcome
             if outcome == .inserted || outcome == .updated { storedNights.append(night) }
             // Decision 50a (#253): the merge kept the stored night over this re-delivery, so without
             // this nothing offers the night to Health again: its first store can land inside the
@@ -364,13 +419,82 @@ final class HelioStoreSink: HelioHistorySink {
             if outcome == .keptFullerStoredNight, !keptFullerNights.contains(where: { $0.window == night.window }) {
                 keptFullerNights.append(night)
             }
-            // Review-224e S-2: a sleep more than 60 min from the night's other part is not stitched
-            // (28f), and its key already holds the longer part, so it is stored nowhere until strap naps
-            // (#231). Say so in the breadcrumbs, without its time or length.
-            if outcome == .keptFullerStoredNight,
-               (try? store.sleepSummaryOverlapping(start: night.window.start, end: night.window.end)) == nil {
-                breadcrumbs?.strapSleepKeptOut(nightKey: SleepNightKey.night(inBedStart: night.window.start, inBedEnd: night.window.end))
+        }
+        // #231: then the naps, judged against the nights as they are stored NOW, so a nap is never
+        // chosen over a night (the nights above were stored first, and nothing here touches a night).
+        storeNaps(nights, overnight: overnight, timeline: timeline, now: now)
+    }
+
+    /// The outcomes that mean another night holds the sleep's key, so the sleep itself is no night: the
+    /// longer part of its own night (review-224e S-2), the other device's night (28a), or a night the
+    /// key already names (28d). Any other outcome (stored, kept as edited, deferred, failed) leaves the
+    /// sleep a night, never a nap.
+    private static let nightKeptOut: Set<SleepPersistOutcome> = [.keptFullerStoredNight, .ownedByOtherDevice, .refusedNightKeyCollision]
+
+    /// #231 (ZEPP_PROTOCOL.md §21.5): store the strap's naps among `sleeps` (the sync's own stitched
+    /// sleeps, `ownedNights`) like the ring's (`StoredNap`), shown in the same views and written to
+    /// Apple Health by the same flush.
+    ///
+    /// The candidates are the sleeps that are no night: those 28c/28d kept from being one (daytime, or
+    /// not ending in a wake window), and overnight ones another night kept out of their key
+    /// (`nightKeptOut`). A sleep offered as a night and stored, edited, deferred or left out for any
+    /// other reason is never a candidate. `HelioSleepSelection.naps` then judges them against every
+    /// stored night (either device's) and the day's main-sleep window: a nap is more than 60 min from
+    /// every main sleep, 20 min or longer, and settled. Only a nap the strap owned all of is stored
+    /// (decision 28); `saveNap` refuses one overlapping a stored night, and a night stored later prunes
+    /// an auto nap it overlaps, so a nap never displaces a night.
+    private func storeNaps(_ sleeps: [HelioSleepSelection.Night], overnight: [HelioSleepSelection.Night],
+                           timeline: SyncDeviceID, now: Date) {
+        let overnightWindows = Set(overnight.map(\.window))
+        var candidates: [HelioSleepSelection.Night] = []
+        var keptOutOfItsNight: [HelioSleepSelection.Night] = []   // review-224e S-2's case
+        for sleep in sleeps {
+            if overnightWindows.contains(sleep.window) {
+                guard let outcome = nightOutcomes[sleep.window], Self.nightKeptOut.contains(outcome) else { continue }
+                if outcome == .keptFullerStoredNight { keptOutOfItsNight.append(sleep) }
             }
+            candidates.append(sleep)
+        }
+        guard let first = candidates.map(\.window.start).min(), let last = candidates.map(\.window.end).max() else { return }
+        let split = HelioSleepSelection.naps(from: candidates, mainSleeps: store.storedNightWindows(from: first, to: last), now: now)
+        let log = LocalStore.ownershipLog()
+        let family = DeviceOwnershipLog.Family(timeline: timeline)
+        var storedAsNaps: Set<DateInterval> = []
+        for nap in split.naps {
+            let span = Self.clockSpan(nap.window, in: nap.recordedTimeZone)
+            guard log.ownsWholly(family, from: nap.window.start, to: nap.window.end) else {
+                if napLogged.insert(nap.window).inserted {
+                    helioLog.notice("helio: nap \(span, privacy: .public) is not wholly in the strap's time; not stored")
+                }
+                continue
+            }
+            guard !store.otherNapOverlaps(nap.window) else {
+                if napLogged.insert(nap.window).inserted {
+                    helioLog.notice("helio: nap \(span, privacy: .public) overlaps another stored nap; not stored")
+                }
+                continue
+            }
+            // Best effort: a nap that fails to save is judged again on the next sync (the strap keeps
+            // its sessions, decision 8); it never fails the round, whose nights are already stored.
+            do { try store.saveHelioNap(nap) } catch {
+                helioLog.error("helio: storing a nap failed: \(error.localizedDescription, privacy: .public)")
+                continue
+            }
+            storedAsNaps.insert(nap.window)
+            if napLogged.insert(nap.window).inserted {
+                helioLog.notice("helio: sleep session \(span, privacy: .public) stored as a nap")
+            }
+        }
+        for sleep in split.tooShort where napLogged.insert(sleep.window).inserted {
+            // §21.5 step 4: the strap shouldn't send these, so one arriving says the rule is wrong.
+            helioLog.notice("helio: sleep session \(Self.clockSpan(sleep.window, in: sleep.recordedTimeZone), privacy: .public) is under 20 min; not a nap")
+            breadcrumbs?.strapSleepTooShort(day: Calendar.current.startOfDay(for: sleep.window.end))
+        }
+        // Review-224e S-2: a sleep more than 60 min from the night's longer part is kept out of its
+        // night; say whether it is a nap now, without its time or length.
+        for sleep in keptOutOfItsNight where (try? store.sleepSummaryOverlapping(start: sleep.window.start, end: sleep.window.end)) == nil {
+            breadcrumbs?.strapSleepKeptOut(nightKey: SleepNightKey.night(inBedStart: sleep.window.start, inBedEnd: sleep.window.end),
+                                           storedAsNap: storedAsNaps.contains(sleep.window))
         }
     }
 

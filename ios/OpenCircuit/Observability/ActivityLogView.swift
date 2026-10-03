@@ -100,8 +100,7 @@ struct ActivityLogView: View {
                 timeRow("Last scheduled", store.bgLastScheduled)
                 LabeledContent("Background App Refresh", value: refreshStatusText)
                 if refreshStatus != .available {
-                    Text("iOS is limiting background activity. Turn on Settings ▸ General ▸ "
-                         + "Background App Refresh so the ring can sync while the app is closed.")
+                    Text(SharedScreenCopy.backgroundRefreshLimited(ActiveDeviceChoiceStore.shared.current))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Text("Background heart-rate runs at iOS's discretion (usually overnight while "
