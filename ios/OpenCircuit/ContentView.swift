@@ -844,7 +844,8 @@ struct ContentView: View {
                                                strapStress: strapStress,
                                                onStress: { path.append(.strapStress) },
                                                strapPAI: strapPAI,
-                                               onPAI: { showPAIInfo = true })
+                                               onPAI: { showPAIInfo = true },
+                                               strain: trends.todayStrain)
         case .vitalsStatus: vitalsStatusCard
         case .calories:     caloriesCard
         case .goals:        card { GoalsCardView() }
