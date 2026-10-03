@@ -3149,16 +3149,20 @@ struct LocalStore {
     /// Upsert one auto-detected nap, keyed by start. A re-detected nap with the same start
     /// updates in place; a genuinely new nap inserts. Preserves `healthWritten` on update so a
     /// nap already mirrored to Health isn't re-written.
+    ///
+    /// `family` is the device that detected it: the ring (`RingSession.persistNaps`), or the Helio
+    /// Strap (`saveHelioNap`, #231). The row has no device column (no schema change): the ownership
+    /// log says whose it is, so a nap is stored only in time its own device owned.
     func saveNap(start: Date, end: Date, asleepMin: Int, isLongNap: Bool,
-                 segments: [SleepSegment] = []) throws {
+                 segments: [SleepSegment] = [], family: DeviceOwnershipLog.Family = .ringConn) throws {
         // Persistence-layer backstop mirroring the manual path's: a nap overlapping a STORED night
         // is that night's sleep counted twice. `NapDetection` only excludes the slice-local
         // `mainSleep`, so a partial drain slice holding just a post-arousal morning bout (too short
         // to be a night on its own) would otherwise re-save a "nap" the archive-union staging
         // absorbs into the night (🟢 2026-08-16 device case; review find).
         if overlapsStoredNight(start, end) { return }
-        // Decision 28: the ring detects naps; one in time the strap owned is not the ring's to store.
-        if !Self.ownershipLog().owns(.ringConn, at: DeviceOwnershipLog.midpoint(start, end)) { return }
+        // Decision 28: a nap in time the other device owned is not this device's to store.
+        if Self.ownershipLog().owner(at: DeviceOwnershipLog.midpoint(start, end)) != family { return }
         let descriptor = FetchDescriptor<StoredNap>(predicate: #Predicate { $0.start == start })
         if let existing = try? context.fetch(descriptor).first {
             // A manually edited/added nap is authoritative — auto re-detection must not overwrite it.
@@ -3307,13 +3311,18 @@ struct LocalStore {
             predicate: #Predicate { $0.healthWritten == false },
             sortBy: [SortDescriptor(\.start, order: .forward)])
         let naps = try context.fetch(descriptor)
-        // Decision 28: a detected nap in time the ring didn't own never reaches Apple Health. A nap
-        // the person added or edited is theirs, whatever device was chosen. No-op for ring-only.
+        // Decision 28: a detected nap reaches Apple Health only in time its device owned: the ring's
+        // at its midpoint, as before, and the Helio Strap's (#231) only when the strap owned all of
+        // it, the rule `HelioStoreSink` stores it under. `saveNap` never stores a ring nap in the
+        // strap's time, so a detected row there is the strap's. A nap the person added or edited is
+        // theirs, whatever device was chosen. No-op for ring-only. The write names the device that
+        // owned the nap's start (`HealthKitWriter.nightDevice`): the Helio Strap for a strap nap.
         let log = Self.ownershipLog()
         guard !log.isEmpty else { return naps }
         return naps.filter { nap in
             nap.isManuallyAdded || nap.isManuallyEdited
                 || log.owns(.ringConn, at: DeviceOwnershipLog.midpoint(nap.effectiveStart, nap.effectiveEnd))
+                || log.ownsWholly(.zeppOS, from: nap.effectiveStart, to: nap.effectiveEnd)
         }
     }
 

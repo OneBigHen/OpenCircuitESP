@@ -2360,6 +2360,29 @@ Until §10 item 29 finds a marker in the record, apply Amazfit's rule on the pho
    (`HEALTHKIT_MAPPING.md`, `0x48` row). Mark the nap as such only in OpenCircuit's own model,
    e.g. to keep it out of "last night".
 
+### 21.6 Status in OpenCircuit (#231)
+
+Implemented on the phone as §21.5 describes; still 🔴 until §10 item 29 checks it against a real
+nap. `HelioSleepSelection.naps(from:mainSleeps:now:)` (ZeppKit) is the rule, and the app stores its
+naps as `StoredNap` rows next to the ring's (`HelioStoreSink.storeNaps`). Where it goes beyond
+§21.5:
+
+- **Main sleeps**: the nights already stored, by either device, count as main sleeps. So after a
+  morning switch from the ring, a strap sleep-in more than 60 min after the ring's night is a nap,
+  and one within 60 min is part of that night (no nap, no strap night). A day whose 00:00–08:00
+  window no stored night covers takes the longest strap sleep in that window as its main sleep, so a
+  night that wasn't stored (in progress, or a failed save) never becomes a nap. The window is fixed:
+  there is no setting for it yet.
+- **Candidates**: only sleeps the app didn't take as a night. A sleep is a night or a nap, never
+  both, and the nights are stored before the naps are judged.
+- **Settling**: a nap is judged only once 60 min have passed since it ended, so a later session that
+  would stitch onto it (28f) has had its chance. A night stored later still prunes an auto nap it
+  overlaps.
+- **Ownership**: a nap counts only when the strap owned all of it (no switch inside it).
+- **Under 20 minutes**: not stored; a `helio-link` breadcrumb notes it (step 4).
+- A stored nap that a later sync finds within 60 min of a night (for instance the ring's night,
+  synced after the strap's nap) is not removed. Whether that ever happens on a real switch is open.
+
 ---
 
 ## Changelog
@@ -2403,3 +2426,4 @@ Until §10 item 29 finds a marker in the record, apply Amazfit's rule on the pho
 - 2026-10-01: parity addendum, part 6 (zepp-parity-spec agent, #231): §21, naps: Amazfit's nap
   rule, what the references say (nothing), how a nap probably appears in `0x48`, re-fetching
   sessions, the phone-side nap rule; capture item 29.
+- 2026-10-03: §21.6, what the app implements of §21.5 for strap naps (#231). No tag was promoted.
