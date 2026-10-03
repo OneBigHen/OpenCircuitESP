@@ -28,7 +28,8 @@ final class SleepConfidenceCopyTests: XCTestCase {
 
     private func hints(asleep: TimeInterval, inBed: TimeInterval,
                        before: Date?, after: Date?,
-                       start: Date, end: Date) -> [SleepConfidence.Hint] {
+                       start: Date, end: Date,
+                       device: String = "ring") -> [SleepConfidence.Hint] {
         SleepConfidence.hints(
             SleepConfidence.assess(
                 asleep: asleep, inBed: inBed,
@@ -40,7 +41,8 @@ final class SleepConfidenceCopyTests: XCTestCase {
                     // which an empty series reproduces exactly (`WakeProvenance.classify`).
                     measurementsAfterEnd: [],
                     earliestRetainedMeasurement: start.addingTimeInterval(-7 * 86_400))),
-            clock: clock)
+            clock: clock,
+            device: device)
     }
 
     // MARK: - The back edge — the R2_2026-08-18 shape
@@ -167,6 +169,33 @@ final class SleepConfidenceCopyTests: XCTestCase {
                        + "in bed, tap Edit to correct it.")
     }
 
+    /// #257: a night another device recorded names THAT device, never the ring. The ring's
+    /// sentences above stay word for word.
+    func testTheSentencesNameTheDeviceThatRecordedTheNight() {
+        let start = t0, end = t0.addingTimeInterval(329 * 60)
+        let front = hints(asleep: 246 * 60, inBed: 329 * 60,
+                          before: start.addingTimeInterval(-241.3 * 60),
+                          after: end.addingTimeInterval(60),
+                          start: start, end: end, device: "strap")
+        XCTAssertEqual(front.map(\.text),
+                       ["\(clock(start)) is when the strap started recording again, not when you "
+                        + "settled — it recorded nothing for 4h 1m before that. If you were already "
+                        + "in bed, tap Edit to correct it."])
+
+        let stillEnd = t0.addingTimeInterval(6 * 3600)
+        let still = hints(asleep: 6 * 3600 * 0.99, inBed: 6 * 3600,
+                          before: start.addingTimeInterval(-60),
+                          after: stillEnd.addingTimeInterval(60),
+                          start: start, end: stillEnd, device: "strap")
+        XCTAssertEqual(still.map(\.reason), [.durationLikelyHigh])
+        XCTAssertTrue(still[0].text.contains("The strap can't sense"))
+
+        for text in (front + still).map(\.text) {
+            XCTAssertNil(text.range(of: "\\bring\\b", options: [.regularExpression, .caseInsensitive]),
+                         "a strap night's sentence says ring: \(text)")
+        }
+    }
+
     // MARK: - Silence
 
     func testWitnessedOnBothEdgesAndPlausibleEfficiencySaysNothing() {
@@ -217,7 +246,7 @@ final class SleepConfidenceCopyTests: XCTestCase {
                 measurementsAfterEnd: [],
                 earliestRetainedMeasurement: start.addingTimeInterval(-7 * 86_400)),
             materialGapSeconds: .infinity)
-        XCTAssertTrue(SleepConfidence.hints(a, clock: clock).isEmpty)
+        XCTAssertTrue(SleepConfidence.hints(a, clock: clock, device: "ring").isEmpty)
     }
 
     // MARK: - Gap rendering

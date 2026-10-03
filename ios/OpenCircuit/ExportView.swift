@@ -89,7 +89,7 @@ struct ExportView: View {
 
                 case .singleSession:
                     if nights.isEmpty {
-                        Text("No recorded nights yet — sync the ring first.")
+                        Text(SharedScreenCopy.exportNoNights(ActiveDeviceChoiceStore.shared.current))
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
                         Picker("Night", selection: $selectedNight) {
@@ -163,27 +163,19 @@ struct ExportView: View {
             }
 
             Section {
-                // "how much of this night the app holds" — NOT "how much the ring delivered". The
-                // file's own coverage note says the export cannot tell an unworn ring, an undrained
+                // "how much of this night the app holds" — NOT "how much the device delivered". The
+                // file's own coverage note says the export cannot tell an unworn device, an undrained
                 // backlog and lost epochs apart, so the screen must not attribute a shortfall to the
-                // ring either.
-                Text("Each export carries the raw timestamped measurements the ring delivered — heart "
-                     + "rate, HRV, SpO₂, respiratory rate, skin temperature, step deltas — plus one "
-                     + "row per sleep session: bedtime and wake times, the per-epoch sleep stages, the "
-                     + "overnight SpO₂ (apnea) figures, and a coverage measurement showing how much of "
-                     + "the night this app currently holds. Every section is labelled measured, "
-                     + "derived or diagnostic, and the file records the app build, ring model and "
-                     + "firmware, and which timezone its timestamps are in.")
+                // device either.
+                //
+                // Both texts are about the FILE, which holds every device's stored rows (#257), so
+                // they are composed over every device rather than read off the one in use.
+                Text(SharedScreenCopy.exportContents)
                     .font(.caption).foregroundStyle(.secondary)
-                // The honest half. These caveats are also written into the file's own `notes` — in
-                // BOTH formats, CSV included — but a reader who never opens the file should still
-                // meet them before they act on a number.
-                Text("Sleep stages are an ON-DEVICE ESTIMATE — the ring transmits no hypnogram, so "
-                     + "stage totals approximate the RingConn app's but the placement of individual "
-                     + "cycles is not validated. The overnight lowest SpO₂, time below 90 % and ODI "
-                     + "are EXPERIMENTAL estimates; only the average SpO₂ is validated (±1 %) against "
-                     + "the RingConn app. Nothing leaves this device unless you share or save the file "
-                     + "yourself, and the ring's MAC address and your device's name are never included.")
+                // The honest half. The ring's caveats are also written into the file's own `notes`
+                // — in BOTH formats, CSV included — but a reader who never opens the file should
+                // still meet them before they act on a number.
+                Text(SharedScreenCopy.exportCaveats)
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -210,7 +202,7 @@ struct ExportView: View {
             return "\(newSessionCount) session\(newSessionCount == 1 ? "" : "s") ready to export."
         }
         return lastExported == nil
-            ? "No sleep sessions recorded yet — sync the ring first."
+            ? SharedScreenCopy.exportNoSessions(ActiveDeviceChoiceStore.shared.current)
             : "No sleep sessions recorded since then."
     }
 

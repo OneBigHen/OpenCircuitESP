@@ -126,7 +126,7 @@ struct HealthKitHistoryInspector {
     private static let defaultMissingCapabilities: [String] = [
         "Apple Health history can now help Vitals Status baseline-building for skin temperature, overnight HRV and overnight SpO₂.",
         "Apple Health history still can't rebuild OpenCircuit's stage-estimated sleep architecture.",
-        "Sleep Score, movement, resting-stage HR and per-stage HR still require ring-native overnight data.",
+        "Sleep Score, movement, resting-stage HR and per-stage HR still require your wearable's own overnight data.",
         "This check is read-only and does not import Apple Health samples into the local store."
     ]
 

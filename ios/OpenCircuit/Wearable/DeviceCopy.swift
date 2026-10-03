@@ -1,4 +1,5 @@
 import Foundation
+import OpenCircuitKit
 import ZeppKit
 
 /// Every piece of user-facing copy that names a device or depends on one (decision 51e). Each field
@@ -119,6 +120,105 @@ extension ActiveDeviceChoice {
                 + "there, so that time isn't treated as sitting still."
         case .helioStrap: return nil
         }
+    }
+
+    /// The Goals footnote's last line: what the Activity Score still waits on for this device. Nil
+    /// when nothing is pending: the ring's activity payload is only partly decoded, while the strap's
+    /// steps come from its own activity records.
+    var activityScoreAccuracyNote: String? {
+        switch self {
+        case .ringConn: return "Full accuracy follows the ring activity-payload decode."
+        case .helioStrap: return nil
+        }
+    }
+
+    /// Data Export: where this device's nights' sleep stages come from. The ring sends no hypnogram,
+    /// so its nights are staged on the phone (`SleepStaging`); the strap stages its own nights, and a
+    /// night it did not stage is not stored (`HelioSleepSelection`, decision 13).
+    var sleepStagingNote: String {
+        switch self {
+        case .ringConn:
+            return "A RingConn ring sends no hypnogram, so OpenCircuit ESTIMATES its nights' stages on this "
+                + "phone: stage totals approximate the RingConn app's, but the placement of individual cycles "
+                + "is not validated."
+        case .helioStrap:
+            return "The Helio Strap stages its own nights, and the export carries the stages it sent."
+        }
+    }
+
+    /// Data Export: the caveat on this device's overnight SpO₂ (apnea) figures, if it has any. Only
+    /// the ring's `0x48` assessment burst fills the `osa*` columns (`LocalStore.applyOSASummary`,
+    /// called from `RingSession`), so a strap night has no such figures and no caveat.
+    var overnightSpO2Note: String? {
+        switch self {
+        case .ringConn:
+            return "On ring nights, the overnight lowest SpO₂, time below 90 % and ODI are EXPERIMENTAL "
+                + "estimates; only the average SpO₂ is validated (±1 %) against the RingConn app."
+        case .helioStrap: return nil
+        }
+    }
+}
+
+/// Copy on screens every device's data reaches (#257): Today, Activity, Sleep, Data Export and
+/// Background Activity. A line about what the ACTIVE device does takes it; a line about stored data,
+/// which can hold every device's, takes nothing and composes over `allCases`.
+enum SharedScreenCopy {
+    /// Today and Activity ▸ Goals footnote. "Not your device app's own" matches the readiness card
+    /// (`WellnessBalanceCardView`).
+    static func goalsFootnote(_ device: ActiveDeviceChoice) -> String {
+        let base = "\u{B9} Activity Score is an on-device estimate — the weighted attainment of your step, "
+            + "active-calorie & elevated-HR goals, not your device app's own number. Elevated HR counts time "
+            + "spent at least 40% of the way from your resting heart rate up to your age-estimated maximum, so "
+            + "the bar moves with your resting pulse instead of being the same number for everyone; on a day "
+            + "with too little data to read your resting pulse it falls back to half your age-estimated "
+            + "maximum. Active calories and elevated-HR minutes use those same qualifying periods; steps remain "
+            + "the calorie fallback. Elevated HR is not detected workout duration."
+        return device.activityScoreAccuracyNote.map { base + " " + $0 } ?? base
+    }
+
+    /// Background Activity, when iOS limits Background App Refresh. Both devices sync on the app's
+    /// background wakes, each only while chosen (docs/BACKGROUND_SYNC.md; B.5 is the strap).
+    static func backgroundRefreshLimited(_ device: ActiveDeviceChoice) -> String {
+        "iOS is limiting background activity. Turn on Settings ▸ General ▸ Background App Refresh so the "
+            + "\(device.noun) can sync while the app is closed."
+    }
+
+    /// Data Export, "One night", with no night stored yet: syncing the device in use fills it.
+    static func exportNoNights(_ device: ActiveDeviceChoice) -> String {
+        "No recorded nights yet — sync your \(device.noun) first."
+    }
+
+    /// Data Export, "New only", with no night stored yet.
+    static func exportNoSessions(_ device: ActiveDeviceChoice) -> String {
+        "No sleep sessions recorded yet — sync your \(device.noun) first."
+    }
+
+    /// Data Export: what a file holds. The rows are every device's (see `ProfileDeviceCopy.exportNote`),
+    /// but the device metadata is the ring's only: `ExportBuilder.metadata` fills `ringModel`/`ringFirmware`
+    /// from `RingMetadataStore`, which is blank when no ring was ever connected.
+    static let exportContents = "Each export carries the raw timestamped measurements your wearable delivered "
+        + "— heart rate, HRV, SpO₂, respiratory rate, skin temperature, step deltas — plus one row per sleep "
+        + "session: bedtime and wake times, the per-epoch sleep stages, the overnight SpO₂ (apnea) figures, and "
+        + "a coverage measurement showing how much of the night this app currently holds. Every section is "
+        + "labelled measured, derived or diagnostic, and the file records the app build, the model and "
+        + "firmware of the last ring connected (if any), and which timezone its timestamps are in."
+
+    /// Data Export: the caveats, over every device, because one file can hold every device's nights.
+    /// No device's Bluetooth address is exported: `RingMetadataStore` caches no MAC-derived bytes
+    /// (`ExportBuilder.metadata`), and nothing of the strap's identity is read into the export.
+    static var exportCaveats: String {
+        let all = ActiveDeviceChoice.allCases
+        return (["Sleep stages:"] + all.map(\.sleepStagingNote) + all.compactMap(\.overnightSpO2Note)
+            + ["Nothing leaves this device unless you share or save the file yourself, and your wearable's "
+                + "Bluetooth address and your phone's name are never included."])
+            .joined(separator: " ")
+    }
+
+    /// The device that recorded a night of the given family. The sleep card's caveats name it, which
+    /// after a switch need not be the device in use (decision 28a: the device you went to bed with
+    /// keeps the night).
+    static func device(owning family: DeviceOwnershipLog.Family) -> ActiveDeviceChoice {
+        ActiveDeviceChoice.allCases.first { $0.ownershipFamily == family } ?? .ringConn
     }
 }
 
