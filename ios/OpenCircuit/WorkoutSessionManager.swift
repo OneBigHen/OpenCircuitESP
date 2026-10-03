@@ -663,28 +663,12 @@ final class WorkoutSessionManager: NSObject {
     /// outside this workout's own window.
     private func vo2MaxEstimate(summary: WorkoutSummary, hrSamples: [HRSample],
                                 route: [CLLocation]) -> VO2MaxEstimate.Outcome {
-        var points: [VO2MaxEstimate.RoutePoint] = []
-        var cumulative = 0.0
-        var previous: CLLocation?
-        for location in route {
-            if let previous { cumulative += location.distance(from: previous) }
-            previous = location
-            let hasAltitude = location.verticalAccuracy > 0
-            points.append(VO2MaxEstimate.RoutePoint(
-                time: location.timestamp, distance: cumulative,
-                altitude: hasAltitude ? location.altitude : nil,
-                verticalAccuracy: hasAltitude ? location.verticalAccuracy : nil))
-        }
-        let age = UserDefaults.standard.object(forKey: "userProfile.age") as? Int
+        let points = VO2MaxInputs.routePoints(route)
+        let age = VO2MaxInputs.userSetAge()
         var restingHR: Double?
         if let store {
-            let since = summary.startDate.addingTimeInterval(-9 * 86_400)
-            let window = summary.startDate ... summary.endDate
-            let history = ((try? store.recentSamples(kind: .heartRate, since: since)) ?? [])
-                .filter { !window.contains($0.start) }
-                .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
-            restingHR = VO2MaxEstimate.restingHR(daily: RestingHR.dailyValues(hr: history),
-                                                 runStart: summary.startDate)
+            restingHR = VO2MaxInputs.restingHR(store: store, workoutStart: summary.startDate,
+                                               workoutEnd: summary.endDate)
         }
         return VO2MaxEstimate.estimate(VO2MaxEstimate.Input(
             sport: summary.sport, start: summary.startDate, end: summary.endDate,

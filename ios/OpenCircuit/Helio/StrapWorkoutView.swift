@@ -263,6 +263,14 @@ struct StrapWorkoutView: View {
                 }
                 .padding(.horizontal)
 
+                // Training load, and the VO₂ max estimate for an outdoor run (#232) — the ring's
+                // section, over the strap's heart rate.
+                WorkoutTrainingMetricsSection(summary: summary,
+                                              vo2Outcome: recorder.vo2MaxOutcome,
+                                              vo2HealthStatus: recorder.vo2MaxHealthStatus,
+                                              distanceUnit: distanceUnit)
+                    .padding(.horizontal)
+
                 VStack(alignment: .leading, spacing: 6) {
                     noteRow("iphone", .secondary,
                             "Duration, calories and zones are OpenCircuit's own, worked out on your phone from the strap's live heart rate\(summary.hasRoute ? " and your phone's location" : ""). The strap made no record of this workout.")
