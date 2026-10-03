@@ -1,3 +1,4 @@
+import BackgroundTasks
 import SwiftData
 import XCTest
 import OpenCircuitKit
@@ -161,9 +162,12 @@ final class StrapNightHealthTests: XCTestCase {
     private var timeline: SyncDeviceID { SyncDeviceID.timeline(for: .zeppOS(model: ""), identityID: strapID) }
 
     /// One strap sync at `now` delivering `stages` as one session, through the production path; the result.
-    private func sync(_ stages: [(Double, Double, UInt8)], at now: Date, store: LocalStore) throws -> HelioSyncResult {
+    /// nil `stages`: the strap has stopped re-delivering the night (#262), so the sync carries no sleep.
+    private func sync(_ stages: [(Double, Double, UInt8)]?, at now: Date, store: LocalStore) throws -> HelioSyncResult {
         clock = now
-        let transport = Transport(device: makeStrap(stages))
+        let device = makeStrap(stages ?? firstDelivery)
+        if stages == nil { device.fetchData = [:] }
+        let transport = Transport(device: device)
         let keys = Keys()
         let session = HelioSession(transport: transport, identityID: strapID, key: keys.load(), keyStore: keys,
                                    sink: HelioStoreSink(store: store), findState: HelioFindState(),
@@ -391,18 +395,19 @@ final class StrapNightHealthTests: XCTestCase {
         XCTAssertTrue(SleepHealthGate.isReadyToWrite(latestSegmentEnd: stranded.map(\.end).max(), now: hour(9), finalized: false))
     }
 
-    /// The newest stored night is never offered, however long ago it ended: it can be a stale partial
-    /// copy of a night still in progress (a sync whose sleep round ran out of time, here 23:00–03:00).
-    /// Mirrored, 28f's "the written night stands" would keep the full night out for good.
-    func testTheNewestNightIsNeverOfferedEvenAStalePartialOne() throws {
+    /// The newest stored night isn't offered for 3 hours after it ended (decision 57a): it can be a stale
+    /// partial copy of a night still in progress (a sync whose sleep round ran out of time, here
+    /// 23:00–03:00). Mirrored, 28f's "the written night stands" would keep the full night out for good.
+    func testTheNewestNightIsNotOfferedWithinThreeHoursOfItsEnd() throws {
         ownership.install(.strapOwnsAllTime)
         let store = try makeStore()
         try saveNight(store, from: -1, to: 3)
-        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(11)), [])
-        XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: hour(11)), [])
-        // And with an earlier night stored too, still only the earlier one.
+        let justBefore = hour(3).addingTimeInterval(LocalStore.strapNewestNightHealthBuffer - 1)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: justBefore), [])
+        XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: justBefore), [])
+        // And with an earlier night stored too, only the earlier one.
         try saveNight(store, from: -25, to: -17)
-        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(11)), [try hypnogram(store, endingAt: -17)])
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: justBefore), [try hypnogram(store, endingAt: -17)])
     }
 
     func testAStrandedNightWithAMirrorRecordIsNotOffered() throws {
@@ -447,16 +452,222 @@ final class StrapNightHealthTests: XCTestCase {
     }
 
     /// The backstop for the reported case after its re-delivery window closed: no sync carries the
-    /// night any more, the next night is stored, and the flush offers it as stored.
+    /// night any more, the next night is stored, and the flush offers it as stored (the path a later
+    /// night opens, unchanged by decision 57).
     func testTheBackstopOffersTheReportedNightOnceTheNextNightIsStored() throws {
         ownership.install(.strapOwnsAllTime)
         let store = try makeStore()
         _ = try firstSync(store)
         let stored = try storedHypnogram(store)
-        XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: hour(12)), [],
-                       "the newest night waits for 50a, never 50b")
+        XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: hour(9)), [],
+                       "the newest night, two hours on, waits")
         try saveNight(store, from: 23, to: 31)
         XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: hour(33)), [stored])
+    }
+}
+
+// MARK: - Decision 57 (#262): the newest night, once it has clearly stopped growing
+
+/// What the app asked iOS for (decision 57b's margin refresh).
+private final class MarginRecorder: BGTaskScheduling {
+    private(set) var submitted: BGTaskRequest?
+    func register(forTaskWithIdentifier identifier: String, using queue: DispatchQueue?,
+                  launchHandler: @escaping (BGTask) -> Void) -> Bool { true }
+    func cancel(taskRequestWithIdentifier identifier: String) {}
+    func submit(_ taskRequest: BGTaskRequest) throws { submitted = taskRequest }
+}
+
+extension StrapNightHealthTests {
+    private var buffer: TimeInterval { LocalStore.strapNewestNightHealthBuffer }
+
+    func testTheNewestNightBufferIsThreeHours() {
+        XCTAssertEqual(LocalStore.strapNewestNightHealthBuffer, 3 * 3600, "Juan's choice (57a); don't shorten it without asking")
+    }
+
+    /// 2:59:59 after its end, with no later night: still not offered.
+    func testTheNewestNightIsNotOfferedTwoFiftyNineFiftyNineAfterItsEnd() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try saveNight(store, from: -1, to: 7)
+        let now = hour(7).addingTimeInterval(3 * 3600 - 1)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: now), [])
+        XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: now), [])
+    }
+
+    /// 3:00:01 after its end, with no later night: offered, once, ready to write; mirrored, never again.
+    func testTheNewestNightIsOfferedOnceThreeHoursAndASecondAfterItsEnd() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try saveNight(store, from: -1, to: 7)
+        let now = hour(7).addingTimeInterval(3 * 3600 + 1)
+        let tonight = try hypnogram(store, endingAt: 7)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: now), [tonight])
+        XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: now), [tonight])
+        XCTAssertEqual(HelioConnection.strapNights([tonight], store: store, timeline: timeline, now: now), [tonight],
+                       "a night the sync carries is not offered twice")
+        XCTAssertTrue(SleepHealthGate.isReadyToWrite(latestSegmentEnd: tonight.map(\.end).max(), now: now, finalized: false))
+        try recordMirror(tonight, store: store)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: now), [], "mirrored: not offered again")
+        XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: now.addingTimeInterval(86_400)), [])
+    }
+
+    /// The buffer runs from the later of the row's end and its hypnogram's last segment.
+    func testTheNewestNightsBufferRunsFromItsLatestEnd() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        let segments = [SleepSegment(start: hour(-1), end: hour(3), stage: .asleepCore),
+                        SleepSegment(start: hour(3), end: hour(7.5), stage: .asleepDeep)]
+        var extras = LocalStore.SleepNightExtras()
+        extras.hypnogram = segments
+        XCTAssertEqual(try store.saveSleepSummary(SleepStaging.summary(segments), night: SleepNightKey.night(inBedStart: hour(-1), inBedEnd: hour(7)),
+                                                  inBedStart: hour(-1), inBedEnd: hour(7), sleepOnset: hour(-1), sleepWake: hour(7),
+                                                  extras: extras, device: timeline), .inserted)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(7.5).addingTimeInterval(buffer - 1)), [])
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(7.5).addingTimeInterval(buffer + 1)), [segments])
+    }
+
+    // The newest night keeps every other rule of the backstop, 3:00:01 on.
+
+    func testTheNewestNightIsNotOfferedWithAMirrorRecord() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try saveNight(store, from: -1, to: 7)
+        let row = try XCTUnwrap(try rows(store).first)
+        store.setMirroredNight(night: row.night, signature: "written", spanStart: row.inBedStart, spanEnd: row.inBedEnd)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(7).addingTimeInterval(buffer + 1)), [])
+    }
+
+    func testTheNewestNightIsNotOfferedWhenEdited() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try saveNight(store, from: -1, to: 7)
+        try XCTUnwrap(try rows(store).first).isManuallyEdited = true
+        try store.context.save()
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(7).addingTimeInterval(buffer + 1)), [])
+    }
+
+    /// The ring went to bed with it (the switch to the strap came after): the ring's, never the strap's.
+    func testTheNewestNightIsNotOfferedWhenTheRingOwnsIt() throws {
+        ownership.install(DeviceOwnershipLog(entries: [.init(family: .zeppOS, since: hour(7.5))]))
+        let store = try makeStore()
+        try saveNight(store, from: -1, to: 7, device: .ringConn)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(7).addingTimeInterval(buffer + 1)), [])
+    }
+
+    func testTheNewestNightIsNotOfferedWithoutAHypnogram() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        let segments = [SleepSegment(start: hour(-1), end: hour(7), stage: .asleepCore)]
+        XCTAssertEqual(try store.saveSleepSummary(SleepStaging.summary(segments), night: SleepNightKey.night(inBedStart: hour(-1), inBedEnd: hour(7)),
+                                                  inBedStart: hour(-1), inBedEnd: hour(7), sleepOnset: hour(-1), sleepWake: hour(7),
+                                                  device: timeline), .inserted)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(7).addingTimeInterval(buffer + 1)), [])
+    }
+
+    func testTheNewestNightIsNotOfferedOutsideTheLookback() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try saveNight(store, from: -24 * 8 - 1, to: -24 * 8 + 7)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(9)), [])
+    }
+
+    /// An empty ownership log (a ring-only install): nothing, however long ago the night ended.
+    func testRingOnlyTheNewestNightIsNeverOffered() throws {
+        ownership.install(DeviceOwnershipLog())
+        let store = try makeStore()
+        try saveNight(store, from: -1, to: 7, device: .ringConn)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(7).addingTimeInterval(buffer + 1)), [])
+        XCTAssertNil(store.newestStrapNightSettles(timeline: timeline, now: hour(7.1)))
+    }
+
+    /// A later night exists: the older night is offered as before, at any time; only the newest waits.
+    func testWithALaterNightTheOlderNightIsOfferedAsBefore() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try saveNight(store, from: -25, to: -17)
+        try saveNight(store, from: -1, to: 7)
+        let stranded = try hypnogram(store, endingAt: -17)
+        let tonight = try hypnogram(store, endingAt: 7)
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(7.5)), [stranded])
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(7).addingTimeInterval(buffer - 1)), [stranded])
+        XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(7).addingTimeInterval(buffer + 1)), [stranded, tonight])
+    }
+
+    /// #262 as measured: a wake stores the night 13 minutes after it ended, then the strap stops
+    /// re-delivering it, so no sync carries it again. Nothing offers it while it might still grow, and
+    /// the first flush 3 hours on offers it as stored, past every bail of the writer to its write.
+    func testTheReportedNightReachesTheFlushThreeHoursOnWithoutAReDelivery() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        _ = try firstSync(store)
+        let stored = try storedHypnogram(store)
+        let quiet = try sync(nil, at: hour(7.25), store: store)
+        XCTAssertEqual(quiet.nights.count, 0, "the strap no longer re-delivers it")
+        for t in [hour(7.25), hour(8), hour(10).addingTimeInterval(-1)] {
+            XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: t), [], "at \(t)")
+        }
+        let later = try sync(nil, at: hour(10).addingTimeInterval(1), store: store)
+        let input = HelioConnection.strapNights(later.nights.map(\.segments), store: store, timeline: timeline, now: clock)
+        XCTAssertEqual(input, [stored])
+        let outcome = await HealthKitWriter().mirrorSettledNight(local: store, segments: stored)
+        XCTAssertFalse(isUnchanged(outcome), "the writer gets past every bail to its write")
+        try recordMirror(stored, store: store)
+        XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: hour(11)), [])
+    }
+
+    /// Decision 57b: the app opened two minutes after a background wake stored the night. Its sync no
+    /// longer carries the night, and before 57b its flush's verdict was nil, which cleared the wake's
+    /// margin refresh; the app's `schedule()` on leaving the front then replaced it for good. Now the
+    /// flush asks for the same refresh, and it survives the app leaving the front.
+    func testAForegroundSyncThatNoLongerCarriesTheNightReArmsItsMarginRefresh() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        let first = try firstSync(store)
+        let marginEnd = hour(7).addingTimeInterval(SleepHealthGate.settleMargin)
+        XCTAssertEqual(HelioConnection.nightRefreshAim(result: first, timeline: timeline, store: store,
+                                                       flushStartedAt: clock, now: clock), marginEnd)
+
+        let opened = try sync(nil, at: hour(7.25), store: store)
+        XCTAssertEqual(opened.nights.count, 0)
+        XCTAssertNil(StrapNightRefresh.aim(nights: opened.nights, focusEndedAt: nil, flushStartedAt: clock, afterWokeUp: false),
+                     "the sync's own nights alone ask for nothing")
+        let aim = HelioConnection.nightRefreshAim(result: opened, timeline: timeline, store: store, flushStartedAt: clock, now: clock)
+        XCTAssertEqual(aim, marginEnd)
+
+        let suite = "StrapNightHealthTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let recorder = MarginRecorder()
+        let now = clock
+        let scheduler = BackgroundRefreshScheduler(scheduler: recorder, now: { now }, window: { _ in nil })
+        StrapNightRefresh.record(aim, scheduler: scheduler, defaults: defaults)
+        XCTAssertEqual(recorder.submitted?.identifier, BackgroundRefreshScheduler.identifier)
+        XCTAssertTrue(recorder.submitted is BGAppRefreshTaskRequest)
+        XCTAssertEqual(recorder.submitted?.earliestBeginDate, marginEnd)
+        scheduler.schedule()
+        XCTAssertNotEqual(recorder.submitted?.earliestBeginDate, marginEnd, "the app leaving the front replaced it")
+        XCTAssertTrue(StrapNightRefresh.resubmit(scheduler, strapChosen: true, now: now, defaults: defaults))
+        XCTAssertEqual(recorder.submitted?.earliestBeginDate, marginEnd, "and it is back")
+    }
+
+    /// 57b asks for nothing once the stored night has settled (it then waits for 57a's buffer, on any
+    /// flush), nor for a night that isn't the strap's to write.
+    func testTheStoredNightAsksForNoRefreshOnceSettledOrNotTheStrapsToWrite() throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        _ = try firstSync(store)
+        let settled = try sync(nil, at: hour(7.5), store: store)
+        XCTAssertNil(HelioConnection.nightRefreshAim(result: settled, timeline: timeline, store: store, flushStartedAt: clock, now: clock))
+        XCTAssertNotNil(store.newestStrapNightSettles(timeline: timeline, now: hour(7.25)))
+
+        let row = try XCTUnwrap(try rows(store).first)
+        row.isManuallyEdited = true
+        try store.context.save()
+        XCTAssertNil(store.newestStrapNightSettles(timeline: timeline, now: hour(7.25)), "edited")
+        row.isManuallyEdited = false
+        try store.context.save()
+        store.setMirroredNight(night: row.night, signature: "written", spanStart: row.inBedStart, spanEnd: row.inBedEnd)
+        XCTAssertNil(store.newestStrapNightSettles(timeline: timeline, now: hour(7.25)), "mirrored")
     }
 }
 

@@ -376,9 +376,20 @@ final class HelioConnection: NSObject {
         if flush.wroteAnything { observability.recordHealthWrite() }
         // #233 item 5: a night this flush held back gets a refresh at its margin's end, kept so the
         // app's own `schedule()` when it leaves the front doesn't replace it (review-225e SF-3).
-        StrapNightRefresh.record(StrapNightRefresh.aim(nights: result.nights, focusEndedAt: result.nightsFinalized,
-                                                       flushStartedAt: flushStart, afterWokeUp: false),
+        StrapNightRefresh.record(nightRefreshAim(result: result, timeline: timeline, store: store, flushStartedAt: flushStart),
                                  scheduler: BackgroundRefreshScheduler())
+    }
+
+    /// `flushToHealth`'s refresh verdict, read after its flush: the margin end of a night the flush held
+    /// back (#233 item 5), and, decision 57b (#262), of the newest stored night still inside its margin
+    /// when this sync didn't carry it. Without the second, a sync whose strap had stopped re-delivering
+    /// the night (the app opened after a background wake stored it) answered nil and cleared the
+    /// refresh that wake had asked for.
+    static func nightRefreshAim(result: HelioSyncResult, timeline: SyncDeviceID, store: LocalStore,
+                                flushStartedAt: Date, now: Date = Date()) -> Date? {
+        StrapNightRefresh.aim(nights: result.nights,
+                              storedNightSettles: store.newestStrapNightSettles(timeline: timeline, now: now),
+                              focusEndedAt: result.nightsFinalized, flushStartedAt: flushStartedAt, afterWokeUp: false)
     }
 
     /// The strap's Apple Health pass, shared by the post-sync hook and the background run (#215

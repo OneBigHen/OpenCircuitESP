@@ -64,15 +64,23 @@ enum StrapNightRefresh {
     /// write because its last segment ended under 20 minutes before the flush started, and no Sleep
     /// Focus finalization applied, decision 31), and, after a woke-up catch-up, `afterWokeUp`. One
     /// request covers both. The scheduler keeps it at least a minute away.
-    static func aim(nights: [HelioSleepSelection.Night], focusEndedAt: Date?, flushStartedAt: Date,
-                    afterWokeUp wokeUp: Bool) -> Date? {
+    ///
+    /// `storedNightSettles` (decision 57b, #262): the margin end of the newest stored strap night not
+    /// yet in Apple Health, read after the flush (`LocalStore.newestStrapNightSettles`). It counts as a
+    /// held night even when this sync didn't carry it, so a sync whose strap had stopped re-delivering
+    /// the night (an app opened right after a background wake stored it) asks for the same refresh
+    /// instead of clearing it. Read after the flush, a night it wrote has its mirror record and is nil.
+    static func aim(nights: [HelioSleepSelection.Night], storedNightSettles: Date? = nil, focusEndedAt: Date?,
+                    flushStartedAt: Date, afterWokeUp wokeUp: Bool) -> Date? {
         var candidates: [Date] = []
+        var held: [Date] = []
         if !SleepFocusFinalization.applies(focusEndedAt: focusEndedAt, flushStartsAt: flushStartedAt) {
-            let held = nights.compactMap { $0.segments.map(\.end).max() }
+            held = nights.compactMap { $0.segments.map(\.end).max() }
                 .filter { !SleepHealthGate.isSettled(latestSegmentEnd: $0, now: flushStartedAt) }
                 .map { $0.addingTimeInterval(SleepHealthGate.settleMargin) }
-            if let earliest = held.min() { candidates.append(earliest) }
         }
+        if let storedNightSettles { held.append(storedNightSettles) }
+        if let earliest = held.min() { candidates.append(earliest) }
         if wokeUp { candidates.append(flushStartedAt.addingTimeInterval(afterWokeUp)) }
         return candidates.max()
     }
