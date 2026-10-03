@@ -5,7 +5,9 @@ import ZeppKit
 // The wearable's Shortcuts actions (#260, decision 52). iOS lets no app see other apps' notifications
 // or the Clock app's alarms (ZEPP_PROTOCOL.md §13.3), so Shortcuts personal automations are the bridge:
 // "When I get a message from …" → Vibrate Wearable; nightly (when Sleep Focus turns on, say) → Set Wake
-// Alarm on Wearable, which stores the alarm ON the strap so it fires with no phone needed at wake time.
+// Alarm on Wearable. On the Helio Strap that stores the alarm ON the strap, so it fires with no phone needed
+// at wake time; on a RingConn Gen 3 it sets OpenCircuit's own ring wake-up alarm, which the app buzzes at
+// that time (decision 52g; nothing is stored on the ring).
 // The work is in `WearableShortcuts`; these turn parameters into a call and the result into a dialog.
 // They are listed in `OpenCircuitAppShortcuts` (HeadacheLogIntent.swift), the app's only provider.
 //
@@ -73,7 +75,7 @@ struct VibrateWearableIntent: AppIntent {
 struct SetWakeAlarmOnWearableIntent: AppIntent {
     static let title: LocalizedStringResource = "Set Wake Alarm on Wearable"
     static let description = IntentDescription(
-        "Stores a wake alarm on the wearable you use with OpenCircuit, so it vibrates at that time by itself, even with your phone away. Only the time of day is used. OpenCircuit keeps one alarm slot for this and never changes alarms you made yourself.",
+        "Sets a wake alarm for the wearable you use with OpenCircuit. On the Helio Strap it is stored on the strap, which vibrates by itself at that time, even with your phone away; OpenCircuit uses one alarm slot and never changes alarms you made yourself. On a RingConn Gen 3, OpenCircuit's own wake-up alarm buzzes the ring at that time. Only the time of day is used.",
         categoryName: "Wearable",
         searchKeywords: ["alarm", "wake", "wake up", "vibrate", "strap", "wearable"])
 
@@ -108,7 +110,7 @@ struct SetWakeAlarmOnWearableIntent: AppIntent {
 struct ClearWakeAlarmOnWearableIntent: AppIntent {
     static let title: LocalizedStringResource = "Clear Wake Alarm on Wearable"
     static let description = IntentDescription(
-        "Removes the wake alarm that Set Wake Alarm on Wearable stored, if it is still as it was set. Alarms you made yourself are never touched.",
+        "Removes the wake alarm that Set Wake Alarm on Wearable set, if it is still as it was set. Alarms you made yourself are never touched.",
         categoryName: "Wearable",
         searchKeywords: ["alarm", "wake", "clear", "remove", "strap", "wearable"])
 

@@ -581,14 +581,18 @@ final class WearableShortcutTests: XCTestCase {
             return session
         }
 
-        // Its slot changed before the next connection (someone edited it in Zepp): dropped, and the
-        // pending 07:00 goes into a free slot instead.
+        // Its slot changed before the next connection (someone edited it in Zepp): dropped, never
+        // adopted. The request was acknowledged but unconfirmed, so it is finished, not added again
+        // (review-261b U-A): nothing else is written.
         let changed = wsStrap()
         _ = try unconfirmedWrite(changed)
+        XCTAssertNil(applier.store.pending, "finished as couldn't-confirm")
         changed.alarmRecords[0] = [0x04, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+        let before = changed.alarmCommands.count
         _ = makeSession(changed, applier: applier, findState: HelioFindState())
         XCTAssertNil(applier.store.candidate)
-        XCTAssertEqual(applier.store.managed?.slot, 1)
+        XCTAssertNil(applier.store.managed)
+        XCTAssertEqual(Array(changed.alarmCommands[before...]), [[0x09]], "nothing added")
         XCTAssertEqual(changed.alarmRecords[0]?[2], 8, "the edited slot untouched")
 
         // The person deletes its slot on the Alarms screen, on the same connection.

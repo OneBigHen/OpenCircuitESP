@@ -238,9 +238,9 @@ final class StrapWakeAlarmPlannerTests: XCTestCase {
                 let ownsSlot: Bool = {
                     guard let rec, rec.strapID == strapA, let onStrap = alarms.first(where: { $0.slot == rec.slot }) else { return false }
                     if onStrap.hasSameSetting(as: rec.alarm) { return true }
-                    var reEnabled = onStrap
-                    reEnabled.isEnabled = true
-                    return rec.alarm.days == .once && rec.isEnabled && !onStrap.isEnabled && reEnabled.hasSameSetting(as: rec.alarm)
+                    // The fired once-alarm: disabled, same time and smart wake, any repeat byte (review-261b U-A).
+                    return rec.alarm.days == .once && rec.isEnabled && !onStrap.isEnabled && onStrap.hour == rec.hour
+                        && onStrap.minute == rec.minute && onStrap.smartWake == rec.alarm.smartWake
                 }()
                 switch p.action {
                 case .replace(let target):

@@ -44,6 +44,9 @@ struct StrapWakeAlarmRequest: Codable, Equatable {
     /// another strap, or for none, is dropped at apply (review-261 S5).
     let strapID: String?
     let madeAt: Date
+    /// The strap acknowledged this request's set (review-261b U-A). From then on it is never ADDED again:
+    /// at most one extra slot can ever be used, whatever the strap reads back. nil in older records.
+    var acknowledged: Bool?
 
     init(_ kind: Kind, strapID: String?, madeAt: Date, id: UUID = UUID()) {
         self.id = id
@@ -139,9 +142,10 @@ enum StrapWakeAlarmPlanner {
         guard let onStrap = alarms.first(where: { $0.slot == record.slot }) else { return .lost }
         let written = record.alarm
         if onStrap.hasSameSetting(as: written) { return .matches(onStrap) }
-        var enabled = onStrap
-        enabled.isEnabled = true
-        if written.days == .once, written.isEnabled, !onStrap.isEnabled, enabled.hasSameSetting(as: written) {
+        // Review-261b U-A (a): the fired once-alarm is recognised by its slot, time and smart wake, whatever
+        // repeat byte the strap wrote into it (🔴 what it writes is unknown, §13.5).
+        if written.days == .once, written.isEnabled, !onStrap.isEnabled, onStrap.hour == written.hour,
+           onStrap.minute == written.minute, onStrap.smartWake == written.smartWake {
             return .firedOnce(onStrap)
         }
         return .lost
@@ -327,7 +331,8 @@ final class StrapWakeAlarmApplier {
         case refused(StrapWakeAlarmPlanner.Refusal)
         /// The strap refused the write or never acknowledged it. The request stays pending.
         case writeFailed
-        /// The write was acknowledged, but the re-read didn't confirm it (or failed). Pending.
+        /// The write was acknowledged, but the re-read didn't confirm it (or failed). A set is finished
+        /// (never re-added, review-261b U-A); a delete stays pending.
         case notConfirmed
     }
 
@@ -425,6 +430,13 @@ final class StrapWakeAlarmApplier {
             store.managed = nil
             helioLog.notice("shortcuts: the managed alarm slot no longer matches what was written; forgotten")
         }
+        if pending.acknowledged == true, case .add = plan.action {
+            // U-A (b): the strap acknowledged this set once already and the list doesn't show it as
+            // written. Adding it again could repeat at every connection: finished, never re-added.
+            helioLog.error("shortcuts: wake alarm the strap acknowledged isn't on it as written; not added again")
+            finish(pending.id, .notConfirmed)
+            return .finished
+        }
         let error: String?
         switch plan.action {
         case .none(let reason):
@@ -481,22 +493,29 @@ final class StrapWakeAlarmApplier {
         case .changedOnStrap:
             break
         case .writeAcknowledged(let write):
-            if inFlight?.session !== session { forgetRecords(touching: write.slot, on: session) }
+            guard let current = inFlight, current.session === session else { return forgetRecords(touching: write.slot, on: session) }
+            // U-A: remember the strap took this set, so no later connection adds it again.
+            if case .set = write, var pending = store.pending, pending.id == current.requestID {
+                pending.acknowledged = true
+                store.pending = pending
+            }
         case .writeFailed(let write, let failure):
             guard let request = takeInFlight(session, write) else { return forgetRecords(touching: write.slot, on: session) }
             outcomes[request.requestID] = .writeFailed
+            // S-A (review-261b): a status refusal means the strap applied nothing, so the candidate goes;
+            // a missing ack (`.noAck`) leaves it, since the strap may have applied the write.
+            if case .status = failure { store.candidate = nil }
             helioLog.error("shortcuts: wake alarm write to slot \(write.slot, privacy: .public) failed (\(String(describing: failure), privacy: .public)); kept pending")
         case .writeUnverified(let write, _):
             guard let request = takeInFlight(session, write) else { return forgetRecords(touching: write.slot, on: session) }
-            outcomes[request.requestID] = .notConfirmed
-            helioLog.error("shortcuts: wake alarm write to slot \(write.slot, privacy: .public) not read back; kept pending")
+            unconfirmed(request, write)
         case .writeChecked(let check):
             guard let request = takeInFlight(session, check.write) else {
                 return forgetRecords(touching: check.write.slot, on: session)
             }
             guard check.slotMatches, check.otherSlotsUnchanged else {
-                outcomes[request.requestID] = .notConfirmed
-                helioLog.error("shortcuts: wake alarm re-read: matches \(check.slotMatches, privacy: .public), others unchanged \(check.otherSlotsUnchanged, privacy: .public); kept pending")
+                helioLog.error("shortcuts: wake alarm re-read: matches \(check.slotMatches, privacy: .public), others unchanged \(check.otherSlotsUnchanged, privacy: .public)")
+                unconfirmed(request, check.write)
                 return
             }
             switch check.write {
@@ -512,6 +531,22 @@ final class StrapWakeAlarmApplier {
             }
             // A newer request that arrived while this one was out goes next, on the list just read.
             if store.pending != nil { applyPending(on: session) }
+        }
+    }
+
+    /// The strap acknowledged this applier's write, but its re-read didn't confirm it (or failed).
+    /// - A set is FINISHED as "couldn't confirm" (review-261b U-A, option b): never re-added at a later
+    ///   connection, so at most one extra slot is ever used. Its candidate stays, and a later list read
+    ///   adopts it if the slot holds exactly what was written.
+    /// - A delete stays pending: deleting again can't use a slot.
+    private func unconfirmed(_ request: InFlight, _ write: ZeppAlarmEditor.Write) {
+        switch write {
+        case .set:
+            helioLog.error("shortcuts: wake alarm in slot \(write.slot, privacy: .public) couldn't be confirmed; finished, not added again")
+            finish(request.requestID, .notConfirmed)
+        case .delete:
+            outcomes[request.requestID] = .notConfirmed
+            helioLog.error("shortcuts: wake alarm delete in slot \(write.slot, privacy: .public) not confirmed; kept pending")
         }
     }
 

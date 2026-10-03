@@ -53,17 +53,21 @@ your wake time, Repeat: Once ▸ Done.
   nothing added, and the managed slot deleted if it still matches its record, so only the person's alarm
   fires (decision 52f; a managed slot that no longer matches is left alone); the managed slot still as
   written → replace it; changed or gone → forget it and add a new one (no free slot → refuse); a
-  once-alarm that only lost its enabled bit (the strap may disable it after it fires, §13.5 🔴) →
-  re-enable it; no other slot is ever named; a record for another strap counts as none, and a request
+  once-alarm that fired (disabled, at the record's slot and time, whatever repeat byte the strap wrote
+  into it; what the strap does to a fired once-alarm is 🔴, §13.5) → re-enable it in place; no other slot is ever named; a record for another strap counts as none, and a request
   made for another strap (or none) is dropped. The request (with the strap it was made for) is
   saved in UserDefaults (`helio.shortcutWakeAlarm.v2`; a `v1` record keeps its managed slot and drops its
   request, which names no strap) BEFORE anything is sent, applied now if the
   strap is ready, otherwise right after the next connection's setup alarm read (the clock is set before
-  it). The record changes only when the strap's re-read confirms the slot and every other slot unchanged;
-  any other outcome keeps the request for the next connection, and nothing is retried on the same one.
-  Every set is also saved as a candidate before it goes out; if it is never confirmed (a lost ack, a
-  drop before the re-read, another central's change), the next list read adopts it as the managed slot
-  if that slot holds exactly what was written, and drops it otherwise. Any alarm write OpenCircuit
+  it). The record changes only when the strap's re-read confirms the slot and every other slot unchanged.
+  Nothing is retried on the same connection. A set the strap refused or never acknowledged stays pending
+  for the next connection. A set the strap ACKNOWLEDGED but whose re-read didn't confirm it is finished
+  ("couldn't confirm", logged) and never added again at a later connection, so whatever the strap reads
+  back, at most one extra slot is ever used (review-261b U-A). Every set is also saved as a candidate
+  before it goes out; if it is never confirmed (a lost ack, a drop before the re-read, another central's
+  change), the next list read adopts it as the managed slot if that slot holds exactly what was written,
+  and drops it otherwise. A set the strap refused with a status (it applied nothing) drops its candidate
+  at once; one with no ack keeps it. Any alarm write OpenCircuit
   didn't make to the managed slot (or the candidate's), such as the person's own edit or delete on the
   Alarms screen, makes that slot the person's: the record is forgotten. A Clear while a Set's write is
   still out queues behind it and removes it once written. Writes made for Shortcuts leave the Alarms
@@ -81,7 +85,9 @@ fakes in `RingShortcutTests`.
   connected once.
 - **Vibrate** runs only with the ring chosen AND a saved ring: `RingScanner.reconnectKnownPeripheral()`
   (no central without a saved ring, #142), then up to 15 s for a session that is ready, knows its model
-  and is idle (no drain, live read, workout or calibration). `RingSession.vibrate` keeps its own guards;
+  and is idle (no drain, live read, workout or calibration). A cold launch's central isn't powered on
+  yet, so the call returns false with the connect armed for power-on: with an active ring the action
+  waits the 15 s rather than give up. A ring that comes up but never names its model says so. `RingSession.vibrate` keeps its own guards;
   a "busy" refusal is waited out inside the same 15 s, never forced. Buzzes are 2 s apart.
 - **A ring that has just (re)connected often drains first** (read from the code, not a capture): with the
   app in the background (as it is when a Shortcut runs), the first descriptor frame (`0x10`/`0x87`, the
@@ -94,7 +100,8 @@ fakes in `RingShortcutTests`.
 - **Set Wake Alarm** replaces OpenCircuit's one ring alarm (`RingAlarmController`): time, days and on,
   keeping the person's pattern, burst and backup-alert settings. Repeat maps onto its weekdays (Every Day
   = all, Weekdays = Mon–Fri, Weekends = Sat and Sun). **Once** is a one-shot: it fires only for the first
-  occurrence at or after the moment it was set, inside the same 15-minute grace, then turns itself off
+  occurrence after the moment it was set (set inside its own minute, that is the next day's, exactly as
+  the strap's request), inside the same 15-minute grace, then turns itself off
   (its backup notification is a single non-repeating one at that occurrence). It never fires for a later
   occurrence. A one-shot stays one while only the pattern or backup alert is edited on the alarm screen;
   a time, day or on/off edit makes it the person's ordinary alarm.
@@ -119,9 +126,11 @@ fakes in `RingShortcutTests`.
   (decision 18, persisted across processes).
 - How long iOS lets an action run in the background is not documented; the strap path can take up to
   about 15 s (reach) + 12 s (alarm write and re-read).
-- The managed slot is known by its slot and content. A delete and an identical re-add made in the Zepp
-  app (or by another phone) while OpenCircuit isn't connected can't be told apart from OpenCircuit's own
-  alarm, so it would still be treated as managed. The same done on OpenCircuit's Alarms screen is seen,
-  and makes the slot the person's.
+- The managed slot (and an unconfirmed set's candidate) is known by its slot and content. Any alarm
+  identical to OpenCircuit's that someone makes in that slot from the Zepp app or another phone can't be
+  told apart from OpenCircuit's own, whether OpenCircuit is connected or not: a delete and an identical
+  re-add of the managed alarm, or an identical alarm made while OpenCircuit's write is unconfirmed (no
+  ack). Either would still be treated as OpenCircuit's. The same done on OpenCircuit's Alarms screen is
+  seen, and makes the slot the person's.
 - The re-arm inside a disconnect's 500 ms window relies on CoreBluetooth reporting the cancelled link's
   disconnect; that path has no unit test (no `CBPeripheral` in tests) and is unverified on a phone.

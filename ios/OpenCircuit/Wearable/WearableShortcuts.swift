@@ -195,7 +195,11 @@ struct WearableShortcuts {
     /// The saved ring's session once it is ready, idle and knows its generation, before `deadline`.
     private func reachRing(deadline: Date) async -> RingReach {
         let link = env.ringLink()
-        if link.shortcutSession?.ready != true, !link.connectForShortcut() { return .unreachable(.notConnecting) }
+        // Review-261b S-C: `reconnectKnownPeripheral()` returns false while a cold launch's central isn't
+        // powered on yet, with the connect armed for power-on. Fatal only when no ring is active.
+        if link.shortcutSession?.ready != true, !link.connectForShortcut(), !link.hasActiveRing {
+            return .unreachable(.notConnecting)
+        }
         while true {
             if let session = link.shortcutSession, session.ready, session.generationKnown {
                 guard session.supportsVibration else { return .noMotor }
@@ -203,7 +207,9 @@ struct WearableShortcuts {
             }
             if env.isCancelled() { return .unreachable(.cancelled) }
             if env.now() >= deadline {
-                return .unreachable(link.shortcutSession?.ready == true ? .syncing : .timedOut)
+                guard let session = link.shortcutSession, session.ready else { return .unreachable(.timedOut) }
+                // Review-261b N-B: up but never named its model is not "busy syncing".
+                return .unreachable(session.generationKnown ? .syncing : .modelUnknown)
             }
             await env.pause()
         }
@@ -389,9 +395,16 @@ struct WearableShortcuts {
                          outcome: "already on the strap; managed slot cleared")
         case .done(.noWrite(.expired)):
             return .init(dialog: "Not set: \(when) passed before your \(name) could be reached.", outcome: "expired; dropped")
-        case .done(.notConfirmed), .done(.noWrite):
-            return .init(dialog: "Your \(name) didn't confirm the alarm when OpenCircuit read it back. OpenCircuit kept the request and will check again the next time it connects.",
-                         outcome: "not confirmed; pending")
+        case .done(.notConfirmed):
+            // Review-261b U-A: finished, never re-added at a later connection.
+            return .init(dialog: "Your \(name) took the alarm, but OpenCircuit couldn't confirm it when it read the alarms back, so it won't add it again. Check the strap's alarms in OpenCircuit.",
+                         outcome: "not confirmed; not added again")
+        case .done(.noWrite(.otherStrap)):
+            return .init(dialog: "A different \(name) is connected now, so the request was dropped. Run it again to set it on this one.",
+                         outcome: "other strap; dropped")
+        case .done(.noWrite):
+            return .init(dialog: "Your \(name) didn't confirm the alarm. Check the strap's alarms in OpenCircuit.",
+                         outcome: "not confirmed")
         case .kept(let why, let label):
             return .init(dialog: "Saved. \(why) The alarm will be set the next time it connects.", outcome: "pending: \(label)")
         case .superseded:
@@ -498,6 +511,8 @@ struct WearableShortcuts {
         case cancelled
         /// The ring is up but a history drain (or a live read) held it for the whole window.
         case syncing
+        /// The ring is up but this connection's DIS read never named its model.
+        case modelUnknown
 
         var label: String {
             switch self {
@@ -509,6 +524,7 @@ struct WearableShortcuts {
             case .unsupported: return "unsupported"
             case .cancelled: return "cancelled"
             case .syncing: return "syncing"
+            case .modelUnknown: return "model unknown"
             }
         }
     }
@@ -569,6 +585,8 @@ struct WearableShortcuts {
         case .unsupported: return "Your \(name) doesn't offer what OpenCircuit needs over Bluetooth."
         case .cancelled: return "iOS ended the action before your \(name) answered."
         case .syncing: return "Your \(name) stayed busy syncing for \(Int(reachTimeout)) seconds; try again in a minute."
+        case .modelUnknown:
+            return "Your \(name) hasn't said which model it is yet. Open OpenCircuit with the ring connected once, then try again."
         }
     }
 

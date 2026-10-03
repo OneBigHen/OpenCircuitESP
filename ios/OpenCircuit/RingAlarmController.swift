@@ -3,6 +3,25 @@ import UserNotifications
 import OpenCircuitKit
 import os
 
+/// What the alarm needs from the ring to buzz it: `RingSession` in the app, a fake in the tests.
+@MainActor
+protocol RingAlarmBuzzer: AnyObject {
+    var supportsVibration: Bool { get }
+    var lastVibrationBlock: RingAlarmBlock? { get }
+    func vibrateBurst(_ pattern: VibrationPattern, count: Int, spacing: TimeInterval) -> Bool
+}
+
+extension RingSession: RingAlarmBuzzer {}
+
+/// `RingAlarmController.decide`: the Kit's decision, plus the one-shot's end (decision 52g).
+enum RingAlarmStep: Equatable {
+    case idle
+    case fire(scheduled: Date, lateBy: TimeInterval)
+    case missed(scheduled: Date)
+    /// A one-shot whose occurrence was already handled: turn it off, no buzz.
+    case expired
+}
+
 /// Owns the vibrating wake-up alarm: where it's stored, when it fires, and what to tell the user
 /// when it doesn't.
 ///
@@ -24,25 +43,6 @@ import os
 /// relationships and no queries, and every SwiftData schema change on this project owes a
 /// migration rehearsal on real hardware (docs/RUNBOOK_SCHEMA_MIGRATION_REHEARSAL.md — a past build
 /// deleted every raw history row on upgrade). An alarm clock is not worth that risk surface.
-/// What the alarm needs from the ring to buzz it: `RingSession` in the app, a fake in the tests.
-@MainActor
-protocol RingAlarmBuzzer: AnyObject {
-    var supportsVibration: Bool { get }
-    var lastVibrationBlock: RingAlarmBlock? { get }
-    func vibrateBurst(_ pattern: VibrationPattern, count: Int, spacing: TimeInterval) -> Bool
-}
-
-extension RingSession: RingAlarmBuzzer {}
-
-/// `RingAlarmController.decide`: the Kit's decision, plus the one-shot's end (decision 52g).
-enum RingAlarmStep: Equatable {
-    case idle
-    case fire(scheduled: Date, lateBy: TimeInterval)
-    case missed(scheduled: Date)
-    /// A one-shot whose occurrence was already handled: turn it off, no buzz.
-    case expired
-}
-
 @MainActor
 final class RingAlarmController {
     static let shared = RingAlarmController()
@@ -117,8 +117,8 @@ final class RingAlarmController {
     }
 
     /// Shortcuts' Set Wake Alarm (#260, decision 52g): the time, days and on, keeping the person's
-    /// pattern, burst and backup-alert settings. `once`: fire for the first occurrence at or after
-    /// `now` only (its minute included), then turn off; the days are that occurrence's weekday.
+    /// pattern, burst and backup-alert settings. `once`: fire for the first occurrence after `now` only
+    /// (`oneShotOccurrence`), then turn off; the days are that occurrence's weekday.
     /// Returns the alarm as stored and its one-shot occurrence.
     @discardableResult
     func setFromShortcut(hour: Int, minute: Int, weekdays: Set<Int>, once: Bool, now: Date = Date(),
@@ -145,12 +145,14 @@ final class RingAlarmController {
         store(off, oneShot: nil)
     }
 
-    /// The first `hour:minute` at or after `now`'s minute (decision 52g: "the first at or after the
-    /// moment it was set").
+    /// The first `hour:minute` strictly after `now` (decision 52g: "the first at or after the moment it was
+    /// set"; the minute's own start, 07:00:00, is before a moment like 07:00:20). The strap's request does
+    /// the same (`Calendar.nextDate(after:)`, `StrapWakeAlarmPlanner.isExpired`), so a Once set inside its own
+    /// minute goes to the next day on both devices (review-261b S-B: it was stored for this minute and,
+    /// with `lastHandled` stamped at the set, expired unbuzzed).
     static func oneShotOccurrence(hour: Int, minute: Int, after now: Date, calendar: Calendar) -> Date? {
-        guard let thisMinute = calendar.dateInterval(of: .minute, for: now)?.start,
-              let today = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: now) else { return nil }
-        if today >= thisMinute { return today }
+        guard let today = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: now) else { return nil }
+        if today > now { return today }
         guard let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) else { return nil }
         return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: tomorrow)
     }
