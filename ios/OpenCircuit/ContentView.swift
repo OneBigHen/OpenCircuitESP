@@ -61,6 +61,9 @@ struct ContentView: View {
     /// Apple Health, or discard). Non-nil presents the recovery alert. See
     /// `WorkoutSessionRecovery` for what the app is allowed to claim about it.
     @State private var recoverableWorkout: RecoveredWorkout?
+    /// The one-time "local history was reset" notice (#243), non-nil while it is waiting to be seen.
+    /// Its flag is cleared only when the user dismisses it; see `HistoryResetNotice`.
+    @State private var historyResetNotice: HistoryResetNotice?
     /// The strap's workout (#227): the app's one recorder, outliving every sheet as `workoutManager` does.
     /// Built once, on first use (review-238 N2), idle and inert unless a strap workout starts.
     private var strapWorkouts: StrapWorkoutRecorder { .shared }
@@ -213,7 +216,10 @@ struct ContentView: View {
             // reads ~25 k rows (🟢 measured). A finished sync is never debounced; see the policy.
             .task { await loadTrends(.appeared) }
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active { Task { await loadTrends(.foregrounded) } }
+                guard phase == .active else { return }
+                Task { await loadTrends(.foregrounded) }
+                // Also covers a process launched in the background that the user then opens (#243).
+                surfaceHistoryResetNotice()
             }
             .onChange(of: session?.syncing) { _, syncing in
                 if syncing == false { Task { await loadTrends(.syncFinished) } }
@@ -285,6 +291,7 @@ struct ContentView: View {
                 onDismiss: {
                     resolveOrphanedWorkoutSnapshot()   // the orphan check waited for it (F2)
                     replayPendingWorkoutLink()         // then the link it held (#258)
+                    surfaceHistoryResetNotice()        // and the reset notice (#243)
                 }) {
                 OnboardingView { onboardingCompleted = true }
             }
@@ -324,6 +331,9 @@ struct ContentView: View {
                 // and the workout would be stranded. Keyed on the snapshot instead, which survives
                 // until it is explicitly resolved.
                 resolveOrphanedWorkoutSnapshot()
+                // Tell the user if the last-resort store wipe ran (#243). Held back by its alert
+                // while the interrupted-workout offer above is up, then shown.
+                surfaceHistoryResetNotice()
                 // Reflect any prior Health authorization so the UI shows the mirrored state,
                 // and backfill anything the background refresh persisted while we were away.
                 // Runs in `.task` (after first frame), never `.onAppear` — a synchronous store
@@ -450,6 +460,11 @@ struct ContentView: View {
                     replayPendingWorkoutLink()
                 }
             }
+            // The one-time "local history was reset" notice (#243). SwiftUI will not present it over
+            // the alert above or a sheet, so it waits for those to close.
+            .modifier(HistoryResetNoticeAlert(
+                notice: $historyResetNotice,
+                heldBack: recoverableWorkout != nil || showWorkout || showStrapWorkout || quickLogged != nil))
             // The correction sheet for a JUST-BANKED quick log. The row is already stored by the
             // time this appears (see `handleQuickLogLink`), so dismissing without saving still
             // leaves the label captured — that is the point of the whole path.
@@ -1054,6 +1069,20 @@ struct ContentView: View {
             text += " No heart-rate readings were captured before it stopped."
         }
         return text
+    }
+
+    /// Pick up the "local history was reset" notice if the last-resort wipe left one (#243).
+    /// Foreground only: a scene can connect while the app is still in the background, and that
+    /// launch must neither show nor clear it. Not under onboarding either, for the reason
+    /// `resolveOrphanedWorkoutSnapshot` gives (an alert raised under the cover dismisses it).
+    /// Reading is not clearing: the flag goes only when the alert is dismissed, so a launch that
+    /// never presents it does not lose it.
+    @MainActor
+    private func surfaceHistoryResetNotice() {
+        guard historyResetNotice == nil,
+              UserDefaults.standard.bool(forKey: OnboardingView.completedKey) else { return }
+        historyResetNotice = HistoryResetNotice.pending(
+            isBackground: UIApplication.shared.applicationState == .background)
     }
 
     @MainActor
@@ -2698,6 +2727,29 @@ private struct HelioDashboardHooks: ViewModifier {
             .onChange(of: liveHRAt) { _, _ in onLiveReading() }
             .onChange(of: liveRunning) { _, _ in onLiveRunningChanged() }
             .sheet(isPresented: $showSetup) { NavigationStack { HelioSetupView() } }
+    }
+}
+
+/// The one-time "local history was reset" alert (#243). Not presented while `heldBack` (another
+/// alert or a sheet is up); dismissing it is the acknowledgement that clears the flag and its date.
+private struct HistoryResetNoticeAlert: ViewModifier {
+    @Binding var notice: HistoryResetNotice?
+    let heldBack: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .alert(HistoryResetNotice.title, isPresented: Binding(
+                get: { notice != nil && !heldBack },
+                set: { shown in
+                    guard !shown, notice != nil else { return }
+                    HistoryResetNotice.acknowledge()
+                    notice = nil
+                })
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                if let notice { Text(notice.message()) }
+            }
     }
 }
 

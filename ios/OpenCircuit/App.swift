@@ -547,8 +547,9 @@ struct OpenCircuitApp: App {
 
     /// UserDefaults flag the UI can read to tell the user their local cache was rebuilt (raw
     /// sample history isn't re-syncable once the ring has been drained). Set only when the
-    /// last-resort wipe runs; the UI clears it after showing the notice. (#40)
-    static let historyResetDefaultsKey = "localHistoryWasReset"
+    /// last-resort wipe runs, with its date beside it; ContentView shows the notice on a foreground
+    /// launch and clears both once it is dismissed. (#40, #243 — see `HistoryResetNotice`)
+    static let historyResetDefaultsKey = HistoryResetNotice.flagKey
 
     /// The one process-wide SwiftData container, published the moment the foreground `App` builds
     /// it (see `makeContainer()`), so the background BGTask handler can REUSE it instead of opening
@@ -736,7 +737,7 @@ struct OpenCircuitApp: App {
             fatalError("Unrecoverable SwiftData store error: \(error)")
         }
         backup?.restore(into: fresh)
-        UserDefaults.standard.set(true, forKey: historyResetDefaultsKey)
+        HistoryResetNotice.record(at: Date())   // the flag AND its date (#243)
         return fresh
     }
 
