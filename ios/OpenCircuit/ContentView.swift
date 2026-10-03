@@ -7,6 +7,7 @@ import UIKit   // UIApplication.openSettingsURLString for the Bluetooth-off / de
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.horizontalSizeClass) private var sizeClass
     /// Which wearable the app drives (#215, decision 1). The ring's scanner is read only while the
     /// ring is chosen, and the strap's connection only while the strap is, so the inactive driver is
     /// never constructed by this view.
@@ -198,6 +199,7 @@ struct ContentView: View {
                 .tabItem { Label("Profile", systemImage: "person.crop.circle") }
                 .tag(Tab.profile)
         }
+        .adaptiveTabBar()
         .tint(Theme.accent)
 #if DEBUG && targetEnvironment(simulator)
         .modifier(DemoScreenModifier())   // screenshot harness (#216); inert without -OCDemoData
@@ -464,40 +466,69 @@ struct ContentView: View {
     /// readiness / vitals / calories / goals / cycle / sync cards. Middle sections stay
     /// long-press-draggable (the reorder QoL), so this tab keeps a `List`.
     private var todayTab: some View {
-        NavigationStack(path: $path) {
-            List {
-                Group {
-                    // One plain-language sentence about today (#216), above everything else.
-                    TodaySynthesisHeader(sentence: synthesisSentence)
-                    if ringActive {
-                        connectionCard
-                    } else {
-                        HelioConnectionCard(connection: helio, onSetUp: { showHelioSetup = true })
+        Group {
+            if sizeClass == .regular {
+                // Wide: the list stays at phone width on the left; whatever a tap appends to `path`
+                // (a tile's chart, the timeline, cycle, headache…) opens on the right. Until a
+                // choice is made the right column shows today's timeline, so it is never blank.
+                NavigationSplitView(columnVisibility: .constant(.doubleColumn)) {
+                    todayList
+                        .navigationTitle("Today")
+                        .navigationSplitViewColumnWidth(min: 340, ideal: 390, max: 440)
+                } detail: {
+                    NavigationStack {
+                        destination(for: path.last ?? .timeline)
+                            .id(path.last)
                     }
-                    // First-run Health authorization banner (#143) — right under the connection card.
-                    if !healthAuthorized, HealthKitWriter.isAvailable {
-                        healthAuthBanner
-                    }
-                    liveMeasureCard
-                    ForEach(visibleSections) { section in
-                        sectionView(section)
-                    }
-                    .onMove(perform: moveSection)
                 }
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                .navigationSplitViewStyle(.balanced)
+                // Only the newest selection is shown, so don't let the history grow while wide.
+                .onChange(of: path) { _, new in
+                    if new.count > 1, let last = new.last { path = [last] }
+                }
+            } else {
+                NavigationStack(path: $path) {
+                    todayList
+                        .navigationTitle("Today")
+                        .navigationDestination(for: Route.self) { route in destination(for: route) }
+                }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .background(Theme.pageBackground)
-            // Pull-to-refresh mirrors the "Sync from ring" button (same guards). See `forceSync`.
-            .refreshable { await forceSync() }
-            .navigationTitle("Today")
-            .navigationDestination(for: Route.self) { route in destination(for: route) }
         }
         // What PAI is, from the strap's PAI tile (decision 49): a sheet, as there is nothing to chart.
         .sheet(isPresented: $showPAIInfo) { StrapPAIInfoSheet() }
+    }
+
+    /// The Today list itself (the reorderable cards), shared by the compact stack and the wide
+    /// left column.
+    private var todayList: some View {
+        List {
+            Group {
+                // One plain-language sentence about today (#216), above everything else.
+                TodaySynthesisHeader(sentence: synthesisSentence)
+                if ringActive {
+                    connectionCard
+                } else {
+                    HelioConnectionCard(connection: helio, onSetUp: { showHelioSetup = true })
+                }
+                // First-run Health authorization banner (#143) — right under the connection card.
+                if !healthAuthorized, HealthKitWriter.isAvailable {
+                    healthAuthBanner
+                }
+                liveMeasureCard
+                ForEach(visibleSections) { section in
+                    sectionView(section)
+                }
+                .onMove(perform: moveSection)
+            }
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Theme.pageBackground)
+        // Pull-to-refresh mirrors the "Sync from ring" button (same guards). See `forceSync`.
+        .refreshable { await forceSync() }
     }
 
     /// The liveline live-vitals hero — shown ONLY during an on-demand HR/SpO₂ measurement, when the
@@ -539,7 +570,7 @@ struct ContentView: View {
     /// SLEEP — last night's sleep card, a sleep-duration hero, the sleep-graph history, and a
     /// Sleep Focus setup shortcut.
     private var sleepTab: some View {
-        NavigationStack {
+        SplitTab {
             ScrollView {
                 VStack(spacing: Theme.sectionSpacing) {
                     let sleepHours = heroPoints { $0.sleepMinutes.map { Double($0) / 60.0 } }
@@ -550,7 +581,7 @@ struct ContentView: View {
                     }
                     sleepCard
                     // Browse any of the last 30 nights with its stage chart (#216).
-                    NavigationLink { SleepNightsBrowserView() } label: {
+                    DetailLink { SleepNightsBrowserView() } label: {
                         card {
                             HStack(spacing: 8) {
                                 KeylineGlyph(.calendar, size: 16).foregroundStyle(Theme.sleep)
@@ -567,7 +598,7 @@ struct ContentView: View {
                         OCSectionHeader("Sleep Trends", systemImage: "chart.xyaxis.line", tint: Theme.sleep)
                         SleepTrendsSection(points: trends.points, tempUnitRaw: tempUnitRaw)
                     }
-                    NavigationLink { SleepFocusSyncSetupView() } label: {
+                    DetailLink { SleepFocusSyncSetupView() } label: {
                         card {
                             HStack(spacing: 8) {
                                 Image(systemName: "moon.zzz.fill").foregroundStyle(Theme.sleep)
@@ -595,12 +626,14 @@ struct ContentView: View {
             }
             .background(Theme.pageBackground)
             .navigationTitle("Sleep")
+        } emptyDetail: {
+            SleepNightsBrowserView()
         }
     }
 
     /// ACTIVITY — a steps hero, workout entry, goals, calories, and the activity-graph history.
     private var activityTab: some View {
-        NavigationStack {
+        SplitTab {
             ScrollView {
                 VStack(spacing: Theme.sectionSpacing) {
                     let stepPts = heroPoints { $0.steps.map(Double.init) }
@@ -624,38 +657,60 @@ struct ContentView: View {
                     card { GoalsCardView() }
                     // The same four rings, for the days BEFORE today. Derived from the shared trends
                     // cache — no extra fetch, no new stored column (see `GoalHistory`).
-                    if !trends.goalDays.isEmpty {
-                        OCSectionHeader("Goal Rings History", systemImage: "circle.dashed",
-                                        tint: Theme.steps)
-                        GoalRingsHistorySection(days: trends.goalDays, summary: trends.goalSummary)
-                    }
+                    // Wide: the history lives in the right-hand column instead (`activityHistory`).
+                    if sizeClass != .regular { activityHistory }
                     caloriesCard
-                    if !trends.points.isEmpty {
-                        OCSectionHeader("Activity Trends", systemImage: "chart.bar.fill", tint: Theme.steps)
-                        GoalRingsTrendsSection(days: trends.goalDays)
-                        ActivityTrendsSection(points: trends.points, distUnitRaw: distUnitRaw)
-                    }
+                    if sizeClass != .regular { activityTrends }
                 }
                 .padding()
             }
             .background(Theme.pageBackground)
             .navigationTitle("Activity")
+        } emptyDetail: {
+            ScrollView {
+                VStack(spacing: Theme.sectionSpacing) {
+                    activityHistory
+                    activityTrends
+                }
+                .padding()
+            }
+            .background(Theme.pageBackground)
+            .navigationTitle("Activity History")
+        }
+    }
+
+    @ViewBuilder
+    private var activityHistory: some View {
+        if !trends.goalDays.isEmpty {
+            OCSectionHeader("Goal Rings History", systemImage: "circle.dashed", tint: Theme.steps)
+            GoalRingsHistorySection(days: trends.goalDays, summary: trends.goalSummary)
+        }
+    }
+
+    @ViewBuilder
+    private var activityTrends: some View {
+        if !trends.points.isEmpty {
+            OCSectionHeader("Activity Trends", systemImage: "chart.bar.fill", tint: Theme.steps)
+            GoalRingsTrendsSection(days: trends.goalDays)
+            ActivityTrendsSection(points: trends.points, distUnitRaw: distUnitRaw)
         }
     }
 
     /// TRENDS — all-day body-vital history + recent readings + per-day drill-down (TrendsView).
     private var trendsTab: some View {
-        NavigationStack {
+        SplitTab {
             TrendsView()
+        } emptyDetail: {
+            DayDetailView(day: Date())
         }
     }
 
     /// PROFILE — settings, device info, background activity, and the debug / RE surfaces.
     private var profileTab: some View {
-        NavigationStack {
+        SplitTab {
             ScrollView {
                 VStack(spacing: Theme.sectionSpacing) {
-                    NavigationLink { UserProfileSettingsView() } label: {
+                    DetailLink { UserProfileSettingsView() } label: {
                         card {
                             HStack(spacing: 8) {
                                 Image(systemName: "gearshape.fill").foregroundStyle(Theme.accent)
@@ -674,7 +729,7 @@ struct ContentView: View {
                     } else {
                         helioDeviceCard
                     }
-                    NavigationLink { ActivityLogView(session: session) } label: {
+                    DetailLink { ActivityLogView(session: session) } label: {
                         card {
                             HStack(spacing: 8) {
                                 Image(systemName: "clock.arrow.circlepath").foregroundStyle(.teal)
@@ -695,6 +750,8 @@ struct ContentView: View {
             }
             .background(Theme.pageBackground)
             .navigationTitle("Profile")
+        } emptyDetail: {
+            UserProfileSettingsView()
         }
     }
 
@@ -2266,7 +2323,7 @@ struct ContentView: View {
 
     /// Profile ▸ Device (#215): the one-device picker, in both modes.
     private var deviceChoiceCard: some View {
-        NavigationLink { DeviceChoiceView() } label: {
+        DetailLink { DeviceChoiceView() } label: {
             card {
                 HStack(spacing: 8) {
                     Text("DEVICE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -2281,7 +2338,7 @@ struct ContentView: View {
 
     /// The Helio Strap's device screen (#215), in place of the ring's Device Info.
     private var helioDeviceCard: some View {
-        NavigationLink { HelioDeviceInfoView(connection: helio) } label: {
+        DetailLink { HelioDeviceInfoView(connection: helio) } label: {
             card {
                 HStack(spacing: 8) {
                     Text("HELIO STRAP").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -2301,7 +2358,7 @@ struct ContentView: View {
     /// manufacturer / MAC address). Lives on the Profile tab; pushes onto that tab's own stack via a
     /// value-less NavigationLink (not the Today `path`).
     private var deviceInfoCard: some View {
-        NavigationLink {
+        DetailLink {
             DeviceInfoView(session: session)
         } label: {
             card {

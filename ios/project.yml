@@ -90,6 +90,9 @@ targets:
         # iTunes/Finder file sharing + the Files app, so tester logs can be pulled off-device.
         # MUST live here — XcodeGen regenerates Info.plist and would otherwise strip these.
         UIFileSharingEnabled: true
+        # iPad idiom (which an unfolded phone may use) needs all four orientations declared for
+        # multitasking; the iPhone idiom's orientations are left at their existing defaults.
+        "UISupportedInterfaceOrientations~ipad": [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         LSSupportsOpeningDocumentsInPlace: true
         # HealthKit auth strings (Phase 4) — required or the app crashes on request. Shown verbatim
         # in the iOS permission dialogs, so they use the user-facing name "OpenCircuit".
@@ -146,7 +149,9 @@ targets:
         # so the app and the WorkoutWidget extension always share one build number. The app's
         # Info.plist references them via $(MARKETING_VERSION)/$(CURRENT_PROJECT_VERSION).
         SWIFT_VERSION: "5.9"
-        TARGETED_DEVICE_FAMILY: "1"
+        # iPhone + iPad idiom: a foldable unfolds into a wide, tablet-class window, and an
+        # iPhone-only binary would be letterboxed there instead of using the width (AdaptiveLayout).
+        TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: NO
         # App icon is OpenCircuit/AppIcon.icon (Icon Composer). Set explicitly so CLI/device builds
         # assign it after xcodegen. The name must match the .icon file's basename; there must be
