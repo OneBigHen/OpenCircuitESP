@@ -45,4 +45,16 @@ final class SleepHypnogramChartTests: XCTestCase {
         XCTAssertTrue(SleepHypnogramChart.span(seg(0, 37, .asleepREM)).hasSuffix("· 37m"))
         XCTAssertTrue(SleepHypnogramChart.span(seg(0, 95, .asleepCore)).hasSuffix("· 1h 35m"))
     }
+
+    func testATapPicksABlockATapOnItAgainOrOnNothingClears() {
+        let plotted = SleepHypnogramChart.plotted([seg(0, 30, .asleepCore), seg(30, 50, .asleepREM)])
+        let first = SleepHypnogramChart.nextSelection(tapped: at(10), current: nil, in: plotted)
+        XCTAssertEqual(first, at(10), "a tap on a block picks it")
+        XCTAssertEqual(SleepHypnogramChart.nextSelection(tapped: at(40), current: first, in: plotted), at(40),
+                       "a tap on another block moves the pick")
+        XCTAssertNil(SleepHypnogramChart.nextSelection(tapped: at(20), current: first, in: plotted),
+                     "a second tap on the same block clears it")
+        XCTAssertNil(SleepHypnogramChart.nextSelection(tapped: at(90), current: first, in: plotted),
+                     "a tap off every block clears it")
+    }
 }

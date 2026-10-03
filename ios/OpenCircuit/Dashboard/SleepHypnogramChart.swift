@@ -4,8 +4,11 @@
 //
 // One row per stage (Awake on top, Deep at the bottom), each segment a block in its stage colour, a
 // thin step line joining consecutive segments, and the night's first and last clock times under the
-// axis. Touch-and-drag (or tap) reads one segment out: its stage, its clock span and its length — the
-// "what was I doing at 3 am" question the stacked bar can't answer.
+// axis. Tapping a block reads it out above the chart — its stage, its clock span and its length (the
+// "what was I doing at 3 am" question the stacked bar can't answer) — and the readout STAYS until the
+// next tap. A tap, not `chartXSelection`'s drag: that selection clears the moment the finger lifts,
+// and its drag competes with the Sleep tab's vertical scroll and "Past nights"' swipe between nights,
+// so on a phone it read as "nothing happens" (tester report, 2026-10-03).
 //
 // Honesty rules, unchanged from the browser's private chart this replaces:
 //   - only stored/live segments are drawn; a night without a timeline never gets one invented here
@@ -21,6 +24,8 @@ struct SleepHypnogramChart: View {
     let segments: [SleepSegment]
     var height: CGFloat = 150
 
+    /// Where the last tap landed on the time axis; nil = nothing picked. Tapping the picked block, or
+    /// outside every block, clears it.
     @State private var selectedTime: Date?
 
     enum Row: String, CaseIterable {
@@ -54,6 +59,14 @@ struct SleepHypnogramChart: View {
     /// boundary belongs to the segment that STARTS there.
     static func segment(at time: Date, in plotted: [SleepSegment]) -> SleepSegment? {
         plotted.last { $0.start <= time && time < $0.end }
+    }
+
+    /// What a tap at `tapped` leaves selected: the tapped time when it lands on a block other than
+    /// the one already picked; nil when it lands on the picked block again (toggle off) or on no block.
+    static func nextSelection(tapped: Date, current: Date?, in plotted: [SleepSegment]) -> Date? {
+        guard let hit = segment(at: tapped, in: plotted) else { return nil }
+        if let current, segment(at: current, in: plotted) == hit { return nil }
+        return tapped
     }
 
     /// The step lines: one per change of row between two segments that touch (a gap of up to 5 min,
@@ -101,7 +114,17 @@ struct SleepHypnogramChart: View {
                     AxisValueLabel(format: .dateTime.hour())
                 }
             }
-            .chartXSelection(value: $selectedTime)
+            .chartOverlay { proxy in
+                GeometryReader { geo in
+                    Rectangle().fill(.clear).contentShape(Rectangle())
+                        .onTapGesture { location in
+                            guard let plotFrame = proxy.plotFrame else { return }
+                            let x = location.x - geo[plotFrame].origin.x
+                            guard let time: Date = proxy.value(atX: x) else { return }
+                            selectedTime = Self.nextSelection(tapped: time, current: selectedTime, in: plotted)
+                        }
+                }
+            }
             .frame(height: height)
             .accessibilityElement()
             .accessibilityLabel(Self.summary(plotted))
@@ -138,7 +161,7 @@ struct SleepHypnogramChart: View {
             }
             .accessibilityElement(children: .combine)
         } else if !plotted.isEmpty {
-            Text("Touch and drag to see each stage's times")
+            Text("Tap a block to see its times")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
     }
