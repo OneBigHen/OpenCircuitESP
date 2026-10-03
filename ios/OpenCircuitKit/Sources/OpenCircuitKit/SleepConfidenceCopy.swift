@@ -70,6 +70,9 @@ extension SleepConfidence {
     ///   - clock: renders an instant as a short local time ("2:37 AM"). Injected because the format
     ///     is locale/calendar-dependent and this file is framework-free; the card passes its own
     ///     `Self.clock`, so the caveat and the times printed above it are formatted identically.
+    ///   - device: the short noun of the device that recorded THIS night ("ring", "strap"), which
+    ///     after a device switch need not be the one in use (#257). The kit knows no device list, so
+    ///     the card passes the night owner's noun. With "ring" every sentence is the shipped one.
     /// - Returns: zero, one or more hints. An empty array means SAY NOTHING — the common case
     ///   (12 of 21 corpus nights). Order is `assessment.reasons`' order: back edge, then front edge,
     ///   then the legacy duration note, which `assess` already suppresses whenever either edge fired.
@@ -81,7 +84,8 @@ extension SleepConfidence {
     ///   does. The shipped card carried a sentence that could never render (`SleepCardView`
     ///   :542-544 before this change); it is not reproduced here.
     public static func hints(_ assessment: Assessment,
-                             clock: (Date) -> String) -> [Hint] {
+                             clock: (Date) -> String,
+                             device: String) -> [Hint] {
         assessment.reasons.map { reason in
             switch reason {
 
@@ -109,7 +113,7 @@ extension SleepConfidence {
                 return Hint(
                     reason: reason,
                     systemImage: "bed.double",
-                    text: "\(clock(until)) is when the ring started recording again, not when you "
+                    text: "\(clock(until)) is when the \(device) started recording again, not when you "
                         + "settled — it recorded nothing for \(approximateDuration(silentFor)) "
                         + "before that. If you were already in bed, tap Edit to correct it.")
 
@@ -118,7 +122,7 @@ extension SleepConfidence {
                 return Hint(
                     reason: reason,
                     systemImage: "info.circle",
-                    text: "Very still night — duration may read a little high. The ring can't sense "
+                    text: "Very still night — duration may read a little high. The \(device) can't sense "
                         + "motionless wakefulness (no movement, near-sleep heart rate), so quiet "
                         + "time awake in bed is counted as light sleep.")
             }

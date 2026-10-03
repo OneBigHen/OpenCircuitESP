@@ -46,7 +46,7 @@ public enum TodaySynthesis {
         public var lastNightSleepMinutes: Int?
         /// Typical asleep minutes over recent nights, for the "short night" rule.
         public var usualSleepMinutes: Double?
-        /// Time of the newest stored ring data of any kind; nil when there is none.
+        /// Time of the newest stored wearable data of any kind (either device's); nil when there is none.
         public var newestDataAt: Date?
         public var now: Date
 

@@ -1,4 +1,5 @@
 import XCTest
+import OpenCircuitKit
 import ZeppKit
 @testable import OpenCircuit
 
@@ -119,6 +120,67 @@ final class DeviceCopyTests: XCTestCase {
                        + "and are not a diagnosis. If you feel unwell, consult a qualified medical professional.")
     }
 
+    // MARK: shared screens (#257)
+
+    func testGoalsFootnoteNamesNoDeviceAppAndKeepsTheRingsAccuracyLineForTheRingOnly() {
+        for device in ActiveDeviceChoice.allCases {
+            let text = SharedScreenCopy.goalsFootnote(device)
+            XCTAssertTrue(text.hasPrefix("\u{B9} Activity Score is an on-device estimate"), "\(device)")
+            XCTAssertTrue(text.contains("not your device app's own number"), "\(device)")
+            XCTAssertFalse(text.contains("RingConn"), "\(device): \(text)")
+        }
+        XCTAssertTrue(SharedScreenCopy.goalsFootnote(.ringConn)
+            .hasSuffix("Elevated HR is not detected workout duration. Full accuracy follows the ring activity-payload decode."))
+        XCTAssertTrue(SharedScreenCopy.goalsFootnote(.helioStrap).hasSuffix("Elevated HR is not detected workout duration."))
+    }
+
+    func testBackgroundRefreshAndExportEmptyStatesNameTheDeviceInUse() {
+        XCTAssertEqual(SharedScreenCopy.backgroundRefreshLimited(.ringConn),
+                       "iOS is limiting background activity. Turn on Settings ▸ General ▸ Background App Refresh so the "
+                       + "ring can sync while the app is closed.")
+        XCTAssertEqual(SharedScreenCopy.backgroundRefreshLimited(.helioStrap),
+                       "iOS is limiting background activity. Turn on Settings ▸ General ▸ Background App Refresh so the "
+                       + "strap can sync while the app is closed.")
+        XCTAssertEqual(SharedScreenCopy.exportNoNights(.ringConn), "No recorded nights yet — sync your ring first.")
+        XCTAssertEqual(SharedScreenCopy.exportNoNights(.helioStrap), "No recorded nights yet — sync your strap first.")
+        XCTAssertEqual(SharedScreenCopy.exportNoSessions(.ringConn), "No sleep sessions recorded yet — sync your ring first.")
+        XCTAssertEqual(SharedScreenCopy.exportNoSessions(.helioStrap), "No sleep sessions recorded yet — sync your strap first.")
+    }
+
+    /// The export holds every device's nights, so its caveats cover every device: the ring's stages
+    /// are estimated on the phone, the strap's are its own, and only the ring has apnea figures.
+    func testExportCaveatsCoverEveryDevice() {
+        let text = SharedScreenCopy.exportCaveats
+        XCTAssertTrue(text.hasPrefix("Sleep stages: "))
+        for device in ActiveDeviceChoice.allCases {
+            XCTAssertTrue(text.contains(device.sleepStagingNote), "\(device)")
+            if let spo2 = device.overnightSpO2Note { XCTAssertTrue(text.contains(spo2), "\(device)") }
+        }
+        XCTAssertTrue(ActiveDeviceChoice.ringConn.sleepStagingNote.contains("sends no hypnogram"))
+        XCTAssertFalse(ActiveDeviceChoice.helioStrap.sleepStagingNote.contains("ESTIMATES"),
+                       "the strap's nights are staged by the strap, not estimated on the phone")
+        XCTAssertNil(ActiveDeviceChoice.helioStrap.overnightSpO2Note, "only the ring's burst fills the osa columns")
+        XCTAssertFalse(text.contains("MAC address"))
+        XCTAssertTrue(text.hasSuffix("your wearable's Bluetooth address and your phone's name are never included."))
+    }
+
+    func testExportContentsSaysWhichDeviceTheMetadataDescribes() {
+        let text = SharedScreenCopy.exportContents
+        XCTAssertTrue(text.contains("measurements your wearable delivered"))
+        XCTAssertTrue(text.contains("the model and firmware of the last ring connected (if any)"),
+                      "the metadata block is the ring's only (`ExportBuilder.metadata`)")
+        XCTAssertNil(text.range(of: "\\bstrap\\b", options: .regularExpression))
+    }
+
+    func testANightsDeviceIsTheFamilyThatOwnsIt() {
+        for device in ActiveDeviceChoice.allCases {
+            XCTAssertEqual(SharedScreenCopy.device(owning: device.ownershipFamily), device)
+        }
+        for family in DeviceOwnershipLog.Family.allCases {
+            XCTAssertEqual(SharedScreenCopy.device(owning: family).ownershipFamily, family, "every family has a device")
+        }
+    }
+
     // MARK: the ownership family (decision 51e follow-through)
 
     func testEachDeviceRecordsItsOwnFamily() {
@@ -132,9 +194,12 @@ final class DeviceCopyTests: XCTestCase {
     private func copy(of device: ActiveDeviceChoice) -> [String] {
         [device.noun, device.modelPhrase, device.compatibilityPhrase, device.cardDetail, device.accountSentence,
          device.healthSummary, ProfileDeviceCopy.healthWriting(device), ProfileDeviceCopy.sleepFocusNote(device),
-         ProfileDeviceCopy.remindersFooter(device)]
+         ProfileDeviceCopy.remindersFooter(device), device.sleepStagingNote,
+         SharedScreenCopy.goalsFootnote(device), SharedScreenCopy.backgroundRefreshLimited(device),
+         SharedScreenCopy.exportNoNights(device), SharedScreenCopy.exportNoSessions(device)]
             + device.makers + device.trademarks + device.firstSteps
-            + [device.setupGuide?.title, device.remindersPauseNote].compactMap { $0 }
+            + [device.setupGuide?.title, device.remindersPauseNote, device.activityScoreAccuracyNote,
+               device.overnightSpO2Note].compactMap { $0 }
     }
 
     func testEveryDeviceFillsEveryField() {
