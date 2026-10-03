@@ -1,3 +1,4 @@
+import BackgroundTasks
 import SwiftData
 import XCTest
 import OpenCircuitKit
@@ -1930,6 +1931,64 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertNil(later.refreshAt, "settled: nothing waiting")
     }
 
+    /// Decision 57b (#262), the background run's half: a run stores the night inside its margin and
+    /// asks for the margin refresh; the strap then stops re-delivering it. The next background run,
+    /// still inside the margin, carries no night. Its own nights alone ask for nothing, and the app
+    /// (`AppDelegate`'s `record(run.refreshAt)`) would have cleared the pending refresh. With the stored
+    /// night read after its flush, it asks for the same refresh, which survives the app's `schedule()`.
+    func testABackgroundRunThatNoLongerCarriesTheNightKeepsItsMarginRefresh() async throws {
+        let store = try makeStore()
+        clock = Date(timeIntervalSince1970: midnight + 7 * 3600 + 5 * 60)   // 5 min after the fake night ends
+        let device = makeStrap()
+        let link = FakeBackgroundLink(device: device, keyStore: MemoryKeyStore(keyHex), store: store, clock: { [unowned self] in self.clock })
+        func wired() -> HelioBackgroundSyncService {
+            var wired = service(link, store: store)
+            wired.storedNightSettles = { timeline, now in store.newestStrapNightSettles(timeline: timeline, now: now) }
+            return wired
+        }
+        let first = await wired().run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(first.ending, .synced)
+        let end = try XCTUnwrap(first.result?.nights.first?.segments.map(\.end).max())
+        let marginEnd = end.addingTimeInterval(SleepHealthGate.settleMargin)
+        XCTAssertEqual(first.refreshAt, marginEnd)
+        let key = try XCTUnwrap(try store.latestSleepSummary()).night
+        clearMirror(key)
+        defer { clearMirror(key) }
+
+        let suite = "HelioSessionTests.margin.\(UUID().uuidString)"
+        let refreshDefaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { refreshDefaults.removePersistentDomain(forName: suite) }
+        let recorder = BackgroundMarginRecorder()
+        let now = clock
+        let scheduler = BackgroundRefreshScheduler(scheduler: recorder, now: { now }, window: { _ in nil })
+        StrapNightRefresh.record(first.refreshAt, scheduler: scheduler, defaults: refreshDefaults)
+
+        // The strap stops re-delivering the night; two minutes on, still inside the margin.
+        device.fetchData[.sleepSession] = nil
+        clock = clock.addingTimeInterval(2 * 60)
+        let unwired = await service(link, store: store).run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(unwired.ending, .synced)
+        XCTAssertEqual(unwired.result?.nights.count, 0, "the strap no longer re-delivers it")
+        XCTAssertNil(unwired.refreshAt, "the run's own nights alone ask for nothing")
+
+        let second = await wired().run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertEqual(second.ending, .synced)
+        XCTAssertEqual(second.result?.nights.count, 0)
+        XCTAssertEqual(second.refreshAt, marginEnd, "the stored night still asks for its margin refresh")
+        StrapNightRefresh.record(second.refreshAt, scheduler: scheduler, defaults: refreshDefaults)
+        XCTAssertEqual(StrapNightRefresh.pending(now: clock, defaults: refreshDefaults), marginEnd, "not cancelled")
+        scheduler.schedule()
+        XCTAssertTrue(StrapNightRefresh.resubmit(scheduler, strapChosen: true, now: now, defaults: refreshDefaults))
+        XCTAssertTrue(recorder.submitted is BGAppRefreshTaskRequest)
+        XCTAssertEqual(recorder.submitted?.identifier, BackgroundRefreshScheduler.identifier)
+        XCTAssertEqual(recorder.submitted?.earliestBeginDate, marginEnd, "re-armed after the app's schedule()")
+
+        // Settled, the stored night asks for nothing more (it waits for 57a's backstop).
+        clock = marginEnd.addingTimeInterval(60)
+        let settled = await wired().run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+        XCTAssertNil(settled.refreshAt)
+    }
+
     // MARK: steer 12: 28f stitching vs a night already written to Apple Health
 
     /// The night key the stored strap night files under, and its mirror record cleared afterwards
@@ -2840,4 +2899,13 @@ final class HelioBackgroundSyncTests: XCTestCase {
         XCTAssertFalse(connection.hasCentral, "so its central is never created")
         XCTAssertNil(connection.session)
     }
+}
+
+/// What the app asked iOS for (decision 57b's margin refresh, background half).
+private final class BackgroundMarginRecorder: BGTaskScheduling {
+    private(set) var submitted: BGTaskRequest?
+    func register(forTaskWithIdentifier identifier: String, using queue: DispatchQueue?,
+                  launchHandler: @escaping (BGTask) -> Void) -> Bool { true }
+    func cancel(taskRequestWithIdentifier identifier: String) {}
+    func submit(_ taskRequest: BGTaskRequest) throws { submitted = taskRequest }
 }
