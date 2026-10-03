@@ -78,8 +78,8 @@ extension LocalStore {
 
     // MARK: The repair pass
 
-    /// Score every strap night stored with no Sleep Score. Returns the nights it scored, newest
-    /// first, or `[]`.
+    /// Fill the missing scores of every strap night stored with no Sleep Score or no overnight
+    /// stress score. Returns the nights it changed, newest first, or `[]`.
     ///
     /// WHY A PASS IS NEEDED AT ALL, when `saveHelioNight` now scores on the way in:
     ///   • a re-sync that keeps the stored night returns `.keptFullerStoredNight` (or
@@ -96,22 +96,24 @@ extension LocalStore {
     ///     score (decision 13);
     ///   • a night with an empty stored hypnogram — there is nothing to score at second precision,
     ///     and the rounded minutes are not an acceptable substitute (`SleepScoreHeal`'s argument);
-    ///   • a night that already has a score — the predicate is `sleepScore == 0`, so a scored night
-    ///     is skipped for ever after, which is also what makes a second run a no-op;
-    ///   • `stressScore`, when it is already non-zero.
+    ///   • a score that is already there — the predicate is `sleepScore == 0 || stressScore == 0`
+    ///     and each write fills only a column that is still 0 (#259), so a stored number is never
+    ///     replaced by one recomputed from thinner rows, and a night with both is skipped for ever
+    ///     after, which is also what makes a second run a no-op.
     /// And it never writes a computed 0: `StoredNightScore` reports that as "no score", because
     /// writing the sentinel back would claim a repair that changed nothing.
     ///
-    /// ⚠️ `row.updatedAt` IS BUMPED on a row it scores, for the reason `healWithheldSleepScores`
-    /// records: the Sleep card and Readiness are `@Query`-backed and would otherwise keep showing
+    /// ⚠️ `row.updatedAt` IS BUMPED on a row it changes, and only then (#259): a candidate whose
+    /// missing score still can't be computed, such as a night with no HRV, is left byte-identical.
+    /// The bump is for the reason `healWithheldSleepScores` records: the Sleep card and Readiness are `@Query`-backed and would otherwise keep showing
     /// the empty badge until something else touched the row. Only the two score columns and
     /// `updatedAt` change — the minutes, the window, the hypnogram and every provenance column are
     /// left exactly as stored, so this turns a missing number into the number the night would have
     /// been stored with and restates nothing about the night.
     ///
     /// IDEMPOTENT AND DELIBERATELY NOT LATCHED, like `healWithheldSleepScores` and for the same
-    /// reasons: it is cheap (one fetch over a table with one row per night), a scored row is skipped
-    /// by the predicate, and un-latched means a row that arrives LATER — from a restore, from a
+    /// reasons: it is cheap (one fetch over a table with one row per night, plus one HRV fetch per
+    /// night still missing only its recovery number), a scored row is skipped by the predicate, and un-latched means a row that arrives LATER — from a restore, from a
     /// night re-keyed after the first run, or from a sync that fills in the HRV — is still picked up.
     @discardableResult
     func scoreUnscoredHelioNights() throws -> [Date] {
@@ -124,45 +126,72 @@ extension LocalStore {
                 && log.owner(ofNightFrom: $0.inBedStart, to: $0.inBedEnd) == .zeppOS
         }
         guard !strapNights.isEmpty else { return [] }
-        // The baseline pool is built ONCE from the strap's own nights, exactly as the save-time path
-        // builds it, and each night excludes its own key below.
-        let pool = strapNights.filter { $0.skinTempC > 0 }
+        // The baseline candidates, newest first, from the strap's own nights. Each night below takes
+        // only the ones STRICTLY OLDER than itself (#259): the save path scores a night when it is
+        // the newest one stored, so a later night in its pool would give a number the save path
+        // never could have.
+        let candidates = strapNights.filter { $0.skinTempC > 0 }
             .sorted { $0.night > $1.night }
-            .prefix(Self.helioScoreBaselineNights)
             .map { (night: $0.night, celsius: $0.skinTempC) }
 
-        var scored: [(night: Date, score: Int)] = []
-        for row in strapNights where row.sleepScore == 0 && !row.isManuallyEdited {
+        var scored: [Date] = []
+        // #259: a night missing EITHER score is a candidate. A sync that dies between the sleep
+        // round and the HRV round stores a Sleep Score and no stress score, and the `.sleepSession`
+        // watermark has already moved on, so this pass is the only thing that can ever fill it.
+        for row in strapNights where (row.sleepScore == 0 || row.stressScore == 0) && !row.isManuallyEdited {
             guard !row.hypnogramData.isEmpty else { continue }
-            let segments = SleepHypnogramCodec.decode(row.hypnogramData)
             let window = DateInterval(start: row.inBedStart, end: row.inBedEnd)
-            let tonight = Calendar.current.startOfDay(for: row.night)
-            let scores = StoredNightScore.scores(.init(
-                segments: segments,
-                heartRate: helioHeartRate(in: window, device: nil),
-                rmssd: helioRMSSD(in: window, device: nil),
-                skinTempC: row.skinTempC > 0 ? row.skinTempC : nil,
-                priorNights: pool.filter { Calendar.current.startOfDay(for: $0.night) != tonight }
-                    .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.celsius) }))
-            guard let score = scores.sleepScore else { continue }
-            row.sleepScore = score
-            // Never overwrite a stored recovery number, and never write a computed 0 over it.
-            if row.stressScore == 0, let stress = scores.stressScore { row.stressScore = stress }
+            let needsSleep = row.sleepScore == 0
+            let scores: StoredNightScore.Scores
+            if needsSleep {
+                let tonight = Calendar.current.startOfDay(for: row.night)
+                let priorNights = candidates
+                    .filter { Calendar.current.startOfDay(for: $0.night) < tonight }
+                    .prefix(Self.helioScoreBaselineNights)
+                    .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.celsius) }
+                scores = StoredNightScore.scores(.init(
+                    segments: SleepHypnogramCodec.decode(row.hypnogramData),
+                    heartRate: helioHeartRate(in: window, device: nil),
+                    rmssd: helioRMSSD(in: window, device: nil),
+                    skinTempC: row.skinTempC > 0 ? row.skinTempC : nil,
+                    priorNights: priorNights))
+            } else {
+                // Only the recovery number is missing, and it depends on the HRV alone
+                // (`StoredNightScore` computes it independently of the composite), so the heart-rate
+                // fetch and the baseline are skipped.
+                scores = StoredNightScore.scores(.init(segments: [], rmssd: helioRMSSD(in: window, device: nil)))
+            }
+            // ⚠️ BOTH WRITES ARE CONDITIONAL: only a score that is still 0 is filled. Recomputing
+            // from thinner rows must never replace a number already stored, and a computed 0 is
+            // `nil` here, so the sentinel is never written back either.
+            var changed = false
+            if needsSleep, let score = scores.sleepScore {
+                row.sleepScore = score
+                changed = true
+            }
+            if row.stressScore == 0, let stress = scores.stressScore {
+                row.stressScore = stress
+                changed = true
+            }
+            guard changed else { continue }
             row.updatedAt = Date()
-            scored.append((row.night, score))
+            scored.append(row.night)
         }
 
-        if !scored.isEmpty { try context.save() }
+        guard !scored.isEmpty else { return [] }
+        try context.save()
 
-        for item in scored.sorted(by: { $0.night > $1.night }) {
-            // The night KEY and the score only — no clock time, no temperature, no HRV — matching
-            // the granularity of the sleep breadcrumbs around it.
-            ObservabilityStore().recordMetricEvent(
-                source: "sleep-score-strap",
-                detail: "night=\(Self.helioNightStamp(item.night)) SCORED strap night -> \(item.score) "
-                    + "(rebuilt from the stored hypnogram; builds 59-62 stored it unscored)")
-        }
-        return scored.map(\.night).sorted(by: >)
+        let newestFirst = scored.sorted(by: >)
+        // ONE summary breadcrumb per pass (#259) — a breadcrumb per night cost ~135 ms on the main
+        // actor at launch on a 120-night store. The night KEYS and the count only — no clock time,
+        // no score, no temperature, no HRV.
+        ObservabilityStore().recordMetricEvent(
+            source: "sleep-score-strap",
+            detail: "SCORED \(newestFirst.count) strap night(s), "
+                + "oldest=\(Self.helioNightStamp(newestFirst[newestFirst.count - 1])) "
+                + "newest=\(Self.helioNightStamp(newestFirst[0])) "
+                + "(rebuilt from the stored hypnogram and the strap's own rows)")
+        return newestFirst
     }
 
     /// Compact local night stamp for the breadcrumb — never user-facing and never a health value,
