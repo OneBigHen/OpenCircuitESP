@@ -379,7 +379,7 @@ struct AllDayVitalsSection: View {
     var body: some View {
         let avgs = TrendsEngine.rollingAverages(points)
         let tempUnit = TemperatureUnit(rawValue: tempUnitRaw) ?? .celsius
-        VStack(spacing: 12) {
+        AdaptiveColumns(spacing: 12) {
             MetricChartCard(title: "Heart Rate", unit: "bpm", color: Theme.hr,
                 data: points.compactMap { p in p.dayHRAvg.flatMap { hr in hr > TrendsEngine.minValidHR ? (p.date, hr) : nil } },
                 avg: avgs.dayHRAvg)
@@ -406,7 +406,7 @@ struct SleepTrendsSection: View {
 
     var body: some View {
         let avgs = TrendsEngine.rollingAverages(points)
-        VStack(spacing: 12) {
+        AdaptiveColumns(spacing: 12) {
             MetricChartCard(title: "Sleep Score", unit: "/100", color: Theme.sleep,
                 data: points.compactMap { p in p.sleepScore.map { (p.date, Double($0)) } },
                 avg: avgs.sleepScore)
@@ -446,7 +446,7 @@ struct ActivityTrendsSection: View {
     var body: some View {
         let avgs = TrendsEngine.rollingAverages(points)
         let distUnit = DistanceUnit(rawValue: distUnitRaw) ?? .metric
-        VStack(spacing: 12) {
+        AdaptiveColumns(spacing: 12) {
             MetricChartCard(title: "Daily Steps", unit: "", color: Theme.steps,
                 data: points.compactMap { p in p.steps.map { (p.date, Double($0)) } },
                 avg: avgs.steps, formatAvg: { "\(Int($0.rounded()).formatted())" }, clampsToData: false)
@@ -468,7 +468,7 @@ struct RecentReadingsSection: View {
     let rows: [TrendsData.RecentMetricRow]
 
     var body: some View {
-        VStack(spacing: 12) {
+        AdaptiveColumns(spacing: 12) {
             ForEach(rows) { metric in
                 card(metric)
             }

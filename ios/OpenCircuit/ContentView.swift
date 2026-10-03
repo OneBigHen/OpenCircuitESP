@@ -198,6 +198,7 @@ struct ContentView: View {
                 .tabItem { Label("Profile", systemImage: "person.crop.circle") }
                 .tag(Tab.profile)
         }
+        .adaptiveTabBar()
         .tint(Theme.accent)
 #if DEBUG && targetEnvironment(simulator)
         .modifier(DemoScreenModifier())   // screenshot harness (#216); inert without -OCDemoData
@@ -490,6 +491,7 @@ struct ContentView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .readableWidth()
             .background(Theme.pageBackground)
             // Pull-to-refresh mirrors the "Sync from ring" button (same guards). See `forceSync`.
             .refreshable { await forceSync() }
@@ -541,7 +543,7 @@ struct ContentView: View {
     private var sleepTab: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: Theme.sectionSpacing) {
+                AdaptiveColumns {
                     let sleepHours = heroPoints { $0.sleepMinutes.map { Double($0) / 60.0 } }
                     if sleepHours.count >= 2, let last = sleepHours.last {
                         heroCard(title: "Sleep", systemImage: "bed.double.fill", tint: Theme.sleep,
@@ -566,6 +568,7 @@ struct ContentView: View {
                     if !trends.points.isEmpty {
                         OCSectionHeader("Sleep Trends", systemImage: "chart.xyaxis.line", tint: Theme.sleep)
                         SleepTrendsSection(points: trends.points, tempUnitRaw: tempUnitRaw)
+                            .spansColumns()
                     }
                     NavigationLink { SleepFocusSyncSetupView() } label: {
                         card {
@@ -602,7 +605,7 @@ struct ContentView: View {
     private var activityTab: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: Theme.sectionSpacing) {
+                AdaptiveColumns {
                     let stepPts = heroPoints { $0.steps.map(Double.init) }
                     if stepPts.count >= 2, let last = stepPts.last {
                         heroCard(title: "Activity", systemImage: "figure.walk", tint: Theme.steps,
@@ -628,12 +631,15 @@ struct ContentView: View {
                         OCSectionHeader("Goal Rings History", systemImage: "circle.dashed",
                                         tint: Theme.steps)
                         GoalRingsHistorySection(days: trends.goalDays, summary: trends.goalSummary)
+                            .spansColumns()
                     }
                     caloriesCard
                     if !trends.points.isEmpty {
                         OCSectionHeader("Activity Trends", systemImage: "chart.bar.fill", tint: Theme.steps)
                         GoalRingsTrendsSection(days: trends.goalDays)
+                            .spansColumns()
                         ActivityTrendsSection(points: trends.points, distUnitRaw: distUnitRaw)
+                            .spansColumns()
                     }
                 }
                 .padding()
@@ -654,7 +660,7 @@ struct ContentView: View {
     private var profileTab: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: Theme.sectionSpacing) {
+                AdaptiveColumns {
                     NavigationLink { UserProfileSettingsView() } label: {
                         card {
                             HStack(spacing: 8) {

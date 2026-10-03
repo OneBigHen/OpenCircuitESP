@@ -24,11 +24,11 @@ struct TrendsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: Theme.sectionSpacing) {
+            AdaptiveColumns {
                 if loading {
-                    ProgressView("Computing trends…").padding(.top, 40)
+                    ProgressView("Computing trends…").padding(.top, 40).spansColumns()
                 } else if data.points.isEmpty {
-                    emptyState
+                    emptyState.spansColumns()
                 } else {
                     // Historical day picker pinned at the top — tap a day to drill into its
                     // time-of-day breakdown (DayDetailView).
@@ -36,13 +36,16 @@ struct TrendsView: View {
                     Text("Tap a day to see its time-of-day breakdown.")
                         .font(.caption2).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    dayPicker
-                    hero
-                    availableMetricsNote
+                        .spansColumns()
+                    dayPicker.spansColumns()
+                    hero.spansColumns()
+                    availableMetricsNote.spansColumns()
                     OCSectionHeader("All-Day Vitals", systemImage: "waveform.path.ecg", tint: Theme.hr)
                     AllDayVitalsSection(points: data.points, tempUnitRaw: tempUnitRaw)
+                        .spansColumns()
                     OCSectionHeader("Recent Readings", systemImage: "list.bullet.rectangle", tint: .secondary)
                     RecentReadingsSection(rows: data.recentRows)
+                        .spansColumns()
                 }
             }
             .padding()
