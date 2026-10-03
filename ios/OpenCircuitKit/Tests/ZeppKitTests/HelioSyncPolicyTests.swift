@@ -412,8 +412,9 @@ final class HelioNapRuleTests: XCTestCase {
     /// once 60 min have passed since it ended, so a later session can still stitch it into a night.
     func testShortAndUnsettledSleepsAreNotNapsYet() {
         let twentyMinutes = sleep(at(13), at(13).addingTimeInterval(20 * 60))
-        let split = naps([sleep(-1, 7), sleep(12, 12.25), twentyMinutes, sleep(15, 16)], now: 16.5)
-        XCTAssertEqual(split.tooShort.map(\.window), [span(12, 12.25)])
+        // The short sleep sits over an hour from every other one, so stitching never joins it to a neighbour.
+        let split = naps([sleep(-1, 7), sleep(10, 10.25), twentyMinutes, sleep(15, 16)], now: 16.5)
+        XCTAssertEqual(split.tooShort.map(\.window), [span(10, 10.25)])
         XCTAssertEqual(split.naps.map(\.window), [twentyMinutes.window])
         XCTAssertEqual(split.unsettled.map(\.window), [span(15, 16)])
         XCTAssertEqual(naps([sleep(-1, 7), sleep(15, 16)], now: 17).naps.map(\.window), [span(15, 16)],
