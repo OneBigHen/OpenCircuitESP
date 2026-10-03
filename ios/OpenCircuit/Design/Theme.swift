@@ -139,7 +139,6 @@ struct OCSectionHeader<Accessory: View>: View {
             accessory()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .spansColumns()   // a heading never sits in one column of a wide layout
     }
 }
 

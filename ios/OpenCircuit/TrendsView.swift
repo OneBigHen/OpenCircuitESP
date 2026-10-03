@@ -17,6 +17,8 @@ struct TrendsView: View {
     @State private var data = TrendsData()
     @State private var loading = true
     @State private var selectedDay: Date?
+    /// Non-nil in a wide window: a tapped day opens in the right-hand column instead of pushing.
+    @Environment(\.splitDetail) private var splitDetail
 
     // Display units (#83): values are stored in SI; only the display layer converts. (This tab shows
     // all-day vitals + temp; the distance-bearing charts live on the Activity tab.)
@@ -24,11 +26,11 @@ struct TrendsView: View {
 
     var body: some View {
         ScrollView {
-            AdaptiveColumns {
+            VStack(spacing: Theme.sectionSpacing) {
                 if loading {
-                    ProgressView("Computing trends…").padding(.top, 40).spansColumns()
+                    ProgressView("Computing trends…").padding(.top, 40)
                 } else if data.points.isEmpty {
-                    emptyState.spansColumns()
+                    emptyState
                 } else {
                     // Historical day picker pinned at the top — tap a day to drill into its
                     // time-of-day breakdown (DayDetailView).
@@ -36,16 +38,13 @@ struct TrendsView: View {
                     Text("Tap a day to see its time-of-day breakdown.")
                         .font(.caption2).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .spansColumns()
-                    dayPicker.spansColumns()
-                    hero.spansColumns()
-                    availableMetricsNote.spansColumns()
+                    dayPicker
+                    hero
+                    availableMetricsNote
                     OCSectionHeader("All-Day Vitals", systemImage: "waveform.path.ecg", tint: Theme.hr)
                     AllDayVitalsSection(points: data.points, tempUnitRaw: tempUnitRaw)
-                        .spansColumns()
                     OCSectionHeader("Recent Readings", systemImage: "list.bullet.rectangle", tint: .secondary)
                     RecentReadingsSection(rows: data.recentRows)
-                        .spansColumns()
                 }
             }
             .padding()
@@ -111,7 +110,7 @@ struct TrendsView: View {
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(data.points.reversed(), id: \.date) { p in
-                    Button { selectedDay = p.date } label: {
+                    Button { if let split = splitDetail { split.show(DayDetailView(day: p.date)) } else { selectedDay = p.date } } label: {
                         VStack(spacing: 4) {
                             if let day = goalsByDay[Calendar.current.startOfDay(for: p.date)] {
                                 GoalRingsGlyph(day: day, size: 28, lineWidth: 3.5, spacing: 1.2)
