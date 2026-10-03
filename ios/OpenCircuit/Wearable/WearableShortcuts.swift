@@ -1,6 +1,5 @@
 import Foundation
 import OpenCircuitKit
-import UIKit
 import ZeppKit
 
 // What the Shortcuts actions do (#260, decision 52), apart from App Intents so the tests drive it
@@ -64,8 +63,11 @@ struct WearableShortcutEnvironment {
     /// One wait between checks (250 ms in the app; the tests move the simulated strap along instead).
     var pause: @MainActor () async -> Void
     var isCancelled: @MainActor () -> Bool = { Task.isCancelled }
-    /// False before the first unlock after a restart: UserDefaults and the Keychain read as empty then.
-    var protectedDataAvailable: @MainActor () -> Bool = { true }
+    /// Whether the phone has been unlocked once since it restarted (`FirstUnlockSentinel`). NOT whether
+    /// it is locked now: a locked phone after its first unlock proceeds (steer 4).
+    var firstUnlockProbe: @MainActor () -> FirstUnlockProbe = { .readable }
+    /// Creates the sentinel when an action proceeds and finds none.
+    var ensureFirstUnlockSentinel: @MainActor () -> Void = {}
 
     var store: StrapWakeAlarmStore { applier.store }
 
@@ -86,7 +88,8 @@ struct WearableShortcutEnvironment {
             applier: .shared,
             now: { Date() },
             pause: { try? await Task.sleep(for: .milliseconds(250)) },
-            protectedDataAvailable: { UIApplication.shared.isProtectedDataAvailable })
+            firstUnlockProbe: { FirstUnlockSentinel().probe() },
+            ensureFirstUnlockSentinel: { FirstUnlockSentinel().ensure() })
     }
 }
 
@@ -569,15 +572,28 @@ struct WearableShortcuts {
         }
     }
 
-    /// F2 (review-261): before the first unlock after a restart, UserDefaults and the Keychain read as
-    /// empty, so the device choice would read as the ring and the key as missing. Nothing is read or
-    /// persisted then.
+    /// F2 (review-261), fixed by steer 4: ONLY before the first unlock since boot, UserDefaults and the
+    /// Keychain read as empty, so the device choice would read as the ring and the key as missing. Then
+    /// nothing is read or persisted. A phone that is merely locked proceeds (`FirstUnlockGate`).
     private func lockedOut(_ action: String) -> WearableShortcutResult? {
-        guard !env.protectedDataAvailable() else { return nil }
-        let result = WearableShortcutResult(dialog: "Unlock your iPhone once after restarting, then try again.",
-                                            outcome: "protected data unavailable")
-        Self.log(action, result)
-        return result
+        let probe = env.firstUnlockProbe()
+        switch FirstUnlockGate.verdict(for: probe) {
+        case .proceed:
+            switch probe {
+            case .failed(let status):
+                helioLog.error("shortcuts: first-unlock sentinel unreadable (status \(status, privacy: .public)); proceeding")
+            case .missing:
+                env.ensureFirstUnlockSentinel()
+            case .readable, .beforeFirstUnlock:
+                break
+            }
+            return nil
+        case .refuse:
+            let result = WearableShortcutResult(dialog: "Unlock your iPhone once after restarting, then try again.",
+                                                outcome: "before first unlock")
+            Self.log(action, result)
+            return result
+        }
     }
 
     static func cancelled(_ name: String, ran: Int, of times: Int) -> WearableShortcutResult {

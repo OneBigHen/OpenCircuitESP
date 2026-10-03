@@ -15,6 +15,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // local notifications, so the user would see nothing and the backoff would still record a
         // fire — making them miss the alert entirely.
         UNUserNotificationCenter.current().delegate = self
+        // The Shortcuts actions' first-unlock check (#260, steer 4): created on a normal launch; before
+        // the first unlock the add fails harmlessly and the next launch tries again.
+        FirstUnlockSentinel().ensure()
         Self.registerNotificationCategories()
         let refreshRegistered = scheduler.register { task in
             guard let refreshTask = task as? BGAppRefreshTask else {

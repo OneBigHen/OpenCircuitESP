@@ -38,9 +38,14 @@ your wake time, Repeat: Once ▸ Done.
   waits for the session for at most 15 s. Inside the 500 ms a busy disconnect waits before cancelling
   the link, it re-arms on that disconnect instead (`rearmAfterTeardown`), so the deferred cancel can't
   cancel its connect. Nothing is disconnected afterwards, so the link is left as a background run
-  leaves it (B.5). A strap that ended "busy" is not reconnected (decision 7). Before the first unlock
+  leaves it (B.5). A strap that ended "busy" is not reconnected (decision 7). Only before the first unlock
   after a restart, every action answers "Unlock your iPhone once after restarting, then try again."
-  and reads or saves nothing (the stored choice and key aren't readable then). If iOS cancels a
+  and reads or saves nothing (the stored choice and key aren't readable then). A phone that is merely
+  locked (after its first unlock) runs the actions normally: that is when a Message or bedtime
+  automation runs. The check reads a Keychain sentinel created at launch with the strap key's own
+  class, `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (`Wearable/FirstUnlockGate.swift`): only
+  `errSecInteractionNotAllowed` refuses; a missing sentinel or any other error proceeds (and is logged).
+  `UIApplication.isProtectedDataAvailable` is not used: it is false whenever a passcode phone is locked. If iOS cancels a
   Vibrate run, no further buzz starts and the result says how many ran.
 - **The managed slot** (`Helio/StrapWakeAlarm.swift`). A pure planner decides from the strap's list, the
   managed record and the request: a once-request whose time has passed → dropped, nothing sent

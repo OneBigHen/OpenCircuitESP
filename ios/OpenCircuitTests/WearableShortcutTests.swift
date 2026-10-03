@@ -179,7 +179,7 @@ final class WearableShortcutTests: XCTestCase {
     /// session and delivers what the strap sent.
     private func actions(_ link: WSLink, applier: StrapWakeAlarmApplier, device: ActiveDeviceChoice = .helioStrap,
                          savedStrap: Bool = true, cancelled: @escaping () -> Bool = { false },
-                         protectedData: Bool = true) -> WearableShortcuts {
+                         probe: FirstUnlockProbe = .readable, ensured: (() -> Void)? = nil) -> WearableShortcuts {
         WearableShortcuts(WearableShortcutEnvironment(
             device: { device },
             savedStrapID: { [strapID] in savedStrap ? strapID : nil },
@@ -200,7 +200,8 @@ final class WearableShortcutTests: XCTestCase {
                 self.transport?.drain()
             },
             isCancelled: { cancelled() },
-            protectedDataAvailable: { protectedData }))
+            firstUnlockProbe: { probe },
+            ensureFirstUnlockSentinel: { ensured?() }))
     }
 
     private func pairs(_ device: FakeZeppDevice) -> [UInt8] { device.findOpcodes.filter { $0 == 0x03 || $0 == 0x06 } }
@@ -658,16 +659,33 @@ final class WearableShortcutTests: XCTestCase {
     func testBeforeTheFirstUnlockEveryActionAsksForAnUnlockAndPersistsNothing() async throws {
         let applier = applier()
         let link = WSLink()
-        let locked = actions(link, applier: applier, protectedData: false)
+        let locked = actions(link, applier: applier, probe: .beforeFirstUnlock)
         let buzz = await locked.vibrate(times: 1)
         let set = await locked.setWakeAlarm(hour: 6, minute: 30, days: .once)
         let clear = await locked.clearWakeAlarm()
         for result in [buzz, set, clear] {
             XCTAssertEqual(result.dialog, "Unlock your iPhone once after restarting, then try again.")
-            XCTAssertEqual(result.outcome, "protected data unavailable")
+            XCTAssertEqual(result.outcome, "before first unlock")
         }
         XCTAssertEqual(link.connects, 0)
         XCTAssertNil(defaults.data(forKey: StrapWakeAlarmStore.key))
+    }
+
+    /// Steer 4: a phone that is merely LOCKED (after its first unlock) is exactly when a Message or bedtime
+    /// automation runs. It proceeds, and so does an unreadable sentinel for any other reason.
+    func testALockedPhoneAfterItsFirstUnlockProceeds() async throws {
+        for probe in [FirstUnlockProbe.readable, .missing, .failed(-34018), .failed(errSecNotAvailable)] {
+            let applier = applier()
+            let link = WSLink()   // nothing answers: the action gets as far as reaching the strap
+            var ensured = 0
+            let result = await actions(link, applier: applier, probe: probe, ensured: { ensured += 1 })
+                .setWakeAlarm(hour: 6, minute: 30, days: .everyDay)
+            XCTAssertEqual(result.outcome, "pending: timed out", "\(probe)")
+            XCTAssertEqual(link.connects, 1, "\(probe)")
+            XCTAssertNotNil(applier.store.pending, "\(probe): the request was saved")
+            XCTAssertEqual(ensured, probe == .missing ? 1 : 0, "\(probe): a missing sentinel is created")
+            defaults.removePersistentDomain(forName: suite)
+        }
     }
 
     /// N2: a connection-time apply leaves the Alarms screen's notice alone; the screen's own edit still sets it.
