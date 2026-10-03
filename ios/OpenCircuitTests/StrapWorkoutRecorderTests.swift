@@ -22,6 +22,7 @@ private final class FakeHRSource: StrapWorkoutHeartRateSource {
     var syncing = false
     var canStreamHeartRate = true
     var heartRateObserver: (@MainActor (Int, Date) -> Void)?
+    var rrIntervalsReceived = 0
     private(set) var starts = 0
     private(set) var stops = 0
     private(set) var syncRequests = 0
@@ -100,6 +101,21 @@ private final class FakeHRStore: StrapWorkoutHRStore {
     func insertWorkoutHeartRate(_ samples: [HRSample], timeline: SyncDeviceID) throws { inserted += samples }
 }
 
+@MainActor
+private final class FakeVO2: StrapVO2MaxProviding {
+    var age: Int? = 40
+    var resting: Double? = 60
+    var status: VO2MaxHealthWriter.Status = .saved
+    private(set) var saves: [(estimate: VO2MaxEstimate.Estimate, end: Date, timeline: SyncDeviceID)] = []
+    func userSetAge() -> Int? { age }
+    func restingHR(workoutStart: Date, workoutEnd: Date) -> Double? { resting }
+    func save(_ estimate: VO2MaxEstimate.Estimate, workoutEnd: Date,
+              timeline: SyncDeviceID) async -> VO2MaxHealthWriter.Status {
+        saves.append((estimate, workoutEnd, timeline))
+        return status
+    }
+}
+
 // MARK: - Recorder tests
 
 @MainActor
@@ -124,7 +140,8 @@ final class StrapWorkoutRecorderTests: XCTestCase {
     }
 
     private func makeRig(source: @escaping @MainActor () -> (any StrapWorkoutHeartRateSource)?,
-                         journal: MemoryJournal? = nil, store: FakeHRStore? = nil) -> Rig {
+                         journal: MemoryJournal? = nil, store: FakeHRStore? = nil,
+                         vo2: FakeVO2? = nil) -> Rig {
         let journal = journal ?? MemoryJournal()
         let store = store ?? FakeHRStore()
         let health = FakeHealthWriter()
@@ -132,7 +149,7 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         let profile = self.profile
         let recorder = StrapWorkoutRecorder(source: source, health: health, journal: journal, hrStore: { store },
                                             location: location, liveActivity: nil, profile: { profile },
-                                            indoorKeepAlive: { false }, orphanStop: orphanStop,
+                                            indoorKeepAlive: { false }, orphanStop: orphanStop, vo2: vo2,
                                             clock: { [unowned self] in self.now }, autoTick: false, managesIdleTimer: false)
         return Rig(recorder: recorder, health: health, journal: journal, location: location, store: store)
     }
@@ -257,6 +274,126 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         XCTAssertTrue(write.summary.summary.hasRoute)
         XCTAssertEqual(write.summary.summary.distanceMeters, 111)
         XCTAssertEqual(rig.location.stopped, 1)
+    }
+
+    // MARK: VO₂ max estimate (#232 on the strap)
+
+    /// A fix every 5 s from `t0` through `seconds`, heading north at `metersPerMinute`, no altitude.
+    private func steadyRoute(seconds: TimeInterval, metersPerMinute: Double) -> [CLLocation] {
+        let metersPerDegree = 111_195.0
+        return stride(from: 0.0, through: seconds, by: 5).map { s in
+            let north = metersPerMinute * s / 60
+            return CLLocation(coordinate: CLLocationCoordinate2D(latitude: 1 + north / metersPerDegree, longitude: 1),
+                              altitude: 0, horizontalAccuracy: 5, verticalAccuracy: -1, timestamp: at(s))
+        }
+    }
+
+    /// Lets the estimate's Health write (a detached `Task`) run.
+    private func settle(_ rig: Rig) async {
+        for _ in 0 ..< 100 where rig.recorder.vo2MaxHealthStatus == nil { await Task.yield() }
+    }
+
+    func testASteadyOutdoorRunGetsAVO2MaxEstimateSavedUnderTheStrap() async throws {
+        let source = makeSource()
+        let vo2 = FakeVO2()
+        let rig = makeRig(source: { source }, vo2: vo2)
+        rig.recorder.selectedSport = .runningOutdoor
+        rig.recorder.start()
+        rig.location.route = steadyRoute(seconds: 900, metersPerMinute: 200)
+        rig.location.distanceMeters = 3000
+        await stream(rig, source, from: 0, to: 900, bpm: 150)
+        await rig.recorder.end()
+        await settle(rig)
+
+        guard case .estimate(let e)? = rig.recorder.vo2MaxOutcome else {
+            return XCTFail("expected an estimate, got \(String(describing: rig.recorder.vo2MaxOutcome))")
+        }
+        // ACSM: 0.2 × 200 + 3.5 = 43.5; Swain with rest 60, Tanaka max 180 at 40: 3.5 + 40 × 120 / 90 ≈ 56.8.
+        XCTAssertEqual(e.vo2Max, 56.8, accuracy: 2.0)
+        XCTAssertEqual(e.maxHRSource, .ageFormula)
+        XCTAssertEqual(vo2.saves.count, 1, "one Health write")
+        XCTAssertEqual(vo2.saves.first?.timeline, source.timeline, "attributed to the strap, not the ring")
+        XCTAssertEqual(rig.recorder.vo2MaxHealthStatus, .saved)
+        guard case .finished(let summary, _) = rig.recorder.state else { return XCTFail("not finished") }
+        XCTAssertEqual(vo2.saves.first?.end, summary.summary.endDate)
+
+        rig.recorder.reset()
+        XCTAssertNil(rig.recorder.vo2MaxOutcome)
+        XCTAssertNil(rig.recorder.vo2MaxHealthStatus)
+    }
+
+    func testRRIntervalsAreCountedFromWhenTheWorkoutAttached() async throws {
+        let source = makeSource()
+        source.rrIntervalsReceived = 7                                  // before the workout: not counted
+        let rig = makeRig(source: { source })
+        rig.recorder.selectedSport = .runningIndoor
+        rig.recorder.start()
+        source.rrIntervalsReceived += 2
+        await stream(rig, source, from: 0, to: 1, bpm: 120)
+        source.rrIntervalsReceived += 3
+        await stream(rig, source, from: 1, to: 2, bpm: 120)
+        XCTAssertEqual(rig.recorder.rrIntervalCount, 5)
+        await rig.recorder.end()
+        rig.recorder.reset()
+        XCTAssertEqual(rig.recorder.rrIntervalCount, 0)
+    }
+
+    func testAnIndoorRunHasNoVO2MaxEstimate() async throws {
+        let source = makeSource()
+        let vo2 = FakeVO2()
+        let rig = makeRig(source: { source }, vo2: vo2)
+        rig.recorder.selectedSport = .runningIndoor
+        rig.recorder.start()
+        await stream(rig, source, from: 0, to: 900, bpm: 150)
+        await rig.recorder.end()
+        XCTAssertNil(rig.recorder.vo2MaxOutcome)
+        XCTAssertTrue(vo2.saves.isEmpty)
+    }
+
+    func testTheTenMinuteRuleIsOnRunningTimeNotWallClock() async throws {
+        let source = makeSource()
+        let vo2 = FakeVO2()
+        let rig = makeRig(source: { source }, vo2: vo2)
+        rig.recorder.selectedSport = .runningOutdoor
+        rig.recorder.start()
+        rig.location.route = steadyRoute(seconds: 900, metersPerMinute: 200)
+        await stream(rig, source, from: 0, to: 240, bpm: 150)
+        rig.recorder.pause()
+        await stream(rig, source, from: 240, to: 660, bpm: 100)          // 7 min paused
+        rig.recorder.resume()
+        await stream(rig, source, from: 660, to: 900, bpm: 150)          // 8 min running in all
+        await rig.recorder.end()
+        XCTAssertEqual(rig.recorder.vo2MaxOutcome, .skipped(.tooShort))
+        XCTAssertTrue(vo2.saves.isEmpty)
+    }
+
+    func testNoAgeSaysSoAndWritesNothing() async throws {
+        let source = makeSource()
+        let vo2 = FakeVO2()
+        vo2.age = nil
+        let rig = makeRig(source: { source }, vo2: vo2)
+        rig.recorder.selectedSport = .runningOutdoor
+        rig.recorder.start()
+        rig.location.route = steadyRoute(seconds: 900, metersPerMinute: 200)
+        await stream(rig, source, from: 0, to: 900, bpm: 150)
+        await rig.recorder.end()
+        XCTAssertEqual(rig.recorder.vo2MaxOutcome, .skipped(.noAge))
+        XCTAssertTrue(vo2.saves.isEmpty)
+    }
+
+    func testAWorkoutHealthRejectedNeverWritesItsEstimate() async throws {
+        let source = makeSource()
+        let vo2 = FakeVO2()
+        let rig = makeRig(source: { source }, vo2: vo2)
+        rig.health.accept = false
+        rig.recorder.selectedSport = .runningOutdoor
+        rig.recorder.start()
+        rig.location.route = steadyRoute(seconds: 900, metersPerMinute: 200)
+        await stream(rig, source, from: 0, to: 900, bpm: 150)
+        await rig.recorder.end()
+        guard case .estimate? = rig.recorder.vo2MaxOutcome else { return XCTFail("still shown on the summary") }
+        XCTAssertEqual(rig.recorder.vo2MaxHealthStatus, .failed)
+        XCTAssertTrue(vo2.saves.isEmpty)
     }
 
     // MARK: The app is killed

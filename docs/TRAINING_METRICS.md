@@ -1,7 +1,12 @@
 # Training metrics: training load and a VO₂ max estimate (#232)
 
-Status: shipped on the phone for workouts the app records. Ring workouts get the metrics now; strap
-workouts get them through #227, unchanged, because every input below is device-agnostic.
+Status: shipped on the phone for workouts the app records, ring and Helio Strap alike (every input
+below is device-agnostic). Until 2026-10-03 the strap's recorder (#227) computed neither metric: its
+summary had no TRAINING section and no VO₂ max ever reached Apple Health from a strap run. It now runs
+the same `VO2MaxEstimate` over the strap's 1 Hz heart rate (readings inside the running stretches
+only) and the phone's route, applies the 10-minute rule to RUNNING time (pauses left out), and writes
+the estimate attributed to the strap rather than the ring (`VO2MaxHealthWriter.save(_:workoutEnd:timeline:)`).
+The strap's own VO₂ max (Zepp's) is still never read (decision 34).
 
 Scope (decision 34): the strap's own workout values are out of scope (#226 is closed). Everything
 here is computed on the phone from the workout the app recorded:
@@ -23,8 +28,10 @@ of filling it in.
 
 Code: `OpenCircuitKit/Analytics/TrainingLoad.swift`, `OpenCircuitKit/Analytics/VO2MaxEstimate.swift`
 (pure, tested in `TrainingMetricsTests.swift`), `OpenCircuit/TrainingMetricsViews.swift`,
-`OpenCircuit/Health/VO2MaxHealthWriter.swift`, and the `vo2Max*` additions in
-`WorkoutSessionManager.stop()`.
+`OpenCircuit/Health/VO2MaxHealthWriter.swift`, `OpenCircuit/Health/VO2MaxInputs.swift` (route, set
+age and resting HR, shared by both recorders), the `vo2Max*` additions in
+`WorkoutSessionManager.stop()` and in `StrapWorkoutRecorder.end()` (tested in
+`StrapWorkoutRecorderTests`, "VO₂ max estimate").
 
 ---
 
