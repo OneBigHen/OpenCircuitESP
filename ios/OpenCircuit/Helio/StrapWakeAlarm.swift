@@ -111,9 +111,77 @@ enum StrapWakeAlarmPlanner {
         let forgetRecord: Bool
     }
 
+    /// The managed slot as the strap's list shows it.
+    enum ManagedSlot: Equatable {
+        /// No record, or a record for another strap (treated as absent, and kept for that strap).
+        case none
+        /// The slot holds exactly what was written.
+        case matches(ZeppAlarm)
+        /// A once-alarm that matches except that it is now disabled. The strap may disable a once-alarm
+        /// after it fires (what it does is 🔴 unknown, ZEPP_PROTOCOL.md §12.3, §13.5), so this is still
+        /// OpenCircuit's: a set re-enables it with a replace, and a clear deletes it.
+        case firedOnce(ZeppAlarm)
+        /// The slot was edited (on the Alarms screen, in Zepp) or is empty: no longer OpenCircuit's.
+        case lost
+    }
+
+    static func managedSlot(alarms: [ZeppAlarm], strapID: String, record: ManagedStrapAlarm?) -> ManagedSlot {
+        guard let record, record.strapID == strapID else { return .none }
+        guard let onStrap = alarms.first(where: { $0.slot == record.slot }) else { return .lost }
+        let written = record.alarm
+        if onStrap.hasSameSetting(as: written) { return .matches(onStrap) }
+        var enabled = onStrap
+        enabled.isEnabled = true
+        if written.days == .once, written.isEnabled, !onStrap.isEnabled, enabled.hasSameSetting(as: written) {
+            return .firedOnce(onStrap)
+        }
+        return .lost
+    }
+
+    /// The rules, in order:
+    /// - a set whose exact alarm (time, days, enabled, no smart wake) is already on the strap, in any
+    ///   slot: nothing is written. A slot the person made is never adopted as the managed one;
+    /// - a managed slot that still holds what was written (or that fired once-alarm): it is replaced;
+    /// - a managed slot that no longer does: the record is forgotten, and a new alarm is added in the
+    ///   lowest free slot, or the set is refused when there is none;
+    /// - a clear deletes the managed slot only while it is still OpenCircuit's;
+    /// - no other slot is ever named: an add takes a free slot, and replace and delete only the managed one.
     static func plan(alarms: [ZeppAlarm], strapID: String, record: ManagedStrapAlarm?,
                      request: StrapWakeAlarmRequest.Kind) -> Plan {
-        Plan(action: .none(.nothingToClear), forgetRecord: false)   // RED: stub
+        let managed = managedSlot(alarms: alarms, strapID: strapID, record: record)
+        let forget = managed == .lost
+        switch request {
+        case .clear:
+            switch managed {
+            case .matches(let alarm), .firedOnce(let alarm):
+                return Plan(action: .delete(slot: alarm.slot), forgetRecord: false)
+            case .lost:
+                return Plan(action: .none(.changedOnStrap), forgetRecord: true)
+            case .none:
+                return Plan(action: .none(.nothingToClear), forgetRecord: false)
+            }
+        case .set(let time):
+            let wanted = { (slot: UInt8) in
+                ZeppAlarm(slot: slot, hour: time.hour, minute: time.minute, days: time.days, isEnabled: true)
+            }
+            if alarms.contains(where: { $0.hasSameSetting(as: wanted($0.slot)) }) {
+                return Plan(action: .none(.alreadySet), forgetRecord: forget)
+            }
+            switch managed {
+            case .matches(let alarm), .firedOnce(let alarm):
+                // `smartWake` is kept as the slot has it (false: OpenCircuit never sets it, and a slot
+                // that gained it no longer matches the record).
+                return Plan(action: .replace(ZeppAlarm(slot: alarm.slot, hour: time.hour, minute: time.minute,
+                                                        days: time.days, isEnabled: true, smartWake: alarm.smartWake)),
+                            forgetRecord: false)
+            case .lost, .none:
+                let used = Set(alarms.map(\.slot))
+                guard (0..<ZeppAlarm.slotCount).contains(where: { !used.contains($0) }) else {
+                    return Plan(action: .refuse(.noFreeSlot), forgetRecord: forget)
+                }
+                return Plan(action: .add(time), forgetRecord: forget)
+            }
+        }
     }
 }
 
@@ -159,7 +227,10 @@ struct StrapWakeAlarmStore {
     /// The managed slot on `strapID`'s list, for the Alarms screen's "Set by Shortcuts" mark: the
     /// record's slot while it still holds what was written (or that once-alarm, disabled after it fired).
     func managedSlot(strapID: String, alarms: [ZeppAlarm]) -> UInt8? {
-        nil   // RED: stub
+        switch StrapWakeAlarmPlanner.managedSlot(alarms: alarms, strapID: strapID, record: managed) {
+        case .matches(let alarm), .firedOnce(let alarm): return alarm.slot
+        case .none, .lost: return nil
+        }
     }
 }
 

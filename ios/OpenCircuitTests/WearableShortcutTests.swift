@@ -378,6 +378,14 @@ final class WearableShortcutTests: XCTestCase {
     // MARK: a sync in progress (#233 coalescing: act through the session that's there)
 
     func testABuzzAndAnAlarmWriteDuringASyncLeaveTheSyncWhole() async throws {
+        // The control: the same strap's sync with nothing else on the link.
+        let controlStore = try makeStore()
+        let control = makeSession(wsStrap(withHistory: true), applier: applier(), findState: HelioFindState(),
+                                  store: controlStore, autoSync: true)
+        let expected = try XCTUnwrap(control.lastSyncResult)
+        XCTAssertGreaterThan(expected.roundsStored, 0)
+        let expectedRows = try controlStore.context.fetchCount(FetchDescriptor<StoredSample>())
+
         let store = try makeStore()
         let applier = applier()
         let device = wsStrap(withHistory: true)
@@ -400,7 +408,9 @@ final class WearableShortcutTests: XCTestCase {
         let result = try XCTUnwrap(session.lastSyncResult)
         XCTAssertFalse(result.interrupted)
         XCTAssertEqual(result.roundsFailed, 0)
-        XCTAssertEqual(result.roundsStored, 2, "both types stored")
+        XCTAssertEqual(result.roundsStored, expected.roundsStored, "every round the control stored")
+        XCTAssertEqual(result.typesEmpty, expected.typesEmpty)
+        XCTAssertEqual(try store.context.fetchCount(FetchDescriptor<StoredSample>()), expectedRows, "the same rows")
         XCTAssertEqual(Set(session.fetchAcksSent), [0x09], "every round acked keep")
     }
 
