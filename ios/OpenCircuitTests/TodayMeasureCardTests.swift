@@ -288,6 +288,14 @@ final class VitalMeasureStateTests: XCTestCase {
         }
     }
 
+    /// #259: a tap on Today's live card opens the detail that carries the SAME vital's Measure card,
+    /// because that card's button is the stop control.
+    func testTodaysLiveCardOpensTheDetailThatCanStopIt() {
+        for vital in MeasuredVital.allCases {
+            XCTAssertEqual(vital.detailMetric.measuredVital, vital, "\(vital)")
+        }
+    }
+
     // MARK: The latest reading
 
     /// A finished sync's newest reading can be newer than anything the cursor dedup let into the

@@ -214,3 +214,18 @@ struct VitalMeasureCard: View {
         let f = RelativeDateTimeFormatter(); f.unitsStyle = .abbreviated; return f
     }()
 }
+
+/// #259: Today's live measure card has no stop control of its own — the stop lives on the Measure
+/// card under the metric detail's chart. So a tap on Today's card opens that detail
+/// (`MeasuredVital.detailMetric`), and the card says so to VoiceOver.
+struct OpensMeasureDetail: ViewModifier {
+    let open: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(Rectangle())
+            .onTapGesture(perform: open)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint("Opens the detail, where you can stop measuring")
+    }
+}

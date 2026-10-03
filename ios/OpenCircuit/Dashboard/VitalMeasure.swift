@@ -231,3 +231,15 @@ extension TodayTile.Metric {
         }
     }
 }
+
+extension MeasuredVital {
+    /// The tile whose detail carries this vital's Measure card — the inverse of `measuredVital`.
+    /// #259: Today's live measure card has no stop control of its own, so a tap on it opens this
+    /// detail, where the Measure card's button stops the measurement.
+    var detailMetric: TodayTile.Metric {
+        switch self {
+        case .heartRate: return .restingHR
+        case .spo2:      return .spo2
+        }
+    }
+}
