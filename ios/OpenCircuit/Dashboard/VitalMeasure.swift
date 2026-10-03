@@ -176,6 +176,14 @@ struct VitalMeasureState: Equatable {
     /// The reading's age reads "live" rather than a relative time (`timeFor(_:live:)`).
     var isLive: Bool { liveValue != nil }
 
+    /// Whether the card is drawn at all. #259: only the BUTTON is gated on a ready device — the
+    /// latest recorded reading and its age are worth showing with nothing connected (the Resting HR
+    /// detail opened away from the ring). The card is hidden only when there is nothing to offer,
+    /// nothing live and nothing recorded, so there is still no empty card.
+    func showsCard(hasLatestReading: Bool) -> Bool {
+        control != .none || streaming || hasLatestReading
+    }
+
     /// The card's decision for `vital`.
     ///
     /// The ring wins whenever a ring session exists, which is the Vitals card's own rule
@@ -220,6 +228,18 @@ extension TodayTile.Metric {
         case .restingHR: return .heartRate
         case .spo2:      return .spo2
         case .hrv, .respiratoryRate, .skinTemp, .steps: return nil
+        }
+    }
+}
+
+extension MeasuredVital {
+    /// The tile whose detail carries this vital's Measure card — the inverse of `measuredVital`.
+    /// #259: Today's live measure card has no stop control of its own, so a tap on it opens this
+    /// detail, where the Measure card's button stops the measurement.
+    var detailMetric: TodayTile.Metric {
+        switch self {
+        case .heartRate: return .restingHR
+        case .spo2:      return .spo2
         }
     }
 }

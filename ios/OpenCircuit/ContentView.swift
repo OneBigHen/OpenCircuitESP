@@ -583,6 +583,7 @@ struct ContentView: View {
                                 emptyText: "Hold still — getting a reading…")
                     .frame(height: 150)
             }
+            .modifier(OpensMeasureDetail { path.append(.metric((isHR ? MeasuredVital.heartRate : .spo2).detailMetric)) })
         } else if let strapLive, strapLive.measuring {
             // The strap's measurement on the same card (decision 30); heart rate only, no SpO₂.
             OCCard {
@@ -594,6 +595,7 @@ struct ContentView: View {
                     .frame(height: 150)
                 Text(StrapLiveHeartRate.durationCopy).font(.caption2).foregroundStyle(.secondary)
             }
+            .modifier(OpensMeasureDetail { path.append(.metric(MeasuredVital.heartRate.detailMetric)) })
         }
     }
 
