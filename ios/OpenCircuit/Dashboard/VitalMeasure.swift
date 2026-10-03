@@ -176,6 +176,14 @@ struct VitalMeasureState: Equatable {
     /// The reading's age reads "live" rather than a relative time (`timeFor(_:live:)`).
     var isLive: Bool { liveValue != nil }
 
+    /// Whether the card is drawn at all. #259: only the BUTTON is gated on a ready device — the
+    /// latest recorded reading and its age are worth showing with nothing connected (the Resting HR
+    /// detail opened away from the ring). The card is hidden only when there is nothing to offer,
+    /// nothing live and nothing recorded, so there is still no empty card.
+    func showsCard(hasLatestReading: Bool) -> Bool {
+        control != .none || streaming || hasLatestReading
+    }
+
     /// The card's decision for `vital`.
     ///
     /// The ring wins whenever a ring session exists, which is the Vitals card's own rule

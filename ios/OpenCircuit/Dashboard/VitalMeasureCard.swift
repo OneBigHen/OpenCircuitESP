@@ -98,8 +98,9 @@ struct VitalMeasureCard: View {
 
     var body: some View {
         let state = self.state
-        // Nothing to offer and nothing live to show: no empty card on a device that can't measure.
-        if state.control == .none && !state.streaming {
+        // Nothing to offer, nothing live and nothing recorded: no empty card. With no device ready
+        // the latest reading and its age still show, and only the button is gone (#259).
+        if !state.showsCard(hasLatestReading: latestReading != nil) {
             EmptyView()
         } else {
             OCCard {
