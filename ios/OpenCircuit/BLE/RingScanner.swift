@@ -81,6 +81,8 @@ final class RingScanner: NSObject {
     /// even explained it. `ensureCentral()` creates it on demand; every access is `central?.…` and
     /// no-ops safely when it's still nil (e.g. a fresh install that never tapped connect).
     private var central: CBCentralManager?
+    /// This scanner has created its central (decision 1's tests, #142: none without a saved ring).
+    var hasCentral: Bool { central != nil }
     private var target: CBPeripheral?
     private var localStore: LocalStore?
 

@@ -19,6 +19,11 @@ struct HelioAlarmsView: View {
 
     private var session: HelioSession? { connection.session }
     private var editor: ZeppAlarmEditor? { session?.alarmEditor }
+    /// The slot a Shortcut's wake alarm holds while it is still as written (#260, decision 52b).
+    private var managedSlot: UInt8? {
+        guard let session, let alarms = editor?.alarms else { return nil }
+        return StrapWakeAlarmStore().managedSlot(strapID: session.identityID, alarms: alarms)
+    }
 
     var body: some View {
         List {
@@ -81,7 +86,8 @@ struct HelioAlarmsView: View {
                 Text(String(format: "%02d:%02d", alarm.hour, alarm.minute))
                     .font(.title3.weight(.semibold).monospacedDigit())
                     .foregroundStyle(alarm.isEnabled ? .primary : .secondary)
-                Text(Self.daysText(alarm.days) + (alarm.smartWake ? ", smart wake (set in Zepp)" : ""))
+                Text(Self.daysText(alarm.days) + (alarm.smartWake ? ", smart wake (set in Zepp)" : "")
+                     + (managedSlot == alarm.slot ? ". Set by Shortcuts" : ""))
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()

@@ -384,5 +384,32 @@ struct OpenCircuitAppShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Export Ring Data",
             systemImageName: "square.and.arrow.up")
+
+        // The wearable's actions (#260, decision 52), in this provider for the same reason. The intents
+        // are in Wearable/WearableShortcutIntents.swift. The symbols are ones the app already shows.
+        AppShortcut(
+            intent: VibrateWearableIntent(),
+            phrases: [
+                "Vibrate my wearable with \(.applicationName)",
+                "Buzz my wearable with \(.applicationName)",
+            ],
+            shortTitle: "Vibrate Wearable",
+            systemImageName: "bell.and.waves.left.and.right")
+
+        AppShortcut(
+            intent: SetWakeAlarmOnWearableIntent(),
+            phrases: [
+                "Set a wake alarm on my wearable with \(.applicationName)",
+            ],
+            shortTitle: "Set Wake Alarm on Wearable",
+            systemImageName: "alarm.waves.left.and.right")
+
+        AppShortcut(
+            intent: ClearWakeAlarmOnWearableIntent(),
+            phrases: [
+                "Clear the wake alarm on my wearable with \(.applicationName)",
+            ],
+            shortTitle: "Clear Wake Alarm on Wearable",
+            systemImageName: "alarm")
     }
 }

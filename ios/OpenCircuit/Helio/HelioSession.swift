@@ -247,6 +247,12 @@ final class HelioSession: WearableSession {
     @ObservationIgnored var heartRateObserver: (@MainActor (Int, Date) -> Void)?
     /// The `04 00` owed after an interrupted workout (#227, review-238 SF2).
     @ObservationIgnored var orphanStop = StrapWorkoutOrphanStop()
+    /// Every alarm editor event, after the session's own handling: Shortcuts' wake alarm (#260, decision
+    /// 52b) records its slot only from the re-read that confirms its write (`StrapWakeAlarmApplier`).
+    @ObservationIgnored var alarmEventObserver: (@MainActor (ZeppAlarmEditor.Event) -> Void)?
+    /// Called right after setup's alarm list read, once per connection (the clock was set before it):
+    /// where a Shortcuts wake alarm saved while the strap was away is applied (decision 52b).
+    @ObservationIgnored var onSetupAlarmsRead: (@MainActor () -> Void)?
 
     // MARK: Protocol state
 
@@ -1223,37 +1229,43 @@ final class HelioSession: WearableSession {
         }
     }
 
-    /// A new alarm in the lowest free slot. nil when the write went out.
+    /// A new alarm in the lowest free slot. nil when the write went out. `quiet`: a write the person
+    /// didn't make on the Alarms screen (Shortcuts' wake alarm, review-261 N2) leaves that screen's
+    /// `alarmNotice` alone, from the write to its re-read.
     @discardableResult
-    func addAlarm(hour: UInt8, minute: UInt8, days: ZeppAlarmDays) -> String? {
-        editAlarm { try $0.add(hour: hour, minute: minute, days: days, isEnabled: true, now: self.clock()) }
+    func addAlarm(hour: UInt8, minute: UInt8, days: ZeppAlarmDays, quiet: Bool = false) -> String? {
+        editAlarm(quiet: quiet) { try $0.add(hour: hour, minute: minute, days: days, isEnabled: true, now: self.clock()) }
     }
 
     /// Replaces one slot (an edit, or enable/disable).
     @discardableResult
-    func replaceAlarm(_ alarm: ZeppAlarm) -> String? {
-        editAlarm { try $0.replace(alarm, now: self.clock()) }
+    func replaceAlarm(_ alarm: ZeppAlarm, quiet: Bool = false) -> String? {
+        editAlarm(quiet: quiet) { try $0.replace(alarm, now: self.clock()) }
     }
 
     @discardableResult
-    func deleteAlarm(slot: UInt8) -> String? {
-        editAlarm { try $0.delete(slot: slot, now: self.clock()) }
+    func deleteAlarm(slot: UInt8, quiet: Bool = false) -> String? {
+        editAlarm(quiet: quiet) { try $0.delete(slot: slot, now: self.clock()) }
     }
 
-    private func editAlarm(_ body: (inout ZeppAlarmEditor) throws -> ZeppAlarmEditor.Output) -> String? {
+    private func editAlarm(quiet: Bool, _ body: (inout ZeppAlarmEditor) throws -> ZeppAlarmEditor.Output) -> String? {
         guard var editor = alarmEditor else { return "Alarms aren't available on this connection." }
         do {
             let out = try body(&editor)
             alarmEditor = editor
-            alarmNotice = "Saving to the strap…"
+            quietAlarmWrite = quiet
+            if !quiet { alarmNotice = "Saving to the strap…" }
             performAlarm(out)
             return nil
         } catch {
             let reason = Self.describe(error)
-            alarmNotice = reason
+            if !quiet { alarmNotice = reason }
             return reason
         }
     }
+
+    /// The write in flight is a quiet one (`addAlarm(…, quiet: true)`): its outcome leaves `alarmNotice`.
+    @ObservationIgnored private var quietAlarmWrite = false
 
     private func performAlarm(_ out: ZeppAlarmEditor.Output) {
         send(out.messages)
@@ -1261,6 +1273,7 @@ final class HelioSession: WearableSession {
             switch event {
             case .listRead(let alarms):
                 helioLog.notice("helio: alarm list read, \(alarms.count, privacy: .public) alarm(s)")
+                if currentStep == .alarms { onSetupAlarmsRead?() }
                 advance(from: .alarms)
             case .listUnreadable(let error):
                 alarmNotice = "Couldn't read the strap's alarms."
@@ -1272,16 +1285,22 @@ final class HelioSession: WearableSession {
             case .writeAcknowledged(let write):
                 helioLog.notice("helio: alarm slot \(write.slot, privacy: .public) acknowledged; reading back")
             case .writeFailed(let write, let failure):
-                alarmNotice = "The strap didn't confirm the change. Nothing was retried."
+                if !quietAlarmWrite { alarmNotice = "The strap didn't confirm the change. Nothing was retried." }
+                quietAlarmWrite = false
                 helioLog.error("helio: alarm slot \(write.slot, privacy: .public) write failed (\(String(describing: failure), privacy: .public))")
             case .writeChecked(let check):
-                alarmNotice = check.slotMatches && check.otherSlotsUnchanged
-                    ? "Saved on the strap."
-                    : "The strap's list doesn't match what was saved. Check it below."
+                if !quietAlarmWrite {
+                    alarmNotice = check.slotMatches && check.otherSlotsUnchanged
+                        ? "Saved on the strap."
+                        : "The strap's list doesn't match what was saved. Check it below."
+                }
+                quietAlarmWrite = false
                 helioLog.notice("helio: alarm slot \(check.write.slot, privacy: .public) re-read: matches \(check.slotMatches, privacy: .public), others unchanged \(check.otherSlotsUnchanged, privacy: .public)")
             case .writeUnverified:
-                alarmNotice = "Saved, but the strap's list couldn't be read back."
+                if !quietAlarmWrite { alarmNotice = "Saved, but the strap's list couldn't be read back." }
+                quietAlarmWrite = false
             }
+            alarmEventObserver?(event)
         }
     }
 

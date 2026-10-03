@@ -74,6 +74,11 @@ struct RingVibrationView: View {
                 DatePicker("Time",
                            selection: Binding(get: { alarmDate }, set: { setAlarmDate($0) }),
                            displayedComponents: .hourAndMinute)
+                // Shortcuts' Set Wake Alarm (#260, decision 52g): "Once" for a one-shot, "Set by
+                // Shortcuts" while the alarm still holds what it set.
+                if let note = ShortcutRingAlarmStore().note(alarm: alarm, oneShot: controller.oneShotOccurrence) {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
             }
         } header: {
             Text("Alarm")

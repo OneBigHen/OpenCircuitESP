@@ -25,6 +25,49 @@ enum ActiveDeviceChoice: String, CaseIterable, Sendable {
         case .helioStrap: return .zeppOS
         }
     }
+
+    /// Whether the device buzzes when asked: Shortcuts' Vibrate Wearable (decision 52a). Exhaustive
+    /// (decision 51e). The ring's motor is driven on the Gen 3 only (`RingVibration.isSupported`), so
+    /// the connected ring's session decides; the strap buzzes through find device (§13.2).
+    var onDemandVibration: OnDemandVibration {
+        switch self {
+        case .ringConn: return .someModels(only: "the RingConn Gen 3")
+        case .helioStrap: return .supported
+        }
+    }
+
+    /// How the device's wake alarm works: Shortcuts' Set and Clear Wake Alarm (decision 52b, 52c, 52g).
+    /// Exhaustive (decision 51e). The strap keeps up to 10 alarms and fires them itself (§12); the ring
+    /// stores none, and its wake-up alarm is the app's own buzz on a Gen 3 (`RingAlarmController`).
+    var wakeAlarm: DeviceWakeAlarm {
+        switch self {
+        case .ringConn: return .appDriven(models: "the RingConn Gen 3")
+        case .helioStrap: return .storedOnDevice
+        }
+    }
+}
+
+/// `ActiveDeviceChoice.onDemandVibration`.
+enum OnDemandVibration: Equatable {
+    /// Every model buzzes when asked.
+    case supported
+    /// Only some models have a motor OpenCircuit can drive (`only` names them); the connected
+    /// device's session says whether this one does.
+    case someModels(only: String)
+    case unsupported
+}
+
+/// `ActiveDeviceChoice.wakeAlarm`.
+enum DeviceWakeAlarm: Equatable {
+    /// The device stores alarms and fires them itself, with no phone needed at the time.
+    case storedOnDevice
+    /// It doesn't. `alternative` says where OpenCircuit offers a wake-up alarm for it instead, if anywhere.
+    case notStored(alternative: String?)
+    /// Nothing is stored on the device: OpenCircuit buzzes it at the time, best-effort, on the models
+    /// named (`RingAlarmController`, decision 52g).
+    case appDriven(models: String)
+
+    var isStoredOnDevice: Bool { self == .storedOnDevice }
 }
 
 /// The persisted choice (UserDefaults). `.ringConn` when nothing was ever chosen, so an existing
