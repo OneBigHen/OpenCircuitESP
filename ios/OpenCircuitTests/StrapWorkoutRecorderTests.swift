@@ -94,6 +94,26 @@ private final class FakeLocation: WorkoutLocationTracking {
     func stop() { stopped += 1; gpsActive = false }
 }
 
+/// The VO₂ max estimate's inputs (#232): an age and a resting HR the test sets, and the Health writes.
+@MainActor
+private final class FakeTraining: StrapWorkoutTrainingInputs {
+    var setAge: Int? = 40
+    var resting: Double? = 60
+    var status: VO2MaxHealthWriter.Status = .saved
+    private(set) var restingAskedFor: [ClosedRange<Date>] = []
+    private(set) var writes: [(estimate: VO2MaxEstimate.Estimate, end: Date, timeline: SyncDeviceID)] = []
+    func age() -> Int? { setAge }
+    func restingHR(start: Date, end: Date) -> Double? {
+        restingAskedFor.append(start ... end)
+        return resting
+    }
+    func saveVO2Max(_ estimate: VO2MaxEstimate.Estimate, workoutEnd: Date,
+                    timeline: SyncDeviceID) async -> VO2MaxHealthWriter.Status {
+        writes.append((estimate, workoutEnd, timeline))
+        return status
+    }
+}
+
 @MainActor
 private final class FakeHRStore: StrapWorkoutHRStore {
     private(set) var inserted: [HRSample] = []
@@ -121,20 +141,23 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         let journal: MemoryJournal
         let location: FakeLocation
         let store: FakeHRStore
+        let training: FakeTraining
     }
 
     private func makeRig(source: @escaping @MainActor () -> (any StrapWorkoutHeartRateSource)?,
                          journal: MemoryJournal? = nil, store: FakeHRStore? = nil) -> Rig {
+        let training = FakeTraining()
         let journal = journal ?? MemoryJournal()
         let store = store ?? FakeHRStore()
         let health = FakeHealthWriter()
         let location = FakeLocation()
         let profile = self.profile
         let recorder = StrapWorkoutRecorder(source: source, health: health, journal: journal, hrStore: { store },
-                                            location: location, liveActivity: nil, profile: { profile },
+                                            location: location, liveActivity: nil, training: training, profile: { profile },
                                             indoorKeepAlive: { false }, orphanStop: orphanStop,
                                             clock: { [unowned self] in self.now }, autoTick: false, managesIdleTimer: false)
-        return Rig(recorder: recorder, health: health, journal: journal, location: location, store: store)
+        return Rig(recorder: recorder, health: health, journal: journal, location: location, store: store,
+                   training: training)
     }
 
     /// One reading a second from `from` (exclusive) through `to` (inclusive), ticking the recorder
@@ -257,6 +280,156 @@ final class StrapWorkoutRecorderTests: XCTestCase {
         XCTAssertTrue(write.summary.summary.hasRoute)
         XCTAssertEqual(write.summary.summary.distanceMeters, 111)
         XCTAssertEqual(rig.location.stopped, 1)
+    }
+
+    // MARK: Training metrics (#232), the same as the ring's workout
+
+    /// A GPS fix every 5 s at ~200 m/min due north (1° of latitude ≈ 111 km), with no altitude, over
+    /// [0, to] seconds, none inside `skip` (no fix is stored while paused).
+    private func steadyRoute(to: TimeInterval, skip: ClosedRange<TimeInterval>? = nil) -> [CLLocation] {
+        stride(from: 0.0, through: to, by: 5).compactMap { s in
+            if let skip, skip.contains(s), s != skip.lowerBound, s != skip.upperBound { return nil }
+            let metres = 200.0 * s / 60
+            return CLLocation(coordinate: CLLocationCoordinate2D(latitude: 1 + metres / 111_000, longitude: 1),
+                              altitude: 0, horizontalAccuracy: 5, verticalAccuracy: -1, timestamp: at(s))
+        }
+    }
+
+    func testAnOutdoorRunGetsTheVO2MaxEstimateNamedAfterTheStrap() async throws {
+        let source = makeSource()
+        let rig = makeRig(source: { source })
+        rig.recorder.selectedSport = .runningOutdoor
+        rig.recorder.start()
+        await stream(rig, source, from: 0, to: 720, bpm: 160)
+        rig.location.route = steadyRoute(to: 720)
+        rig.location.distanceMeters = 2_400
+        await rig.recorder.end()
+
+        // 12 min at ~200 m/min and 160 bpm; age 40 (Tanaka 180), resting 60, flat:
+        //   ACSM 0.2 × 200 + 3.5 = 43.5;  VO₂max = 3.5 + 40 × 120 / 100 = 51.5 (the ring's worked example)
+        guard case .estimate(let e)? = rig.recorder.vo2MaxOutcome else {
+            return XCTFail("expected an estimate, got \(String(describing: rig.recorder.vo2MaxOutcome))")
+        }
+        XCTAssertEqual(e.vo2Max, 51.5, accuracy: 0.5)
+        XCTAssertEqual(e.heartRate, 160, accuracy: 1e-9)
+        XCTAssertFalse(e.gradeFromElevation)
+        XCTAssertEqual(rig.training.restingAskedFor, [at(0) ... at(720)],
+                       "the resting HR is asked for around the workout's own window")
+
+        await rig.recorder.vo2MaxWriteTask?.value
+        XCTAssertEqual(rig.training.writes.count, 1, "written once, after the workout")
+        let vo2 = try XCTUnwrap(rig.training.writes.first)
+        XCTAssertEqual(vo2.timeline, source.timeline, "attributed to the strap that measured the heart rate")
+        XCTAssertEqual(vo2.end, at(720), "stamped at the workout's end")
+        XCTAssertEqual(rig.recorder.vo2MaxHealthStatus, .saved)
+
+        rig.recorder.reset()
+        XCTAssertNil(rig.recorder.vo2MaxOutcome)
+        XCTAssertNil(rig.recorder.vo2MaxHealthStatus)
+    }
+
+    func testAPausedRunIsEstimatedFromItsRunningTime() async throws {
+        let source = makeSource()
+        let rig = makeRig(source: { source })
+        rig.recorder.selectedSport = .runningOutdoor
+        rig.recorder.start()
+        await stream(rig, source, from: 0, to: 120, bpm: 160)
+        rig.recorder.pause()
+        await stream(rig, source, from: 120, to: 420, bpm: 100)   // shown, never recorded
+        rig.recorder.resume()
+        await stream(rig, source, from: 420, to: 960, bpm: 160)
+        rig.location.route = steadyRoute(to: 960, skip: 120 ... 420)
+        rig.location.distanceMeters = 2_200
+        await rig.recorder.end()
+
+        // 16 min on the clock, 11 running (2 + 9): the 10-minute rule counts running time, and no
+        // minute of the pause can be steady, so the segment starts after the resume.
+        guard case .estimate(let e)? = rig.recorder.vo2MaxOutcome else {
+            return XCTFail("expected an estimate, got \(String(describing: rig.recorder.vo2MaxOutcome))")
+        }
+        XCTAssertGreaterThanOrEqual(e.segmentStart, at(420))
+        XCTAssertEqual(e.heartRate, 160, accuracy: 1e-9, "the pause's 100 bpm is not the workout's")
+        XCTAssertEqual(e.vo2Max, 51.5, accuracy: 0.5)
+    }
+
+    func testAShortRunningTimeIsTooShortWhateverTheClockSays() async {
+        let source = makeSource()
+        let rig = makeRig(source: { source })
+        rig.recorder.selectedSport = .runningOutdoor
+        rig.recorder.start()
+        await stream(rig, source, from: 0, to: 300, bpm: 160)
+        rig.recorder.pause()
+        await stream(rig, source, from: 300, to: 900, bpm: 100)
+        rig.recorder.resume()
+        await stream(rig, source, from: 900, to: 1_140, bpm: 160)   // 5 + 4 = 9 running minutes of 19
+        rig.location.route = steadyRoute(to: 1_140, skip: 300 ... 900)
+        await rig.recorder.end()
+        XCTAssertEqual(rig.recorder.vo2MaxOutcome, .skipped(.tooShort))
+        XCTAssertNil(rig.recorder.vo2MaxWriteTask)
+        XCTAssertEqual(rig.training.writes.count, 0)
+    }
+
+    func testOnlyOutdoorRunsGetAnEstimate() async {
+        let source = makeSource()
+        let rig = makeRig(source: { source })
+        rig.recorder.selectedSport = .walkingOutdoor
+        rig.recorder.start()
+        await stream(rig, source, from: 0, to: 720, bpm: 160)
+        rig.location.route = steadyRoute(to: 720)
+        await rig.recorder.end()
+        XCTAssertNil(rig.recorder.vo2MaxOutcome, "no VO₂ max row for other sports, as on the ring")
+        XCTAssertNil(rig.recorder.vo2MaxWriteTask)
+        XCTAssertEqual(rig.training.restingAskedFor.count, 0)
+        XCTAssertEqual(rig.training.writes.count, 0)
+    }
+
+    func testAMissingInputIsSkippedAndNothingIsWritten() async {
+        let source = makeSource()
+        let rig = makeRig(source: { source })
+        rig.training.setAge = nil
+        rig.recorder.selectedSport = .runningOutdoor
+        rig.recorder.start()
+        await stream(rig, source, from: 0, to: 720, bpm: 160)
+        rig.location.route = steadyRoute(to: 720)
+        await rig.recorder.end()
+        XCTAssertEqual(rig.recorder.vo2MaxOutcome, .skipped(.noAge), "no placeholder age, ever")
+        XCTAssertNil(rig.recorder.vo2MaxWriteTask)
+        XCTAssertEqual(rig.training.writes.count, 0)
+    }
+
+    func testNoVO2MaxWriteWhenTheWorkoutItselfWasNotSaved() async {
+        let source = makeSource()
+        let rig = makeRig(source: { source })
+        rig.health.accept = false
+        rig.recorder.selectedSport = .runningOutdoor
+        rig.recorder.start()
+        await stream(rig, source, from: 0, to: 720, bpm: 160)
+        rig.location.route = steadyRoute(to: 720)
+        await rig.recorder.end()
+        guard case .estimate? = rig.recorder.vo2MaxOutcome else {
+            return XCTFail("the estimate is still shown")
+        }
+        XCTAssertEqual(rig.recorder.vo2MaxHealthStatus, .failed)
+        XCTAssertNil(rig.recorder.vo2MaxWriteTask)
+        XCTAssertEqual(rig.training.writes.count, 0)
+    }
+
+    func testRouteDistanceIsNotCountedAcrossAPause() {
+        let fixes = [0.0, 10, 110, 120].map { s in
+            CLLocation(coordinate: CLLocationCoordinate2D(latitude: 1 + s / 111_000, longitude: 1),
+                       altitude: 0, horizontalAccuracy: 5, verticalAccuracy: -1, timestamp: at(s))
+        }
+        let step = fixes[0].distance(from: fixes[1])
+        let paused = WorkoutVO2MaxInputs.routePoints(fixes, pauses: [DateInterval(start: at(10), end: at(110))])
+        XCTAssertEqual(paused.map(\.time), fixes.map(\.timestamp))
+        XCTAssertEqual(paused[1].distance, step, accuracy: 1e-6)
+        XCTAssertEqual(paused[2].distance, step, accuracy: 1e-6, "nothing added across the pause")
+        XCTAssertEqual(paused[3].distance, step + fixes[2].distance(from: fixes[3]), accuracy: 1e-6)
+        XCTAssertNil(paused[0].altitude, "no vertical accuracy, no altitude")
+
+        // No pause (the ring's workout): the plain running sum.
+        let plain = WorkoutVO2MaxInputs.routePoints(fixes)
+        XCTAssertEqual(plain[3].distance, fixes[0].distance(from: fixes[3]), accuracy: 0.01)
     }
 
     // MARK: The app is killed
@@ -614,7 +787,7 @@ final class StrapWorkoutSessionTests: XCTestCase {
                                               lastAliveAt: at(600), timelineRaw: timeline.rawValue)
         journal.samples = (1...600).map { HRSample(bpm: 140, start: at(Double($0) - 1), end: at(Double($0))) }
         let recorder = StrapWorkoutRecorder(source: { nil }, health: FakeHealthWriter(), journal: journal,
-                                            hrStore: { FakeHRStore() }, location: FakeLocation(), liveActivity: nil,
+                                            hrStore: { FakeHRStore() }, location: FakeLocation(), liveActivity: nil, training: FakeTraining(),
                                             profile: { UserProfile(age: 40, weightKg: 70, heightCm: 175, sex: .male) },
                                             indoorKeepAlive: { false }, orphanStop: owed,
                                             clock: { at(4000) }, autoTick: false, managesIdleTimer: false)
@@ -905,7 +1078,7 @@ final class StrapWorkoutBackgroundTests: XCTestCase {
     private func startWorkout(on source: @escaping @MainActor () -> (any StrapWorkoutHeartRateSource)?) -> StrapWorkoutRecorder {
         let recorder = StrapWorkoutRecorder(
             source: source, health: FakeHealthWriter(), journal: MemoryJournal(), hrStore: { FakeHRStore() },
-            location: FakeLocation(), liveActivity: nil,
+            location: FakeLocation(), liveActivity: nil, training: FakeTraining(),
             profile: { UserProfile(age: 40, weightKg: 70, heightCm: 175, sex: .male) }, indoorKeepAlive: { false },
             orphanStop: StrapWorkoutOrphanStop(UserDefaults(suiteName: "strap-workout-tests-\(UUID().uuidString)")!),
             clock: { [unowned self] in self.clock }, autoTick: false, managesIdleTimer: false)
@@ -1131,7 +1304,7 @@ final class StrapWorkoutEndWindowTests: XCTestCase {
                               health: FakeHealthWriter) -> StrapWorkoutRecorder {
         let recorder = StrapWorkoutRecorder(
             source: source, health: health, journal: MemoryJournal(), hrStore: { FakeHRStore() },
-            location: FakeLocation(), liveActivity: nil,
+            location: FakeLocation(), liveActivity: nil, training: FakeTraining(),
             profile: { UserProfile(age: 40, weightKg: 70, heightCm: 175, sex: .male) }, indoorKeepAlive: { false },
             orphanStop: StrapWorkoutOrphanStop(UserDefaults(suiteName: "strap-workout-tests-\(UUID().uuidString)")!),
             clock: { [unowned self] in self.now }, autoTick: false, managesIdleTimer: false)
@@ -1223,7 +1396,7 @@ final class StrapWorkoutEndWindowTests: XCTestCase {
         journal.samples = (1...300).map { HRSample(bpm: 120, start: at(Double($0) - 1), end: at(Double($0))) }
         let recovery = StrapWorkoutRecorder(
             source: { source }, health: FakeHealthWriter(), journal: journal, hrStore: { FakeHRStore() },
-            location: FakeLocation(), liveActivity: nil,
+            location: FakeLocation(), liveActivity: nil, training: FakeTraining(),
             profile: { UserProfile(age: 40, weightKg: 70, heightCm: 175, sex: .male) }, indoorKeepAlive: { false },
             orphanStop: StrapWorkoutOrphanStop(UserDefaults(suiteName: "strap-workout-tests-\(UUID().uuidString)")!),
             clock: { [unowned self] in self.now }, autoTick: false, managesIdleTimer: false)

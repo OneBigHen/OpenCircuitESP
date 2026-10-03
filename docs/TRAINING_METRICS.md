@@ -1,7 +1,8 @@
 # Training metrics: training load and a VO₂ max estimate (#232)
 
-Status: shipped on the phone for workouts the app records. Ring workouts get the metrics now; strap
-workouts get them through #227, unchanged, because every input below is device-agnostic.
+Status: shipped on the phone for workouts the app records, with the ring or with the Helio Strap
+(#227). Both devices' workouts get the same metrics through the same code: every input below is
+device-agnostic. The one strap-specific rule is that a strap workout can be paused (§2.2).
 
 Scope (decision 34): the strap's own workout values are out of scope (#226 is closed). Everything
 here is computed on the phone from the workout the app recorded:
@@ -23,8 +24,10 @@ of filling it in.
 
 Code: `OpenCircuitKit/Analytics/TrainingLoad.swift`, `OpenCircuitKit/Analytics/VO2MaxEstimate.swift`
 (pure, tested in `TrainingMetricsTests.swift`), `OpenCircuit/TrainingMetricsViews.swift`,
-`OpenCircuit/Health/VO2MaxHealthWriter.swift`, and the `vo2Max*` additions in
-`WorkoutSessionManager.stop()`.
+`OpenCircuit/Health/VO2MaxHealthWriter.swift`, `OpenCircuit/WorkoutVO2MaxInputs.swift` (route, age and
+resting-HR inputs, shared by both devices), the `vo2Max*` additions in `WorkoutSessionManager.stop()`
+(ring) and in `StrapWorkoutRecorder.end()` (strap, `Helio/`), and one `WorkoutTrainingMetricsSection` on
+each device's workout summary (`WorkoutView`, `StrapWorkoutView`).
 
 ---
 
@@ -127,10 +130,10 @@ The same run up a reliable 5 % grade costs 40 + 9 + 3.5 = 52.5, so VO₂max = 3.
 | Input | Source | If missing |
 |---|---|---|
 | Sport | the workout's sport; only **Outdoor Running** | skipped: "only estimated for outdoor runs" |
-| Duration | workout start → end | under 10 min: skipped |
-| Speed | the phone's GPS fixes, as cumulative distance (the same running sum as the workout's distance: accuracy ≤ 50 m, no cached fixes) | no route: skipped |
+| Duration | workout start → end; for a paused strap workout, the running time (pauses left out) | under 10 min: skipped |
+| Speed | the phone's GPS fixes, as cumulative distance (the same running sum as the workout's distance: accuracy ≤ 50 m, no cached fixes; a strap workout adds nothing across a pause) | no route: skipped |
 | Grade | GPS altitude, only when reliable (§2.3) | assumed flat, and the UI says so |
-| Heart rate | the workout's recorded readings (ring now, strap via #227) | too few: skipped |
+| Heart rate | the workout's recorded readings (the ring's, or the strap's live stream); a strap workout records none while paused | too few: skipped |
 | Age | Profile, only if the user set it. The app's placeholder 35 is never used here | skipped: "set your age in Profile" |
 | Resting HR | median of the last 7 daily resting-HR values on or before the run day (`RestingHR.dailyValues`, the series the app already shows). The workout's own window is excluded | fewer than 3 days: skipped |
 
@@ -176,14 +179,16 @@ one person's trend on similar routes. It is not a lab value.
 ### 2.5 Apple Health
 
 - **Type and unit.** `HKQuantityType(.vo2Max)` in mL/(kg·min), stamped at the workout's end time,
-  attributed to the active wearable (`activeWearableDevice()`).
+  attributed to the device that measured the workout's heart rate (the ring's timeline, or the
+  strap's own), through `HealthKitWriter.wearableDevice(forTimeline:wearable:)`.
 - **Metadata:**
   - `HKMetadataKeyVO2MaxTestType` = `HKVO2MaxTestType.predictionSubMaxExercise`. This is Apple's
     "predicted from submaximal exercise"; the SDK has no case named `.predictionSubMaximal`.
   - `HKMetadataKeyWasUserEntered` = false.
   - `OpenCircuitVO2MaxMethod` names the method.
-- **When it is written.** Only when the workout itself was saved, and only once per run (from
-  `stop()`).
+- **When it is written.** Only when the workout itself was saved, and only once per run (from the
+  ring's `stop()` or the strap's `end()`). A recovered workout (the app was killed) has no route, so
+  neither device estimates one for it.
 
 **Authorization (#210, the build-50 permission loop).**
 
@@ -240,7 +245,7 @@ threshold after seeing the data invalidates the run.
 - Note Zepp's values for each workout from the Zepp app by hand. #226 is closed, so there is no
   import.
 - Pair workouts by start time (within 5 min).
-- OpenCircuit records with whichever wearable it has (ring today, strap via #227). Zepp computes from
+- OpenCircuit records with whichever wearable it has (ring or strap). Zepp computes from
   the strap. So a disagreement can come from the input heart rate as much as from the method. Note
   which wearable OpenCircuit used for each workout.
 

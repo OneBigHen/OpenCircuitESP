@@ -278,6 +278,46 @@ final class VO2MaxEstimateTests: XCTestCase {
         XCTAssertNotNil(estimate(syntheticRun(minutes: 10)))
     }
 
+    // MARK: A paused workout (the strap's, #227)
+
+    /// A 15-minute outdoor run paused from 2:00 to 7:00: no heart rate and no GPS fix inside the
+    /// pause (the strap's recorder stores neither), so 10 minutes of running time.
+    private func pausedRun() -> VO2MaxEstimate.Input {
+        let run = syntheticRun(minutes: 15, gpsGap: (2 + 1.0 / 60) ... (7 - 1.0 / 60))
+        let pause = t0.addingTimeInterval(2 * 60) ..< t0.addingTimeInterval(7 * 60)
+        return .init(sport: run.sport, start: run.start, end: run.end,
+                     heartRate: run.heartRate.filter { !pause.contains($0.start) },
+                     route: run.route, age: 40, restingHR: 60)
+    }
+
+    func testAPausedRunIsEstimatedFromItsRunningMinutesOnly() {
+        // 10 min of running time qualifies. No minute overlapping the pause has HR or GPS on both
+        // edges, so the segment starts at 7:00 or later; 200 m/min at 160 bpm ⇒ 51.5 as on the flat.
+        guard case .estimate(let e) = VO2MaxEstimate.estimate(pausedRun(), activeSeconds: 10 * 60) else {
+            return XCTFail("expected an estimate")
+        }
+        XCTAssertEqual(e.vo2Max, 51.5, accuracy: 1e-6)
+        XCTAssertGreaterThanOrEqual(e.segmentStart, t0.addingTimeInterval(7 * 60))
+    }
+
+    func testTheTenMinuteRuleCountsRunningTimeNotTheWallClock() {
+        // 15 minutes on the clock, but only 9 min 55 s running ⇒ too short.
+        if case .skipped(let reason) = VO2MaxEstimate.estimate(pausedRun(), activeSeconds: 9 * 60 + 55) {
+            XCTAssertEqual(reason, .tooShort)
+        } else {
+            XCTFail("a run with under 10 minutes of running time must be skipped")
+        }
+        // The sport is still checked first, as in `estimate(_:)`.
+        let indoor = syntheticRun(sport: .runningIndoor)
+        XCTAssertEqual(VO2MaxEstimate.estimate(indoor, activeSeconds: 0), .skipped(.notAnOutdoorRun))
+    }
+
+    func testWithoutPausesTheRunningTimeVariantIsTheSameEstimate() {
+        let run = syntheticRun()
+        XCTAssertEqual(VO2MaxEstimate.estimate(run, activeSeconds: run.end.timeIntervalSince(run.start)),
+                       VO2MaxEstimate.estimate(run))
+    }
+
     func testMissingInputsAreSkippedNotDefaulted() {
         var noGPS = syntheticRun()
         noGPS = .init(sport: noGPS.sport, start: noGPS.start, end: noGPS.end,

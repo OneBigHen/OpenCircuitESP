@@ -3,8 +3,8 @@
 // trend where workouts are listed. The math is in OpenCircuitKit (`TrainingLoad`, `VO2MaxEstimate`);
 // the methods, citations and skip rules are in docs/TRAINING_METRICS.md.
 //
-// Kept in its own file so the workout screens gain one call site each (the strap's workout work
-// edits the same screens on another branch).
+// Kept in its own file so each workout screen has one call site: the ring's `WorkoutView` and the
+// strap's `StrapWorkoutView` show the same section.
 
 import SwiftUI
 import HealthKit

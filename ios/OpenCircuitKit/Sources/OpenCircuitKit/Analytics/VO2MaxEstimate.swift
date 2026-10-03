@@ -236,6 +236,18 @@ public enum VO2MaxEstimate {
             maxHR: maxHR, maxHRSource: source))
     }
 
+    /// A workout that can be paused (the strap's, #227): the 10-minute rule counts RUNNING time, so
+    /// a run of 8 minutes with a 5-minute pause in it is too short, as it is for an unpaused run. The
+    /// rest is `estimate(_:)` over the whole span: no heart rate and no GPS fix is recorded while
+    /// paused, so a minute that overlaps a pause cannot be part of a steady segment, and the warm-up
+    /// is counted from the workout's start. With `activeSeconds` = end − start this is exactly
+    /// `estimate(_:)`.
+    public static func estimate(_ input: Input, activeSeconds: TimeInterval) -> Outcome {
+        guard input.sport == .runningOutdoor else { return .skipped(.notAnOutdoorRun) }
+        guard activeSeconds >= minimumDuration else { return .skipped(.tooShort) }
+        return estimate(input)
+    }
+
     // MARK: Resting HR input
 
     /// Days of resting HR needed before the estimate trusts a resting value.

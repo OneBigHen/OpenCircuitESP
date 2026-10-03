@@ -57,7 +57,10 @@ struct VO2MaxHealthWriter {
     /// Never prompts someone who hasn't connected Apple Health (heart-rate share, the app's
     /// representative grant, is off): a VO₂-max-only sheet would be the first Health prompt they see,
     /// out of context, and their workout itself wasn't written either.
-    func save(_ estimate: VO2MaxEstimate.Estimate, workoutEnd: Date) async -> Status {
+    ///
+    /// `timeline` is the device whose heart rate the estimate came from: `.ringConn` for the ring's
+    /// workout, the strap's own `zeppos:` timeline for the strap's (#227). The sample names that device.
+    func save(_ estimate: VO2MaxEstimate.Estimate, workoutEnd: Date, timeline: SyncDeviceID) async -> Status {
         guard HKHealthStore.isHealthDataAvailable() else { return .healthNotConnected }
         guard HealthKitWriter().isShareAuthorized else { return .healthNotConnected }
 
@@ -85,12 +88,12 @@ struct VO2MaxHealthWriter {
             HKMetadataKeyWasUserEntered: false,
             Self.methodMetadataKey: Self.methodMetadataValue,
         ]
-        // The estimate comes from a ring workout's heart rate (the ring's recorder is the only one that
-        // computes it), so it names the ring, like BP and the distance estimate (review-224b N-2):
+        // The estimate comes from the workout's heart rate, so it names the device that measured it
+        // (the ring's timeline or the strap's), like BP and the distance estimate (review-224b N-2):
         // attribution follows the data, never the current device choice (decision 28).
         let sample = HKQuantitySample(type: Self.vo2MaxType, quantity: quantity,
                                       start: workoutEnd, end: workoutEnd,
-                                      device: HealthKitWriter.wearableDevice(forTimeline: .ringConn, wearable: .shared),
+                                      device: HealthKitWriter.wearableDevice(forTimeline: timeline, wearable: .shared),
                                       metadata: metadata)
         do {
             try await store.save(sample)
