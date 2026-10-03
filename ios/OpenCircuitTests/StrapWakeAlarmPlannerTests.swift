@@ -24,10 +24,24 @@ final class StrapWakeAlarmPlannerTests: XCTestCase {
         .set(StrapWakeAlarmTime(hour: hour, minute: minute, days: days))
     }
 
+    /// 2026-09-20T22:00:00Z, in a UTC calendar: the request instant unless a test says otherwise.
+    private let evening = Date(timeIntervalSince1970: 1_789_862_400 + 22 * 3600)
+    private let utc: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
+    }()
+
+    /// `now` defaults to the request instant itself: nothing has expired.
     private func plan(_ alarms: [ZeppAlarm], _ record: ManagedStrapAlarm?, _ request: StrapWakeAlarmRequest.Kind,
-                      strap: String? = nil) -> StrapWakeAlarmPlanner.Plan {
-        StrapWakeAlarmPlanner.plan(alarms: alarms, strapID: strap ?? strapA, record: record, request: request)
+                      strap: String? = nil, madeAt: Date? = nil, now: Date? = nil) -> StrapWakeAlarmPlanner.Plan {
+        let made = madeAt ?? evening
+        return StrapWakeAlarmPlanner.plan(alarms: alarms, strapID: strap ?? strapA, record: record,
+                                          request: StrapWakeAlarmRequest(request, madeAt: made), now: now ?? made,
+                                          calendar: utc)
     }
+
+    private func hoursAfterEvening(_ hours: Double) -> Date { evening.addingTimeInterval(hours * 3600) }
 
     // MARK: set
 
@@ -94,6 +108,70 @@ final class StrapWakeAlarmPlannerTests: XCTestCase {
                        "never replaced, and strap A's record is kept for strap A")
         XCTAssertEqual(plan([alarm(2, 6, 30)], record(onA, strap: strapA), .clear, strap: strapB),
                        .init(action: .none(.nothingToClear), forgetRecord: false))
+    }
+
+    // MARK: decision 52f: another slot already holds the request
+
+    func testAnUnmanagedSlotHoldingTheRequestClearsAManagedSlotThatStillMatches() {
+        let ours = alarm(2, 7, 0)
+        let mine = alarm(5, 6, 30)
+        XCTAssertEqual(plan([ours, mine], record(ours), set(6, 30)),
+                       .init(action: .delete(slot: 2), forgetRecord: false),
+                       "only the person's 06:30 fires; the record goes when the re-read confirms the delete")
+        XCTAssertEqual(plan([alarm(2, 7, 0, on: false), mine], record(ours), set(6, 30)),
+                       .init(action: .delete(slot: 2), forgetRecord: false), "a fired once-alarm is still ours")
+    }
+
+    func testAnUnmanagedSlotHoldingTheRequestLeavesAManagedSlotThatNoLongerMatches() {
+        let written = alarm(2, 7, 0)
+        let mine = alarm(5, 6, 30)
+        XCTAssertEqual(plan([alarm(2, 7, 20), mine], record(written), set(6, 30)),
+                       .init(action: .none(.alreadySet), forgetRecord: true), "edited: the person owns it now")
+        XCTAssertEqual(plan([mine], record(written), set(6, 30)),
+                       .init(action: .none(.alreadySet), forgetRecord: true), "gone")
+        // The managed slot itself, edited by the person to the requested time, is theirs now.
+        XCTAssertEqual(plan([alarm(2, 6, 30)], record(written), set(6, 30)),
+                       .init(action: .none(.alreadySet), forgetRecord: true))
+    }
+
+    func testAnUnmanagedSlotHoldingOnlyASimilarAlarmIsNotTheRequest() {
+        let ours = alarm(2, 7, 0)
+        for near in [alarm(5, 6, 30, .weekdays), alarm(5, 6, 30, on: false), alarm(5, 6, 30, smartWake: true), alarm(5, 6, 31)] {
+            XCTAssertEqual(plan([ours, near], record(ours), set(6, 30)).action, .replace(alarm(2, 6, 30)), near.summary)
+        }
+    }
+
+    // MARK: decision 52e: a once-request expires when its time has passed
+
+    func testAOnceRequestAppliedBeforeItsTimeIsWritten() {
+        // Asked at 22:00 for 06:30, applied at 06:00 the next morning.
+        XCTAssertEqual(plan([], nil, set(6, 30), madeAt: evening, now: hoursAfterEvening(8)).action,
+                       .add(StrapWakeAlarmTime(hour: 6, minute: 30, days: .once)))
+        XCTAssertEqual(plan([], nil, set(23, 0), madeAt: evening, now: hoursAfterEvening(0.9)).action,
+                       .add(StrapWakeAlarmTime(hour: 23, minute: 0, days: .once)), "later the same evening")
+    }
+
+    func testAOnceRequestAppliedAfterItsTimeIsDroppedAndNothingIsSent() {
+        let ours = alarm(2, 7, 0)
+        XCTAssertEqual(plan([], nil, set(6, 30), madeAt: evening, now: hoursAfterEvening(8.5 + 1.0 / 60)),
+                       .init(action: .none(.expired), forgetRecord: false), "06:31: passed")
+        XCTAssertEqual(plan([], nil, set(6, 30), madeAt: evening, now: hoursAfterEvening(8.5)).action,
+                       .none(.expired), "06:30 itself: written now it would fire a day late")
+        XCTAssertEqual(plan([ours], record(ours), set(6, 30), madeAt: evening, now: hoursAfterEvening(30)),
+                       .init(action: .none(.expired), forgetRecord: false), "the managed slot is untouched too")
+    }
+
+    func testARepeatingRequestAppliedLateIsWritten() {
+        for days in [ZeppAlarmDays.everyDay, .weekdays, .weekend] {
+            XCTAssertEqual(plan([], nil, set(6, 30, days), madeAt: evening, now: hoursAfterEvening(72)).action,
+                           .add(StrapWakeAlarmTime(hour: 6, minute: 30, days: days)))
+        }
+    }
+
+    func testAClearNeverExpires() {
+        let ours = alarm(2, 6, 30)
+        XCTAssertEqual(plan([ours], record(ours), .clear, madeAt: evening, now: hoursAfterEvening(72)).action,
+                       .delete(slot: 2))
     }
 
     // MARK: clear

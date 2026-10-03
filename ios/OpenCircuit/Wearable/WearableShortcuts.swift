@@ -246,7 +246,13 @@ struct WearableShortcuts {
         case .done(.writeFailed):
             return .init(dialog: "Your \(name) didn't accept the alarm. OpenCircuit kept the request and will try again the next time it connects.",
                          outcome: "write failed; pending")
-        case .done(.notConfirmed), .done(.cleared), .done(.noWrite):
+        case .done(.cleared):
+            // Decision 52f: the person's own alarm already holds this setting; the managed one went.
+            return .init(dialog: "Your \(name) already has its own alarm for \(when), so OpenCircuit removed the one it had set. Only yours will go off.",
+                         outcome: "already on the strap; managed slot cleared")
+        case .done(.noWrite(.expired)):
+            return .init(dialog: "Not set: \(when) passed before your \(name) could be reached.", outcome: "expired; dropped")
+        case .done(.notConfirmed), .done(.noWrite):
             return .init(dialog: "Your \(name) didn't confirm the alarm when OpenCircuit read it back. OpenCircuit kept the request and will check again the next time it connects.",
                          outcome: "not confirmed; pending")
         case .kept(let why, let label):

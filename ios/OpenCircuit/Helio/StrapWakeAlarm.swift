@@ -98,6 +98,9 @@ enum StrapWakeAlarmPlanner {
         /// The managed slot was changed or removed on the strap (or in the app's Alarms screen): it is
         /// no longer OpenCircuit's, so a clear leaves it as it is.
         case changedOnStrap
+        /// Decision 52e: a once-request whose time passed before it could be applied. Dropped, never
+        /// written, so the strap is untouched and no alarm goes off a day late.
+        case expired
     }
 
     enum Refusal: Equatable {
@@ -138,19 +141,40 @@ enum StrapWakeAlarmPlanner {
         return .lost
     }
 
+    /// Decision 52e: "a pending once-request carries the instant it was made; it is dropped (never
+    /// written) at apply time if the next occurrence of its hour:minute after the request instant is
+    /// already in the past. Repeating requests (Every Day / Weekdays / Weekends) never expire."
+    /// The next occurrence is in `calendar`'s time zone (the phone's, which the strap's clock follows,
+    /// decision 9). One that can't be computed counts as passed: a late alarm is what 52e rules out.
+    /// "In the past" includes the minute itself having come (`<= now`): written then, it would fire a
+    /// day late.
+    static func isExpired(_ request: StrapWakeAlarmRequest, now: Date, calendar: Calendar) -> Bool {
+        guard case .set(let time) = request.kind, time.days == .once else { return false }
+        guard let next = calendar.nextDate(after: request.madeAt,
+                                           matching: DateComponents(hour: Int(time.hour), minute: Int(time.minute)),
+                                           matchingPolicy: .nextTime) else { return true }
+        return next <= now
+    }
+
     /// The rules, in order:
-    /// - a set whose exact alarm (time, days, enabled, no smart wake) is already on the strap, in any
-    ///   slot: nothing is written. A slot the person made is never adopted as the managed one;
+    /// - an expired once-request (decision 52e, `isExpired`): nothing is written;
+    /// - a set whose exact alarm (time, days, enabled, no smart wake) the MANAGED slot already holds:
+    ///   nothing is written;
+    /// - a set whose exact alarm an UNMANAGED slot holds (decision 52f): nothing is added, and the
+    ///   managed slot is deleted if it still matches its record, so only the person's alarm fires (the
+    ///   record goes when the strap's re-read confirms the delete); a managed slot that no longer
+    ///   matches is left alone and its record forgotten. The person's slot is never touched, and never
+    ///   adopted as the managed one;
     /// - a managed slot that still holds what was written (or that fired once-alarm): it is replaced;
     /// - a managed slot that no longer does: the record is forgotten, and a new alarm is added in the
     ///   lowest free slot, or the set is refused when there is none;
     /// - a clear deletes the managed slot only while it is still OpenCircuit's;
     /// - no other slot is ever named: an add takes a free slot, and replace and delete only the managed one.
     static func plan(alarms: [ZeppAlarm], strapID: String, record: ManagedStrapAlarm?,
-                     request: StrapWakeAlarmRequest.Kind) -> Plan {
+                     request: StrapWakeAlarmRequest, now: Date, calendar: Calendar = .current) -> Plan {
         let managed = managedSlot(alarms: alarms, strapID: strapID, record: record)
         let forget = managed == .lost
-        switch request {
+        switch request.kind {
         case .clear:
             switch managed {
             case .matches(let alarm), .firedOnce(let alarm):
@@ -161,26 +185,35 @@ enum StrapWakeAlarmPlanner {
                 return Plan(action: .none(.nothingToClear), forgetRecord: false)
             }
         case .set(let time):
-            let wanted = { (slot: UInt8) in
-                ZeppAlarm(slot: slot, hour: time.hour, minute: time.minute, days: time.days, isEnabled: true)
+            if isExpired(request, now: now, calendar: calendar) {
+                return Plan(action: .none(.expired), forgetRecord: false)
             }
-            if alarms.contains(where: { $0.hasSameSetting(as: wanted($0.slot)) }) {
-                return Plan(action: .none(.alreadySet), forgetRecord: forget)
+            let holdsRequest = { (alarm: ZeppAlarm) in
+                alarm.hasSameSetting(as: ZeppAlarm(slot: alarm.slot, hour: time.hour, minute: time.minute,
+                                                   days: time.days, isEnabled: true))
             }
+            let ours: ZeppAlarm?
             switch managed {
-            case .matches(let alarm), .firedOnce(let alarm):
+            case .matches(let alarm), .firedOnce(let alarm): ours = alarm
+            case .lost, .none: ours = nil
+            }
+            if let ours, holdsRequest(ours) { return Plan(action: .none(.alreadySet), forgetRecord: false) }
+            if alarms.contains(where: { $0.slot != ours?.slot && holdsRequest($0) }) {
+                guard let ours else { return Plan(action: .none(.alreadySet), forgetRecord: forget) }
+                return Plan(action: .delete(slot: ours.slot), forgetRecord: false)
+            }
+            if let ours {
                 // `smartWake` is kept as the slot has it (false: OpenCircuit never sets it, and a slot
                 // that gained it no longer matches the record).
-                return Plan(action: .replace(ZeppAlarm(slot: alarm.slot, hour: time.hour, minute: time.minute,
-                                                        days: time.days, isEnabled: true, smartWake: alarm.smartWake)),
+                return Plan(action: .replace(ZeppAlarm(slot: ours.slot, hour: time.hour, minute: time.minute,
+                                                        days: time.days, isEnabled: true, smartWake: ours.smartWake)),
                             forgetRecord: false)
-            case .lost, .none:
-                let used = Set(alarms.map(\.slot))
-                guard (0..<ZeppAlarm.slotCount).contains(where: { !used.contains($0) }) else {
-                    return Plan(action: .refuse(.noFreeSlot), forgetRecord: forget)
-                }
-                return Plan(action: .add(time), forgetRecord: forget)
             }
+            let used = Set(alarms.map(\.slot))
+            guard (0..<ZeppAlarm.slotCount).contains(where: { !used.contains($0) }) else {
+                return Plan(action: .refuse(.noFreeSlot), forgetRecord: forget)
+            }
+            return Plan(action: .add(time), forgetRecord: forget)
         }
     }
 }
@@ -288,8 +321,15 @@ final class StrapWakeAlarmApplier {
     private weak var readFailed: HelioSession?
     private var outcomes: [UUID: Outcome] = [:]
 
-    init(store: StrapWakeAlarmStore = StrapWakeAlarmStore()) {
+    /// The clock and calendar decision 52e's expiry is judged by (the tests' own; the phone's in the app).
+    private let now: @MainActor () -> Date
+    private let calendar: Calendar
+
+    init(store: StrapWakeAlarmStore = StrapWakeAlarmStore(), now: @escaping @MainActor () -> Date = { Date() },
+         calendar: Calendar = .current) {
         self.store = store
+        self.now = now
+        self.calendar = calendar
     }
 
     /// Every strap session gets this before `start()` (`HelioConnection.makeSession`).
@@ -338,7 +378,8 @@ final class StrapWakeAlarmApplier {
         }
 
         let strapID = session.identityID
-        let plan = StrapWakeAlarmPlanner.plan(alarms: alarms, strapID: strapID, record: store.managed, request: pending.kind)
+        let plan = StrapWakeAlarmPlanner.plan(alarms: alarms, strapID: strapID, record: store.managed, request: pending,
+                                              now: now(), calendar: calendar)
         if plan.forgetRecord {
             store.managed = nil
             helioLog.notice("shortcuts: the managed alarm slot no longer matches what was written; forgotten")
@@ -346,6 +387,10 @@ final class StrapWakeAlarmApplier {
         let error: String?
         switch plan.action {
         case .none(let reason):
+            if reason == .expired {
+                // Decision 52e: dropped, nothing sent. The outcome only: no time of day in the log.
+                helioLog.notice("shortcuts: wake alarm request expired before it could be applied; dropped, strap untouched")
+            }
             finish(pending.id, .noWrite(reason))
             return .finished
         case .refuse(let reason):

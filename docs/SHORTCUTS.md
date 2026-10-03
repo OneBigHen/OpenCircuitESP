@@ -35,8 +35,11 @@ your wake time, Repeat: Once ▸ Done.
   is disconnected afterwards, so the link is left as a background run leaves it (B.5). A strap that ended
   "busy" is not reconnected (decision 7).
 - **The managed slot** (`Helio/StrapWakeAlarm.swift`). A pure planner decides from the strap's list, the
-  managed record and the request: the same alarm already on the strap → no write; the managed slot still
-  as written → replace it; changed or gone → forget it and add a new one (no free slot → refuse); a
+  managed record and the request: a once-request whose time has passed → dropped, nothing sent
+  (decision 52e); the managed slot already holding the alarm → no write; another slot holding it →
+  nothing added, and the managed slot deleted if it still matches its record, so only the person's alarm
+  fires (decision 52f; a managed slot that no longer matches is left alone); the managed slot still as
+  written → replace it; changed or gone → forget it and add a new one (no free slot → refuse); a
   once-alarm that only lost its enabled bit (the strap may disable it after it fires, §13.5 🔴) →
   re-enable it; no other slot is ever named; a record for another strap counts as none. The request is
   saved in UserDefaults (`helio.shortcutWakeAlarm.v1`) BEFORE anything is sent, applied now if the
@@ -50,7 +53,9 @@ your wake time, Repeat: Once ▸ Done.
 
 - A background run can't reach a strap out of range. Vibrate Wearable then says it couldn't reach the
   strap, and no buzz is kept for later. Set Wake Alarm keeps its request and applies it at the next
-  connection, which may come after the time has passed (a once-alarm then fires at that time the next day).
+  connection. A Once request whose time has passed by then is dropped and nothing is written (decision
+  52e: the next occurrence of its hour:minute after the moment it was asked is checked at apply time);
+  repeating requests never expire.
 - The strap fires its alarm on its own clock, which OpenCircuit sets to the phone's local time on every
   connection (decision 9). A time-zone or DST change takes effect at the next connection.
 - If the link drops mid-buzz, the strap may keep buzzing until the next connection sends the owed stop
