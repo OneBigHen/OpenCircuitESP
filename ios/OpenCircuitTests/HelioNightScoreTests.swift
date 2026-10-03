@@ -52,10 +52,15 @@ final class HelioNightScoreTests: XCTestCase {
         calendar.date(byAdding: .day, value: -daysAgo, to: calendar.startOfDay(for: Date()))!
     }
 
-    /// A strap night that woke an hour ago and went to bed eight hours before that, so it both
-    /// "ended today" for the Readiness card and lies wholly in the past for `ingest`'s future guard.
+    /// A strap night of eight hours whose wake is ALWAYS inside today and never in the future, so it
+    /// both "ended today" for the Readiness card and lies wholly in the past for `ingest`'s future
+    /// guard. #259: the wake used to be `now − 1 h`, which falls on yesterday between local 00:00
+    /// and 01:00, so the test failed in that hour. Now it is an hour ago, or halfway between
+    /// midnight and now when an hour ago would be yesterday.
     private func lastNightWindow() -> DateInterval {
-        let end = Date().addingTimeInterval(-3600)
+        let now = Date()
+        let today = calendar.startOfDay(for: now)
+        let end = max(now.addingTimeInterval(-3600), today.addingTimeInterval(now.timeIntervalSince(today) / 2))
         return DateInterval(start: end.addingTimeInterval(-8 * 3600), end: end)
     }
 
