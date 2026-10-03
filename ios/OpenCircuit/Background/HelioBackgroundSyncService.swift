@@ -64,15 +64,23 @@ enum StrapNightRefresh {
     /// write because its last segment ended under 20 minutes before the flush started, and no Sleep
     /// Focus finalization applied, decision 31), and, after a woke-up catch-up, `afterWokeUp`. One
     /// request covers both. The scheduler keeps it at least a minute away.
-    static func aim(nights: [HelioSleepSelection.Night], focusEndedAt: Date?, flushStartedAt: Date,
-                    afterWokeUp wokeUp: Bool) -> Date? {
+    ///
+    /// `storedNightSettles` (decision 57b, #262): the margin end of the newest stored strap night not
+    /// yet in Apple Health, read after the flush (`LocalStore.newestStrapNightSettles`). It counts as a
+    /// held night even when this sync didn't carry it, so a sync whose strap had stopped re-delivering
+    /// the night (an app opened right after a background wake stored it) asks for the same refresh
+    /// instead of clearing it. Read after the flush, a night it wrote has its mirror record and is nil.
+    static func aim(nights: [HelioSleepSelection.Night], storedNightSettles: Date? = nil, focusEndedAt: Date?,
+                    flushStartedAt: Date, afterWokeUp wokeUp: Bool) -> Date? {
         var candidates: [Date] = []
+        var held: [Date] = []
         if !SleepFocusFinalization.applies(focusEndedAt: focusEndedAt, flushStartsAt: flushStartedAt) {
-            let held = nights.compactMap { $0.segments.map(\.end).max() }
+            held = nights.compactMap { $0.segments.map(\.end).max() }
                 .filter { !SleepHealthGate.isSettled(latestSegmentEnd: $0, now: flushStartedAt) }
                 .map { $0.addingTimeInterval(SleepHealthGate.settleMargin) }
-            if let earliest = held.min() { candidates.append(earliest) }
         }
+        if let storedNightSettles { held.append(storedNightSettles) }
+        if let earliest = held.min() { candidates.append(earliest) }
         if wokeUp { candidates.append(flushStartedAt.addingTimeInterval(afterWokeUp)) }
         return candidates.max()
     }
@@ -371,6 +379,12 @@ struct HelioBackgroundSyncService {
     var breadcrumbs: HelioBreadcrumbs? = nil
     /// The app records a strap workout (#227): the run ends at once, touching nothing (review-238 B1).
     var workoutHoldsStrap: @MainActor () -> Bool = { StrapWorkoutRecorder.holdsStrapLink }
+    /// Decision 57b (#262): the margin end of the newest stored strap night not yet in Apple Health,
+    /// read after the flush (`LocalStore.newestStrapNightSettles` in the app, as `HelioConnection.
+    /// nightRefreshAim` reads it for the post-sync hook). A run whose strap no longer re-delivers that
+    /// night still asks for its margin refresh, instead of clearing the one an earlier sync asked for.
+    /// nil in tests that don't store nights.
+    var storedNightSettles: @MainActor (_ timeline: SyncDeviceID, _ now: Date) -> Date? = { _, _ in nil }
 
     /// One bounded run. `nightsFinalized` is the Sleep Focus wake's "the night is over": the time T
     /// Sleep Focus ended. The strap's nights then skip the 20-minute quiet margin, as the ring's do on
@@ -624,7 +638,9 @@ struct HelioBackgroundSyncService {
             run.flush = await flush(timeline, run.result?.nights ?? [], run.result?.identity ?? watched?.identity,
                                     focusEnd)
             run.flushMS = Self.ms(from: flushStart, to: now())
-            run.refreshAt = StrapNightRefresh.aim(nights: run.result?.nights ?? [], focusEndedAt: focusEnd,
+            run.refreshAt = StrapNightRefresh.aim(nights: run.result?.nights ?? [],
+                                                  storedNightSettles: storedNightSettles(timeline, now()),
+                                                  focusEndedAt: focusEnd,
                                                   flushStartedAt: flushStart, afterWokeUp: wake == .strapEvent)
             if run.flush?.wroteAnything == true { observability.recordHealthWrite() }
         }
@@ -691,6 +707,7 @@ extension HelioBackgroundSyncService {
                 }
             },
             appIsActive: { UIApplication.shared.applicationState == .active },
-            breadcrumbs: connection.breadcrumbs)
+            breadcrumbs: connection.breadcrumbs,
+            storedNightSettles: { timeline, now in store.newestStrapNightSettles(timeline: timeline, now: now) })
     }
 }
