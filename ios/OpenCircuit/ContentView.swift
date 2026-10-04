@@ -786,7 +786,7 @@ struct ContentView: View {
         }
     }
 
-    /// Brand mark + version, closing out the Profile tab.
+    /// Brand mark + version + maker credit, closing out the Profile tab.
     ///
     /// This is where an app's own logo conventionally lives — the settings/about surface — rather
     /// than on the main screen, where it costs the user real estate and tells them nothing they
@@ -810,6 +810,14 @@ struct ContentView: View {
                 Text("Developer tools on").font(.caption2).foregroundStyle(.tertiary)
             }
             #endif
+            // The maker credit sits under the brand mark here, not in Settings ▸ About.
+            VStack(spacing: 2) {
+                Text("Made with love")
+                    .font(.caption).foregroundStyle(.secondary)
+                Link("StandardSoftware.io", destination: URL(string: "https://standardsoftware.io")!)
+                    .font(.caption)
+            }
+            .padding(.top, 4)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 8)

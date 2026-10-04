@@ -1,8 +1,10 @@
 import SwiftUI
 
-/// The ring reverse-engineering tools (last sync summary, last raw frame, activity-channel probe),
-/// shown at the bottom of Background Activity rather than on Profile itself. Gated by the caller on
-/// `DeveloperTools.isVisible`, so store builds show it only after the 7-tap unlock.
+/// The ring reverse-engineering readout (last sync summary and last raw frame), shown at the bottom of
+/// Background Activity rather than on Profile itself. Gated by the caller on
+/// `DeveloperTools.isVisible`, so store builds show it only after the 7-tap unlock. The
+/// activity-channel probe below it writes to the ring, so it is compiled into Debug builds only:
+/// store and TestFlight builds never carry it.
 struct RingDebugToolsSection: View {
     let session: RingSession
     /// Presents the share sheet for a written capture file (the host screen owns the sheet).
@@ -28,7 +30,9 @@ struct RingDebugToolsSection: View {
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    #if DEBUG
                     activityProbeRow
+                    #endif
                 }
             } label: {
                 Text("Debug — last sync & frame").font(.subheadline.weight(.medium))
@@ -38,6 +42,7 @@ struct RingDebugToolsSection: View {
         }
     }
 
+    #if DEBUG
     /// RE tool (issue #93): sweep untried sync-open `byte[6]` channels looking for the
     /// undecoded per-day activity/step history stream, then export every captured raw frame
     /// for offline decoding (`desktop/decode_activity.py`). See `RingSession.probeActivityChannels`.
@@ -82,4 +87,5 @@ struct RingDebugToolsSection: View {
             ringLog.error("activity probe: failed to write capture file: \(error.localizedDescription, privacy: .public)")
         }
     }
+    #endif
 }

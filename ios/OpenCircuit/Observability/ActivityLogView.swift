@@ -134,8 +134,8 @@ struct ActivityLogView: View {
                 }
             }
 
-            // Ring RE tools (last frame, activity-channel probe): ring only, and hidden in store
-            // builds until unlocked (DeveloperTools). Moved here from the Profile tab.
+            // Ring RE readout (last sync summary and last frame; the probe is DEBUG-only): ring only,
+            // and hidden in store builds until unlocked (DeveloperTools). Moved here from the Profile tab.
             if let session, DeveloperTools.isVisible(unlocked: developerToolsUnlocked) {
                 RingDebugToolsSection(session: session) { url in
                     shareItem = url

@@ -18,7 +18,7 @@ archive and upload mechanics; this file covers review.
 | Export compliance | `ITSAppUsesNonExemptEncryption = false` (see §5) |
 | App icon / launch | `AppIcon.icon` (Icon Composer, Xcode 26), `UILaunchScreen` with `LaunchLogo` + `LaunchBackground` |
 | Devices | iPhone + iPad (`TARGETED_DEVICE_FAMILY 1,2`), so ASC needs iPad screenshots too |
-| Developer tools | The BP calibration screens and settings, the simulator demo data and the test seams are behind `#if DEBUG`. The calibration HTTP client (`CalibrationSupport.swift`, default URL `http://127.0.0.1:8765`) still compiles into Release, but its only presenter is a Debug-only button, so nothing in Release can reach it. The ring Debug section (last frame, "RE tool" probe) is at the bottom of Profile ▸ Background Activity, in Release behind the 7-tap unlock, see §4 |
+| Developer tools | The BP calibration screens and settings, the simulator demo data and the test seams are behind `#if DEBUG`. The calibration HTTP client (`CalibrationSupport.swift`, default URL `http://127.0.0.1:8765`) still compiles into Release, but its only presenter is a Debug-only button, so nothing in Release can reach it. The ring Debug section (last sync summary and last frame) is at the bottom of Profile ▸ Background Activity, in Release behind the 7-tap unlock, see §4. Its activity-channel probe ("RE tool") is compiled into Debug builds only |
 
 ### Changed for the store build
 
@@ -30,11 +30,16 @@ archive and upload mechanics; this file covers review.
   the app never uses (guideline 2.5.1). Already-granted TestFlight installs are unaffected.
 - **Ring debug card hidden in Release until unlocked.** Profile showed every ring user a
   "Debug — last sync & frame" card with raw hex and an "RE tool" probe. Debug builds still
-  show it; store and TestFlight builds show it after **7 taps on the version line** at the
-  bottom of Profile (7 more hide it). A TestFlight-only check can't be used, because App
-  Review runs builds with the same sandbox receipt. Tell TestFlight testers about the taps.
-  Once unlocked, the tools appear as a "Ring Debug" section at the bottom of Profile ▸
-  Background Activity, not on Profile itself (UI sweep, owner decision 2026-10-03).
+  show it; store and TestFlight builds show its read-only part (last sync summary, last
+  frame) after **7 taps on the version line** at the bottom of Profile (7 more hide it). A
+  TestFlight-only check can't be used, because App Review runs builds with the same sandbox
+  receipt. Tell TestFlight testers about the taps. Once unlocked, it appears as a "Ring
+  Debug" section at the bottom of Profile ▸ Background Activity, not on Profile itself (UI
+  sweep, owner decision 2026-10-03). The "RE tool" activity-channel probe, the only part
+  that writes to the ring, is `#if DEBUG` (owner decision 2026-10-04, build 58), so no
+  store or TestFlight build can run it.
+- **Maker credit moved.** "Made with love / StandardSoftware.io" sits on the Profile tab
+  under the logo, name and version line. It is no longer in Profile ▸ Settings ▸ About.
 - **"Sleep apnea assessment" renamed** to "Overnight blood-oxygen check", with copy that
   says it is a wellness estimate and can't tell you whether you have sleep apnea. The
   Sleep card already labels the result experimental and not a diagnosis. Naming a
@@ -134,7 +139,7 @@ declaration, a setting that has no API, or something that needs a phone and a we
 >
 > The app is not a medical device and shows that disclaimer in onboarding, in Profile, and next to every alert and experimental estimate.
 >
-> Seven taps on the version line at the bottom of Profile reveal a "Ring Debug" section at the bottom of Profile > Background Activity (the last sync frame and a protocol probe that asks the ring for history on test channels). It is there for our own TestFlight debugging, needs a ring the reviewer does not have, and collects or sends nothing off the device.
+> Seven taps on the version line at the bottom of Profile reveal a read-only "Ring Debug" section at the bottom of Profile > Background Activity (the last sync summary and the last raw frame received from the ring). It is there for our own TestFlight debugging, needs a ring the reviewer does not have, and collects or sends nothing off the device.
 >
 > Helio Strap pairing needs a key extracted with a computer (docs/HELIO_KEY_EXTRACTION.md in the GitHub repository); that is why the video shows the strap already set up.
 
@@ -157,11 +162,15 @@ declaration, a setting that has no API, or something that needs a phone and a we
 - **Diagnostics in Files**: `UIFileSharingEnabled` exposes exported files in the Files
   app. That is user-initiated and covered by the privacy policy.
 
-- **Hidden diagnostics card (2.3.1)**: reachable in Release after 7 taps on Profile's
-  version line, and disclosed in the review notes; build 57 ships it that way. Its "RE tool" row (`activityProbeRow`
-  in `Observability/RingDebugToolsSection.swift`) asks the ring for history on five channel numbers the official
-  app never uses. To carry no risk, wrap that row in `#if DEBUG`; TestFlight testers then
-  lose the probe but keep the rest of the card.
+- **Hidden diagnostics readout (2.3.1)**: reachable in Release after 7 taps on Profile's
+  version line, read-only (last sync summary and last frame), and disclosed in the review
+  notes. The part that wrote to the ring, the "RE tool" activity-channel probe
+  (`activityProbeRow` in `Observability/RingDebugToolsSection.swift`, which asked the ring
+  for history on five channel numbers the official app never uses), has been `#if DEBUG`
+  since build 58. TestFlight testers no longer have it; run it from a Debug build. Nothing
+  in Release calls the `RingSession` methods behind it, and the Release build contains none
+  of their strings or symbols (checked with `nm` and string probes on the Release build of
+  the tested tree, with the Debug build as the control).
 - **Dead calibration code in Release**: `CalibrationSupport.swift` (HTTP client, default
   `http://127.0.0.1:8765`) compiles into Release with no way to reach it, so the binary
   contains `URLSession` calls although the app makes no network request. Wrap the file's
