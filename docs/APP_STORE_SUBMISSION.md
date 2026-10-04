@@ -64,7 +64,7 @@ workout start.
 
 ## 2. App Store Connect checklist
 
-Status on 2026-10-04. *Done* means it is set in the 1.0 draft (written through the App Store
+Status on 2026-10-04 (submitted to App Review, build 58). *Done* means it is set in the 1.0 draft (written through the App Store
 Connect API and read back). *Owner* means only the account holder can do it: a legal
 declaration, a setting that has no API, or something that needs a phone and a wearable.
 
@@ -138,10 +138,12 @@ declaration, a setting that has no API, or something that needs a phone and a we
     app bundles are listed in `docs/THIRD_PARTY_NOTICES.md`.
 17. **Copyright and release**: *done.* Copyright "2026 Standard Software Solutions", release after
     approval.
-18. **Submit for Review**: the owner asked for it on 2026-10-04 and a script (`asc_submit_review.py`)
-    sends it through the API, which Apple refuses until the App Privacy answers are published (item
-    4). That is the only blocker the API lists. Items 4, 6, 7, 11, 12 (the TestFlight check) and 13
-    are the owner's.
+18. **Submit for Review**: *done.* Submitted on 2026-10-04 at 16:33 UTC through the API
+    (`asc_submit_review.py`), build 58 with the demo video attached. App Store Connect reports the
+    version and the submission as Waiting for Review. Apple refused the first attempt until the
+    App Privacy answers were published (item 4); they were, and the submission went through a
+    minute later. Release is set to after approval. Withdraw with `canceled: true` on the review
+    submission if a late fix is needed.
 
 ## 3. Review notes (as saved in ASC)
 
