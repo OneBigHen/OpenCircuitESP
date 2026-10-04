@@ -2,6 +2,7 @@
 name = "opencircuit"
 version = "0.1.0"
 description = "RingConn Gen 2 BLE reverse-engineering workbench"
+license = { text = "PolyForm-Noncommercial-1.0.0" }
 requires-python = ">=3.10"
 dependencies = ["bleak>=0.22"]
 

@@ -1,5 +1,8 @@
 # Third-party notices
 
+OpenCircuit itself is licensed under the PolyForm Noncommercial License 1.0.0 (see [`LICENSE`](../LICENSE)).
+The third-party components below keep their own licenses, reproduced here.
+
 ## Keyline Icons
 
 The Today dashboard's and onboarding's icons (`ios/OpenCircuit/Assets.xcassets/Keyline/*.imageset`) are unmodified
