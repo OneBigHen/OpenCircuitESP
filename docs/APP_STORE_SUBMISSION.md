@@ -9,7 +9,7 @@ archive and upload mechanics; this file covers review.
 | Area | State |
 |---|---|
 | Bundle ids | `com.standardsoftwaresolutions.opencircuit`, extension `…opencircuit.WorkoutWidget`, team `765RD9BJ8C`, automatic signing |
-| Version / build | `MARKETING_VERSION` 1.0, `CURRENT_PROJECT_VERSION` **57** in `ios/project.yml` (project level, shared by app and extension). Bump before every upload |
+| Version / build | `MARKETING_VERSION` 1.0, `CURRENT_PROJECT_VERSION` **58** in `ios/project.yml` (project level, shared by app and extension). Bump before every upload |
 | Usage strings | Bluetooth, Health share, Health update, Location When In Use. No Always location is requested. Notifications need no string |
 | Entitlements | HealthKit + HealthKit background delivery. No iCloud, no push, no App Groups |
 | Background modes | `bluetooth-central`, `location`, `fetch`, `processing` (+ two BGTask ids). Each has a justification in §3 |
@@ -53,10 +53,14 @@ archive and upload mechanics; this file covers review.
 **Verification (2026-10-03 and 10-04).** The Swift changes were built and tested on a Mac as one
 tree with the other PRs merged on 10-03/04 (#268 to #272): the Kit suite (2398 tests, 13 skipped, 0
 failures), the full `OpenCircuitTests` suite (815 tests, 813 passed, 2 skipped, 0 failed) and the
-migration gate (23 of 23) pass, and a Release build succeeds. Build 57 is the archive of master at
-`a8930ce`: that tested tree plus the license and version-bump commits, so the compiled code is the
-tested code. Not tested: anything that needs a real ring or strap. Still to do on a phone with a
-ring or strap, in the TestFlight build: Profile, Device Info and a workout start.
+migration gate (23 of 23) pass, and a Release build succeeds. The probe and credit change (build 58)
+was verified the same way at its own commit (`520f93b`): the Kit suite (2398 tests, 13 skipped, 0
+failures), `OpenCircuitTests` (815 tests, 813 passed, 2 skipped, 0 failed), the migration gate (23
+of 23) and a Release build. Build 58 is the archive of master at `2ceda5f`, which differs from that
+commit only by the version number, so the compiled code is the tested code. Build 57 (`a8930ce`)
+is superseded and still contains the probe. Not tested: anything that needs a real ring or strap.
+Still to do on a phone with a ring or strap, in the TestFlight build: Profile, Device Info and a
+workout start.
 
 ## 2. App Store Connect checklist
 
@@ -103,13 +107,13 @@ declaration, a setting that has no API, or something that needs a phone and a we
     phone and attach it under App Review Information.
 11. **Export compliance**: *owner.* Confirm the answer in §5. The build declares
     `ITSAppUsesNonExemptEncryption = false`, so ASC does not ask again.
-12. **Build**: *done*: build 57 (master `a8930ce`) is archived with Xcode 26, uploaded, VALID,
+12. **Build**: *done*: build 58 (master `2ceda5f`) is archived with Xcode 26, uploaded, VALID,
     attached to 1.0 and in the Internal Testers group, with "What to Test" explaining the 7-tap
-    unlock. *Owner:* install that build from TestFlight on a phone with the ring or strap and use
-    it before submitting.
+    unlock (and that the probe is Debug-only). Build 57 is superseded. *Owner:* install build 58
+    from TestFlight on a phone with the ring or strap and use it before submitting.
 13. **Xcode privacy report**: partly done. Checked on 2026-10-03: Liveline 0.7.0 ships its own
     `PrivacyInfo.xcprivacy`, its sources use no network or required-reason API, and the Release
-    binary imports no `stat`-family symbol. Checked on the build 57 archive: it contains the app
+    binary imports no `stat`-family symbol. Checked on the build 58 archive: it contains the app
     manifest (no tracking, no collected data, UserDefaults `CA92.1`) and Liveline's, and embeds no
     frameworks. *Owner:* run Organizer ▸ right-click the archive ▸ Generate Privacy Report once.
 14. **Accessibility Nutrition Labels**: optional for 1.0, skipped. Apple says they become
