@@ -101,10 +101,17 @@ declaration, a setting that has no API, or something that needs a phone and a we
    show only screens that ship in Release. ASC rejects an alpha channel and the simulator writes
    RGBA, so flatten to RGB before uploading. No RingConn or Zepp logos. The earlier 5.8" and 6.5"
    sets (an old UI) were deleted.
-10. **Review notes and demo video**: notes *done*; §3 is exactly what is saved, and the App Review
-    contact is the TestFlight review contact. Video *owner*: the reviewer has no ring or strap,
-    so record pairing, a sync, the Today screen and the Apple Health permission sheet on your
-    phone and attach it under App Review Information.
+10. **Review notes and demo video**: *done.* §3 is exactly what is saved, and the App Review
+    contact is the TestFlight review contact (phone in international format, which the App Store
+    Connect form requires). The demo video is attached under App Review Information as
+    `OpenCircuit-App-Review-Demo.mov` (69 s, from the owner's phone, 88.5 MB, processed COMPLETE
+    with a matching checksum). It shows the ring connecting, the Apple Health permission sheet, the
+    Today screen with a live heart-rate measurement, the Sync from Ring and Sync to Apple Health
+    buttons, and the Sleep tab. It does not show a first-time pairing or a sync running, and §3
+    says only what it shows. Its Health permission sheet lists Blood Pressure, which the store
+    build does not request (Debug-only since #269), so it was probably recorded from a Debug or
+    pre-#269 build. Re-record it from the TestFlight build 58 before submitting if you can, then
+    swap the file with `asc_upload_review_video.py --replace`.
 11. **Export compliance**: *owner.* Confirm the answer in §5. The build declares
     `ITSAppUsesNonExemptEncryption = false`, so ASC does not ask again.
 12. **Build**: *done*: build 58 (master `2ceda5f`) is archived with Xcode 26, uploaded, VALID,
@@ -127,12 +134,12 @@ declaration, a setting that has no API, or something that needs a phone and a we
     app bundles are listed in `docs/THIRD_PARTY_NOTICES.md`.
 17. **Copyright and release**: *done.* Copyright "2026 Standard Software Solutions", release after
     approval.
-18. **Submit for Review**: *owner.* Items 4, 6, 7, 10 (video), 11, 12 (the TestFlight check) and
-    13 are what stands between this draft and the button.
+18. **Submit for Review**: *owner.* Items 4, 6, 7, 11, 12 (the TestFlight check) and 13 are what
+    stands between this draft and the button, plus the video re-record in item 10 if you take it.
 
 ## 3. Review notes (as saved in ASC)
 
-> OpenCircuit reads health data from the user's own wearable (a RingConn Gen 2/Gen 3 smart ring or an Amazfit Helio Strap) over Bluetooth Low Energy and writes it to Apple Health. It has no account, no server and no analytics; all data stays on the device and in the user's HealthKit store. Because the app needs the wearable to show data, a screen recording of pairing, a sync, the Today screen and the Apple Health permission sheet is attached.
+> OpenCircuit reads health data from the user's own wearable (a RingConn Gen 2/Gen 3 smart ring or an Amazfit Helio Strap) over Bluetooth Low Energy and writes it to Apple Health. It has no account, no server and no analytics; all data stays on the device and in the user's HealthKit store. Because the app needs the wearable to show data, a screen recording from a real device is attached: the ring connecting, the Apple Health permission sheet, the Today screen with a live heart-rate measurement, the Sync from Ring and Sync to Apple Health buttons, and the Sleep tab.
 >
 > Background modes:
 > - bluetooth-central: the wearable syncs its stored history when it reconnects, so Apple Health stays current without opening the app.
