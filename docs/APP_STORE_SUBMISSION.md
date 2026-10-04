@@ -76,8 +76,10 @@ declaration, a setting that has no API, or something that needs a phone and a we
 3. **URLs**: *done.* Privacy Policy
    `https://github.com/perezjuanj/OpenCircuit/blob/master/docs/PRIVACY.md`; Support and Marketing
    URL `https://github.com/perezjuanj/OpenCircuit`.
-4. **App Privacy label**: *owner* (no API). "Data Not Collected". True as long as nothing leaves
-   the device without the user choosing to share a file.
+4. **App Privacy label**: *owner* (no API). "Data Not Collected": App Privacy, Data Types, "No, we
+   do not collect data from this app", Save, then **Publish** (top right). Until it is published
+   Apple refuses the submission with `STATE_ERROR.APP_DATA_USAGES_REQUIRED`. True as long as
+   nothing leaves the device without the user choosing to share a file.
 5. **Age rating**: *done*, **9+**. Answers: no medical or treatment information (the app gives no
    diagnosis, treatment or medication guidance), health or wellness topics yes, every other
    question none or no. Apple's age-rating table puts that at 9+; "infrequent" medical or
@@ -110,8 +112,10 @@ declaration, a setting that has no API, or something that needs a phone and a we
     buttons, and the Sleep tab. It does not show a first-time pairing or a sync running, and §3
     says only what it shows. Its Health permission sheet lists Blood Pressure, which the store
     build does not request (Debug-only since #269), so it was probably recorded from a Debug or
-    pre-#269 build. Re-record it from the TestFlight build 58 before submitting if you can, then
-    swap the file with `asc_upload_review_video.py --replace`.
+    pre-#269 build. The owner chose to submit with it as is, so §3 says in one sentence that the
+    sheet in the recording lists Blood Pressure and the store build does not request it. A
+    re-record from TestFlight build 58 can still replace it:
+    `asc_upload_review_video.py --replace`.
 11. **Export compliance**: *owner.* Confirm the answer in §5. The build declares
     `ITSAppUsesNonExemptEncryption = false`, so ASC does not ask again.
 12. **Build**: *done*: build 58 (master `2ceda5f`) is archived with Xcode 26, uploaded, VALID,
@@ -134,12 +138,14 @@ declaration, a setting that has no API, or something that needs a phone and a we
     app bundles are listed in `docs/THIRD_PARTY_NOTICES.md`.
 17. **Copyright and release**: *done.* Copyright "2026 Standard Software Solutions", release after
     approval.
-18. **Submit for Review**: *owner.* Items 4, 6, 7, 11, 12 (the TestFlight check) and 13 are what
-    stands between this draft and the button, plus the video re-record in item 10 if you take it.
+18. **Submit for Review**: the owner asked for it on 2026-10-04 and a script (`asc_submit_review.py`)
+    sends it through the API, which Apple refuses until the App Privacy answers are published (item
+    4). That is the only blocker the API lists. Items 4, 6, 7, 11, 12 (the TestFlight check) and 13
+    are the owner's.
 
 ## 3. Review notes (as saved in ASC)
 
-> OpenCircuit reads health data from the user's own wearable (a RingConn Gen 2/Gen 3 smart ring or an Amazfit Helio Strap) over Bluetooth Low Energy and writes it to Apple Health. It has no account, no server and no analytics; all data stays on the device and in the user's HealthKit store. Because the app needs the wearable to show data, a screen recording from a real device is attached: the ring connecting, the Apple Health permission sheet, the Today screen with a live heart-rate measurement, the Sync from Ring and Sync to Apple Health buttons, and the Sleep tab.
+> OpenCircuit reads health data from the user's own wearable (a RingConn Gen 2/Gen 3 smart ring or an Amazfit Helio Strap) over Bluetooth Low Energy and writes it to Apple Health. It has no account, no server and no analytics; all data stays on the device and in the user's HealthKit store. Because the app needs the wearable to show data, a screen recording from a real device is attached: the ring connecting, the Apple Health permission sheet, the Today screen with a live heart-rate measurement, the Sync from Ring and Sync to Apple Health buttons, and the Sleep tab. The Apple Health permission sheet in the recording lists Blood Pressure; the App Store build does not request Blood Pressure (that request exists only in development builds).
 >
 > Background modes:
 > - bluetooth-central: the wearable syncs its stored history when it reconnects, so Apple Health stays current without opening the app.
