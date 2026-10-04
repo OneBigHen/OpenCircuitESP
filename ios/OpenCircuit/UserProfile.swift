@@ -370,6 +370,10 @@ struct UserProfileSettingsView: View {
                 }
             }
 
+#if DEBUG
+            // App Store readiness: the calibration server is the same developer-only BP tool the Today
+            // card already hides in Release (#152). It uploads raw PPG to an arbitrary URL and writes
+            // unvalidated BP estimates to Apple Health, neither of which a store build may offer.
             Section("Calibration server") {
                 TextField("Base URL", text: $calibrationBaseURL)
                     .textInputAutocapitalization(.never)
@@ -385,6 +389,7 @@ struct UserProfileSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+#endif
 
             Section("Sleep schedule") {
                 Toggle("Use manual sleep schedule", isOn: $sleepEnabled)
