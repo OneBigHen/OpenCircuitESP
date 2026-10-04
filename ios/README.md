@@ -15,7 +15,7 @@ Whoop 4.0.
 > ⚠️ **Not affiliated with RingConn.** OpenCircuit is an independent interoperability
 > project — not affiliated with, authorized, or endorsed by RingConn or JZ_Tech.
 > "RingConn" is a trademark of its respective owner. OpenCircuit is **not a medical
-> device**. Privacy: [`docs/PRIVACY.md`](docs/PRIVACY.md) · License: [`LICENSE`](LICENSE) (MIT).
+> device**. Privacy: [`docs/PRIVACY.md`](docs/PRIVACY.md) · License: [`LICENSE`](LICENSE) (PolyForm Noncommercial 1.0.0).
 
 ## Why this exists
 
@@ -128,9 +128,20 @@ python -m opencircuit decode-log captures/btsnoop_hci.log   # parse an Android H
 
 ## Support
 
-OpenCircuit is free and open-source. If it's useful to you, you can support development:
+OpenCircuit is free and source-available. If it's useful to you, you can support development:
 
 <a href="https://www.buymeacoffee.com/standardsoftware" target="_blank"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=standardsoftware&button_colour=5F7FFF&font_colour=ffffff&font_family=Bree&outline_colour=000000&coffee_colour=FFDD00" alt="Buy me a coffee" height="40"></a>
+
+## License
+
+OpenCircuit is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). You may
+use, study, modify and share it for any noncommercial purpose (personal use, research,
+hobby projects, education, charities and the like). Selling it, or using it in a commercial
+product or service, is not allowed without a separate license from the copyright holder.
+
+Copies released before this change were published under the MIT License and remain
+available under it. Third-party code keeps its own license (see
+[`docs/THIRD_PARTY_NOTICES.md`](../docs/THIRD_PARTY_NOTICES.md)).
 
 ## Legal / safety
 
