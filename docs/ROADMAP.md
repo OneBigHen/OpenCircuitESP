@@ -106,6 +106,7 @@ Remaining for end-to-end into Apple Health: the paid-account HealthKit entitleme
 - **Encryption / auth.** If the BLE link or app layer is encrypted with a
   cloud-issued key, offline decoding may be blocked at Phase 1 — this is the make-or-break unknown.
 - **Non-standard GATT.** May require handle-based access and quirks per platform.
-- **HealthKit constraints.** No RMSSD type (only SDNN); sleep is segment-based;
+- **HealthKit constraints.** No RMSSD type before iOS 27 (only SDNN; from iOS 27 HRV is also
+  written to the RMSSD type, decision 59); sleep is segment-based;
   iOS-only — none of this is reachable from desktop.
 - **Firmware updates** can change the protocol; pin observations to a FW version.
