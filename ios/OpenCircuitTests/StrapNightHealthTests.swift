@@ -1524,4 +1524,32 @@ extension StrapNightHealthTests {
         }
         XCTAssertEqual(try mirrorSpan(store), partialWindow, "Health keeps what it has")
     }
+
+    /// 58e test 6: the same through the sync's hand-over (50a). A declined extension is handed over
+    /// once, by the first thinner re-delivery after its margin; the writer declines it (thinner than its
+    /// card) and the flush notes it. Later re-deliveries hand it over no more, and nor does the backstop.
+    func testADeclinedExtensionIsHandedOverOnceNotOnEveryReDelivery() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try await finalStoredInsideItsMargin(store)
+        let row = try XCTUnwrap(try rows(store).first)
+        defer { StrapNightDeclinedOverlay.clear(storedNight: row.night) }
+        row.asleepMin += 60   // the card is fuller than the stored hypnogram: the writer declines it
+        try store.context.save()
+
+        let first = try await syncAndFlush(finalThinner, at: hour(9.5), store: store)
+        XCTAssertEqual(first.result.nights.count, 1, "handed over once")
+        XCTAssertEqual(first.written, [], "declined")
+        XCTAssertEqual(StrapNightDeclinedOverlay.load(storedNight: row.night), row.hypnogramData, "and noted")
+        var handed: [Int] = []
+        for t in [10.5, 12.0] {
+            let later = try await syncAndFlush(finalThinner, at: hour(t), store: store)
+            handed.append(later.result.nights.count)
+            XCTAssertEqual(later.written, [])
+        }
+        XCTAssertEqual(handed, [0, 0], "not handed over again after the decline")
+        let backstop = try await flush([], at: hour(8 + 50.0 / 60).addingTimeInterval(buffer + 1), store: store)
+        XCTAssertEqual(backstop, [], "nor offered by the backstop")
+        XCTAssertEqual(try mirrorSpan(store), partialWindow, "Health keeps what it has")
+    }
 }
