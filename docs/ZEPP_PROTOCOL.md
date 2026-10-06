@@ -2326,8 +2326,9 @@ the Zepp app) is the day's **main sleep**; with no plan, the window is **00:00�
 
 ### 21.4 When a session record exists, and re-fetching it
 
-- 🔴 Whether the strap writes a session record only after the session ends, or also while it is
-  in progress, is unknown for Zepp OS. On another vendor's band, Gadgetbridge has fetched an
+- Whether the strap writes a session record only after the session ends, or also while it is
+  in progress, was 🔴 unknown for Zepp OS. For the Helio Strap it is also while it is in progress
+  (🟢, observed below). On another vendor's band, Gadgetbridge has fetched an
   in-progress sleep file at 04:25 and never received the completed night. Its maintainer's fix
   idea was to stop marking such a file synced (`GB#6484`, Xiaomi, 2026-07-28 to 2026-08-26). Also, a nap can
   only be told apart from a main sleep once the main sleep is known (§21.1).
@@ -2343,6 +2344,15 @@ the Zepp app) is the day's **main sleep**; with no plan, the window is **00:00�
   record with the same key arrives with different content.
 - After a `06 00` wake event (§16.2), expect the night's record to be late or partial. Fetch again
   later.
+
+**Observed: the Helio Strap exposes an in-progress `0x48` record** (🟢 own strap, 2026-10-05 and
+2026-10-06; #274). On two mornings a sync read the night's sleep record while the sleep was still
+going on: the record's end trailed the sync that read it by a few minutes, and the strap's wake
+event (`06 00`) came hours later. A later sync delivered the same session again, ending at the real
+wake. So a stored night's end is not proof that the night is over, and a record can grow between
+fetches. OpenCircuit's rule (decision 58): the newest stored night reaches Apple Health from the
+store only 3 h after its end, and a later copy that overlaps the written night and ends at least
+10 min later replaces it.
 
 ### 21.5 Telling a nap from the night (🔴 recommendation)
 
