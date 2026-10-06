@@ -2354,14 +2354,24 @@ fetches. OpenCircuit's rule (decision 58): the newest stored night reaches Apple
 store only 3 h after its end, and a later copy that overlaps the written night and ends at least
 10 min later replaces it.
 
-How long a night keeps being re-delivered (🟢 own strap, from the app's fetch plan and device
-pulls on four days): the sleep round starts at the earlier of its own cursor and the temperature
-cursor minus 24 h (`HelioFetchPlan.plan`). The strap records skin temperature only while asleep, so
-the temperature cursor stays at the end of the last night's temperature data from the morning until
-the next night's minutes arrive; it does not follow the clock. A full sleep round therefore
-re-delivers the last night, and the one before it when it ended later in the day than the night
-after it, until the next night's temperature minutes move the cursor. An older night is not
-re-delivered.
+How long a night keeps being re-delivered:
+- The app asks for sleep sessions from the earlier of its own sleep cursor and the temperature cursor
+  minus 24 h (`HelioFetchPlan.plan`). The sleep cursor is the last record's session timestamp plus
+  one minute, on the assumption that the strap filters `0x48` by that timestamp; whether it compares
+  `since` against it at all is 🔴 (above). A session timestamp is not the night's end: a record
+  rewritten hours after the wake carries a later one.
+- The temperature cursor is the last temperature minute fetched, held back to the later of the
+  latest night's end and now minus 36 h (`HelioFetchPlan.temperatureCursor`). The strap records skin
+  temperature only while asleep, so the cursor does not follow the clock (🟢 own strap, 25 device
+  pulls: within a few minutes of the newest night's end in 21, later than it in 4).
+- So the **last** night is re-delivered by every full sleep round until the next night's
+  temperature minutes move the cursor (🟢: inside the window in all 25 pulls).
+- The night before it is re-delivered only when its session record's timestamp falls at or after
+  the temperature cursor minus 24 h (🟡: follows from the plan, and is not guaranteed).
+- An older night is not re-delivered.
+- Observed once (🟢 own strap, the first sync after installing the build with decision 58): the
+  first full sleep round re-delivered both the last night and the night before it; each extended
+  its short written copy once and was rewritten in Apple Health once, and nothing further followed.
 
 ### 21.5 Telling a nap from the night (🔴 recommendation)
 
