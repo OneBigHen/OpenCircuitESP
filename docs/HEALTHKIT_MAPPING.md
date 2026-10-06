@@ -8,7 +8,7 @@ device's own timestamps (so historical sync backfills correctly).
 |---|---|---|---|---|
 | Heart rate | `HKQuantityType(.heartRate)` | Quantity | count/min | live + history |
 | Resting heart rate | `.restingHeartRate` | Quantity | count/min | daily, derived on-device (sleep mean → low-activity floor); see notes |
-| HRV (RMSSD) | `.heartRateVariabilitySDNN` | Quantity | ms | ring reports **RMSSD**; written into the SDNN field and **tagged via metadata** (no fake conversion) — see notes. Sourced from **any worn epoch**, not sleep-vitals only (#185) — see below |
+| HRV (RMSSD) | `.heartRateVariabilitySDNN`; on iOS 27+ also `HKQuantityTypeIdentifierHeartRateVariabilityRMSSD` (Health's Recovery HRV) | Quantity | ms | ring reports **RMSSD**; written into the SDNN field and **tagged via metadata** (no fake conversion), and where the OS has the RMSSD type, ALSO written there untagged (decision 59) — see notes. Sourced from **any worn epoch**, not sleep-vitals only (#185) — see below |
 | Blood oxygen (SpO₂) | `.oxygenSaturation` | Quantity | % (0–1.0) | HealthKit wants a fraction |
 | Skin / sleeping-wrist temperature | `.bodyTemperature` | Quantity | °C | general writable temperature type; the ideal `.appleSleepingWristTemperature` is Apple-computed/read-only for third parties, and `.basalBodyTemperature` is hard-wired to Cycle Tracking's BBT chart — see notes |
 | Respiratory rate | `.respiratoryRate` | Quantity | count/min | sourced from **any worn epoch**, not sleep-vitals only (#185) — see below |
@@ -30,7 +30,7 @@ their spec tags until checked on a real strap.
 | `0x01` activity: per-minute steps | `.steps` → `.stepCount` | one sample per minute (or folded per quarter-hour), count as-is | the strap reports **true per-minute counts with a backlog**, unlike the ring's quarter-hour bucket (#192). Don't route these through `StepAccumulator`. Double-counting with the phone is the same trade-off as the ring |
 | `0x3A` resting HR | `.restingHeartRate` → `.restingHeartRate` | bpm, one per day | **device-reported**, unlike the ring's derived `RestingHR`. Write it as-is; skip `RestingHR` derivation for this device |
 | `0x3D` max HR | none | — | **gap**: no HealthKit type. Keep it local (or drop it) |
-| `0x49` HRV (RMSSD) | `.hrvSDNN` → `.heartRateVariabilitySDNN` | ms | strap reports **RMSSD** 🟡 (Amazfit's product-line documentation, which doesn't name the strap; not compared with Zepp's display, `ZEPP_PROTOCOL.md` §6.5); written into the SDNN field and **tagged via metadata** (`OpenCircuitHRVStatistic = "RMSSD"`, no fake conversion), exactly like the ring's — see "HRV: RMSSD stored in the SDNN field" below |
+| `0x49` HRV (RMSSD) | `.hrvSDNN` → `.heartRateVariabilitySDNN` (+ Recovery HRV on iOS 27+) | ms | strap reports **RMSSD** 🟡 (Amazfit's product-line documentation, which doesn't name the strap; not compared with Zepp's display, `ZEPP_PROTOCOL.md` §6.5); written into the SDNN field and **tagged via metadata** (`OpenCircuitHRVStatistic = "RMSSD"`, no fake conversion), exactly like the ring's — see "HRV: RMSSD stored in the SDNN field" below |
 | `0x25` SpO₂ (auto + manual) | `.spo2` → `.oxygenSaturation` | % ÷ 100 (fraction), from the low 7 bits of the value byte | none. `0x26` sleep SpO₂ is optional (Gadgetbridge doesn't store it) |
 | `0x2E` temperature | `.temperature` → `.bodyTemperature` | centi-°C ÷ 100 | per-minute **all day**, not just the sleep window like the ring. Decide whether to write every minute, only the sleep window (matching the ring's #29 behaviour), or a downsampled series. Same skin-vs-core caveat as the ring |
 | `0x38` sleep respiratory rate | `.respiratoryRate` → `.respiratoryRate` | breaths/min as-is | none |
@@ -59,7 +59,7 @@ rules are in `ZeppKit/HelioSyncPolicy.swift`, tested by `HelioSyncPolicyTests`.
 | Steps (activity per-minute) | `StoredStepSample` per minute + `StoredDaily` | yes, additive deltas over their real minute, through the ring's step writer (watermark advances only after the save) |
 | Active / basal energy, resting HR, exercise minutes | derived from the stored HR, as for the ring | yes, the ring's derived writers |
 | Resting HR (`0x3a`, strap-reported) | `.restingHeartRate` (local only) | no: the ring's derived daily writer already writes one per day, and writing both would double it |
-| HRV (`0x49`, RMSSD 🟡) | `.hrvSDNN` | yes, per reading (`HelioHealthPolicy.writesHRV`, decision 44): the RMSSD value in the SDNN field, tagged `OpenCircuitHRVStatistic = "RMSSD"` like the ring's. Readings stored before this shipped backfill on the next flush (the strap's `hk:hrvSDNN` watermark was never advanced), back to the 30-day raw-sample retention |
+| HRV (`0x49`, RMSSD 🟡) | `.hrvSDNN` | yes, per reading (`HelioHealthPolicy.writesHRV`, decision 44): the RMSSD value in the SDNN field, tagged `OpenCircuitHRVStatistic = "RMSSD"` like the ring's. Readings stored before this shipped backfill on the next flush (the strap's `hk:hrvSDNN` watermark was never advanced), back to the 30-day raw-sample retention. On iOS 27+ also Recovery HRV, through the same gates (decision 59; see "HRV: RMSSD stored in the SDNN field") |
 | Sleep (`0x48`) | the strap's own stages → Sleep summary + hypnogram; no invented in-bed span | yes, through `mirrorSettledNight`; a manually edited night is never overwritten. No `SleepStaging` fallback yet (DECISION-GAP, see `HelioSleepSelection`) |
 | Stress (`0x13`) | `.stress`, one 0–100 sample per minute (`ff` skipped), charted through the day (#239). A backfill moves only its fetch watermark back, up to 7 days and never before the strap's ownership start, and only when another build advanced that watermark without storing the minutes (builds 59/60) | **no**: no Health type (`HealthKitWriter.quantityType(for: .stress)` is nil; not in any mirrored-kind list; not exported) |
 | PAI (`0x0d`) | `.pai`, one row per valid record (value = total PAI, at the record's own time, owned rows only). Phone-only history (decision 45): the PAI tile in Today's Your Numbers grid shows the newest row under 48 h old (decision 49; tapping it explains PAI), so the number survives a sync with no `0x0d` record and every relaunch. A backfill moves only its fetch watermark back, up to 7 days, never before the strap's ownership start and never past the 30-day sample retention, and only when another build advanced that watermark without storing the records (builds 59–62). No chart, no trend, no usual range in v1, and not a `TodayTile` | **no**: no Health type (`HealthKitWriter.quantityType(for: .pai)` is nil; not in any mirrored-kind list; not exported) |
@@ -218,11 +218,11 @@ ever refused. Trade-offs: values do not land in the sleeping-wrist chart (that t
 third-party read-only), and `.bodyTemperature`'s chart is normally oral/core — a wrist
 skin reading (~5 °C below core) will look low there. Values stay in °C.
 
-### HRV: RMSSD stored in the SDNN field, labeled via metadata (#37)
+### HRV: RMSSD stored in the SDNN field, labeled via metadata (#37); also Recovery HRV on iOS 27+ (decision 59)
 
 The ring reports HRV as **RMSSD** (`BulkSleep` / `HRV.rmssd`), and so does the Helio Strap
 (`0x49`, 🟡: Amazfit documents its devices' HRV as RMSSD without naming the strap, and no value has
-been compared with Zepp's, `ZEPP_PROTOCOL.md` §6.5), but HealthKit only has a
+been compared with Zepp's, `ZEPP_PROTOCOL.md` §6.5). Before iOS 27 HealthKit had a
 single HRV field, `.heartRateVariabilitySDNN`. RMSSD and SDNN are **not** related by a
 fixed constant (their ratio depends on the RR spectrum), so we do **not** apply a made-up
 conversion. Instead each HRV sample is written to the SDNN field with metadata
@@ -230,6 +230,40 @@ conversion. Instead each HRV sample is written to the SDNN field with metadata
 honest and a reader can tell which statistic it actually is. If a future capture shows the
 ring also reports true SDNN, switch to writing that directly and drop the tag. The tag has no
 per-device branch: both devices are taken as RMSSD, so a device with another statistic would need one.
+
+**iOS 27 and later: Recovery HRV (decision 59, #277).** iOS 27 added an RMSSD type,
+`HKQuantityTypeIdentifierHeartRateVariabilityRMSSD` (ms), the type behind Health's Recovery HRV
+section. Where it exists, every HRV reading the regular copy is offered is ALSO saved there:
+
+- **Where.** Decided by `HKObjectType.quantityType(forIdentifier:)` on the raw identifier returning
+  non-nil (`HealthKitWriter.resolveRecoveryHRVType`), never by an OS version and never through
+  `HKQuantityType(_:)`, which traps on nil. The iOS 26.5 SDK we build with has no Swift symbol for
+  it, hence the raw string. Below iOS 27 nothing changes: same share set, same writes, no switch.
+- **Same gates.** The device's policy (`healthMirroredKinds` / `HelioHealthPolicy.healthMirroredKinds()`,
+  so a strap with `writesHRV` off writes neither copy), `value > 0`, decision 28's ownership and the
+  workout exclusions. `LocalStore` applies them through one shared filter for both sinks.
+- **Same sample, other type.** The stored value in ms, never converted, on the row's own times, naming
+  the same device as the regular copy. No `OpenCircuitHRVStatistic` tag (the type is the statistic)
+  and no `HKMetadataKeySyncIdentifier`.
+- **Own watermark.** `hk:recoveryHRV` per device, beside `hk:hrvSDNN`, advanced only after a confirmed
+  save. Its first run offers every retained HRV reading (30-day raw retention) once; a failure of
+  either copy never holds or moves the other. One more `StoredCursor` row, no schema change.
+- **The regular copy stays, behind a switch.** Profile ▸ Apple Health ▸ "Also write HRV as Heart Rate
+  Variability", on by default, shown only where the RMSSD type exists. Off stops new regular copies
+  only (nothing in Health is deleted) and leaves `hk:hrvSDNN` where it is, so turning it back on
+  offers what was held back.
+- **Authorization.** The type joins `allTypes` only where it exists, so an existing iOS 27 install is
+  asked once more, for the new type, by the #129 re-ask. A refusal shows as "Recovery HRV" in the
+  partial-grant line, and a failing save as its own "Recovery HRV" failure (`recoveryHRV` in
+  `hk.failures.byMetric`), never as the regular HRV's.
+- **On the phone.** The flush log lines (`helio: Health flush …`, the strap's background run line,
+  `[OC] healthKit …`) end in `recoveryHRV=<n>` when it saved and `recoveryHRV=failed` when its save
+  threw, and say nothing about it otherwise. The sync card names it ("Synced to Health: 12 Recovery
+  HRV"). With the switch off, an older regular-HRV failure is left out of the warning (it can't clear
+  while no regular copy is attempted) and comes back if the switch is turned on again.
+- **Not verified.** That Health's Recovery HRV screen shows a third-party sample. Apple hasn't
+  documented it, and its support page says Recovery HRV is sampled while the person is still, while the
+  ring's HRV comes from any worn epoch (#185). Retiring the regular copy waits until a phone shows it.
 
 ### HRV and RR come from ANY worn epoch, not sleep-vitals only (#185)
 

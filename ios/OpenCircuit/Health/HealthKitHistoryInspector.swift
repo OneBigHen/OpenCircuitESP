@@ -22,13 +22,24 @@ struct HealthKitHistoryInspector {
         let missingCapabilities: [String]
     }
 
-    private struct NightWindow: Equatable {
+    struct NightWindow: Equatable {
         let key: Date
         let window: DateInterval
     }
 
     private static let minimumNightDuration: TimeInterval = 3 * 3600
     private static let minimumBaselineNights = SkinTempBaseline.minBaselineNights
+
+    /// Health's RMSSD type where this OS has it (decision 59f), else nil and the report is exactly
+    /// what it was. A stand-in only in tests.
+    var recoveryHRVType: HKQuantityType? = HealthKitWriter.systemRecoveryHRVType
+
+    /// The Recovery HRV row, present only where the type exists. Not a baseline input: the baseline
+    /// reader reads the regular HRV type, which every HRV reading also reaches while its switch is on.
+    static func recoveryHRVCoverage(nightsWithData: Int) -> MetricCoverage {
+        MetricCoverage(title: "Sleep Recovery HRV", nightsWithData: nightsWithData,
+                       minimumBaselineNights: minimumBaselineNights, supportsCurrentBaseline: false)
+    }
 
     func inspectHistoricalCoverage(lookbackDays: Int = 30) async throws -> Report {
         guard HKHealthStore.isHealthDataAvailable() else {
@@ -58,7 +69,7 @@ struct HealthKitHistoryInspector {
                     MetricCoverage(title: "Sleep respiratory rate", nightsWithData: 0,
                                    minimumBaselineNights: Self.minimumBaselineNights,
                                    supportsCurrentBaseline: false),
-                ],
+                ] + (recoveryHRVType == nil ? [] : [Self.recoveryHRVCoverage(nightsWithData: 0)]),
                 missingCapabilities: Self.defaultMissingCapabilities
             )
         }
@@ -98,6 +109,16 @@ struct HealthKitHistoryInspector {
             nights: nights,
             minimumValue: 0
         )
+        var recoveryHRVNights: Int?
+        if let recoveryHRVType {
+            recoveryHRVNights = try await countCoveredNights(
+                type: recoveryHRVType,
+                from: start,
+                to: end,
+                nights: nights,
+                minimumValue: 0
+            )
+        }
 
         return Report(
             lookbackDays: lookbackDays,
@@ -118,7 +139,7 @@ struct HealthKitHistoryInspector {
                 MetricCoverage(title: "Sleep respiratory rate", nightsWithData: rrNights,
                                minimumBaselineNights: Self.minimumBaselineNights,
                                supportsCurrentBaseline: false),
-            ],
+            ] + (recoveryHRVNights.map { [Self.recoveryHRVCoverage(nightsWithData: $0)] } ?? []),
             missingCapabilities: Self.defaultMissingCapabilities
         )
     }
@@ -169,8 +190,17 @@ struct HealthKitHistoryInspector {
         guard !nights.isEmpty else { return 0 }
         let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: .strictStartDate)
         let samples = try await quantitySamples(type: type, predicate: predicate)
+        return Self.coveredNightCount(samples: samples, nights: nights,
+                                      unit: Self.canonicalUnit(for: type, recoveryHRVType: recoveryHRVType),
+                                      minimumValue: minimumValue)
+    }
+
+    /// How many of `nights` hold at least one of `samples` above `minimumValue` in `unit`. Every type
+    /// the check counts goes through here, Recovery HRV included.
+    static func coveredNightCount(samples: [HKQuantitySample], nights: [NightWindow],
+                                  unit: HKUnit, minimumValue: Double) -> Int {
         var covered = Set<Date>()
-        for sample in samples where sample.quantity.doubleValue(for: canonicalUnit(for: type)) > minimumValue {
+        for sample in samples where sample.quantity.doubleValue(for: unit) > minimumValue {
             if let night = nights.first(where: { $0.window.intersects(DateInterval(start: sample.startDate, end: sample.endDate)) }) {
                 covered.insert(night.key)
             }
@@ -178,7 +208,10 @@ struct HealthKitHistoryInspector {
         return covered.count
     }
 
-    private func canonicalUnit(for type: HKQuantityType) -> HKUnit {
+    /// The unit a counted type is read in. Recovery HRV is in ms, like the regular HRV type (an
+    /// incompatible unit would raise an Objective-C exception in `doubleValue(for:)`).
+    static func canonicalUnit(for type: HKQuantityType, recoveryHRVType: HKQuantityType?) -> HKUnit {
+        if let recoveryHRVType, type.isEqual(recoveryHRVType) { return .secondUnit(with: .milli) }
         switch type.identifier {
         case HKQuantityTypeIdentifier.heartRate.rawValue,
              HKQuantityTypeIdentifier.respiratoryRate.rawValue:

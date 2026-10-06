@@ -58,7 +58,7 @@ written to **Apple Health** — nothing is sent to a server.
 
 - ❤️ **Heart rate** — live, all-day, and during workouts
 - 🫀 **Resting heart rate**
-- 📈 **Heart-rate variability (HRV)**
+- 📈 **Heart-rate variability (HRV)** — on iOS 27 and later also as Recovery HRV
 - 🩸 **Blood oxygen (SpO₂)**
 - 🌬️ **Respiratory rate**
 - 🌡️ **Skin temperature** (overnight)
@@ -94,12 +94,13 @@ Strap** is supported (the app looks for that name; the Helio Ring is not tested)
 
 **What works**
 
-- **History sync → Apple Health.** Heart rate, SpO₂, sleep respiratory rate, skin
+- **History sync → Apple Health.** Heart rate, HRV, SpO₂, sleep respiratory rate, skin
   temperature, steps and the strap's own sleep stages, plus active energy, resting heart rate
   and exercise minutes derived from the heart rate the same way as for the ring. Samples are
   written with the strap named as their device ("Helio Strap", Amazfit). Skin temperature is
   written only for minutes inside the strap's own sleep window when the strap was worn, and
-  only between 30 and 42 °C.
+  only between 30 and 42 °C. HRV is written as RMSSD, like the ring's, on Amazfit's statement
+  that its devices measure HRV that way.
 - **Background sync.** With the strap chosen, it syncs without the app being opened, through
   the same mechanisms as the ring: the app's background refresh and processing tasks, the
   optional "Sync after Sleep Focus" filter, and Bluetooth state restoration. iOS decides when
@@ -146,8 +147,6 @@ of it.
 
 **What stays in the app**
 
-- **HRV** is shown in the app but not written to Apple Health yet: Apple Health expects SDNN,
-  and which statistic the strap reports hasn't been verified.
 - **Stress** and **PAI** are shown in the app only: Apple Health has no type for them.
 - The strap's own daily resting heart rate is kept on the phone but not written; Apple Health
   gets one resting heart rate a day, derived from the strap's heart rate like the ring's.
@@ -177,8 +176,7 @@ Wear your RingConn, let OpenCircuit sync it to Apple Health, and get Bevel's or
 Athlytic's recovery, readiness, strain, and sleep insights on top of **ring** data —
 no Oura or Whoop subscription required.
 
-The Helio Strap's data reaches Apple Health the same way, except HRV (see above), so a score
-that needs HRV won't get it from the strap through OpenCircuit yet.
+The Helio Strap's data, HRV included, reaches Apple Health the same way.
 
 ## Local-first by design
 

@@ -36,7 +36,8 @@ struct ContentView: View {
     @State private var mirrorsSleepToHealth = false
     /// Persisted per-metric Health write failures (#135) — a metric whose `save` actually threw
     /// (e.g. a category toggled off in Settings ▸ Health). Surfaced as an amber "hasn't synced" line.
-    @State private var healthWriteFailures: [MetricKind] = []
+    /// Names, so Recovery HRV's own failure (decision 59e) reads as itself, not as the regular HRV.
+    @State private var healthWriteFailureNames: [String] = []
     @Environment(\.openURL) private var openURL
     @State private var lastWrite: String?
     /// Drives the "Bluetooth is off" explainer alert from the connect card's Turn-on-Bluetooth
@@ -2400,7 +2401,7 @@ struct ContentView: View {
         if case .partial(let denied) = healthShareState {
             names.formUnion(HealthKitWriter.friendlyNames(for: denied))
         }
-        names.formUnion(healthWriteFailures.map(\.displayName))
+        names.formUnion(healthWriteFailureNames)
         return names.sorted()
     }
 
@@ -2410,7 +2411,7 @@ struct ContentView: View {
     /// the Health app while away.
     private func refreshHealthShareState() {
         healthShareState = health.shareState
-        healthWriteFailures = HealthKitWriter.healthWriteFailures().keys.sorted { $0.rawValue < $1.rawValue }
+        healthWriteFailureNames = HealthKitWriter.healthWriteFailureNames()
         mirrorsSleepToHealth = health.isSleepShareAuthorized
     }
 
@@ -2528,7 +2529,7 @@ struct ContentView: View {
                 if r.wroteAnything {
                     observability.recordHealthWrite()
                     refreshObservability()
-                    lastWrite = "Synced to Health: \(r.samples) samples"
+                    lastWrite = r.syncedToHealthLead
                         + (r.sleepSegments > 0 ? ", \(r.sleepSegments) sleep segments" : "")
                         + (r.steps > 0 ? ", \(r.steps) steps" : "")
                 }
@@ -2571,8 +2572,9 @@ struct ContentView: View {
                     + (r.distanceM > 0 ? " dist=\(Int(r.distanceM.rounded()))m" : "")
                     + (r.restingDays > 0 ? " rhr=\(r.restingDays)d" : "")
                     + (r.naps > 0 ? " naps=\(r.naps)" : "")
+                    + r.recoveryHRVLogSuffix
                 print("[OC] healthKit WROTE \(summary)")
-                lastWrite = "Synced to Health: \(r.samples) samples"
+                lastWrite = r.syncedToHealthLead
                     + (r.sleepSegments > 0 ? ", \(r.sleepSegments) sleep segments" : "")
                     + (r.steps > 0 ? ", \(r.steps) steps" : "")
                     + (r.distanceM > 0 ? ", \(Int(r.distanceM.rounded()))m est." : "")
@@ -2582,7 +2584,7 @@ struct ContentView: View {
                     + (r.exerciseMinutes > 0 ? ", \(Int(r.exerciseMinutes.rounded())) min exercise (est.)" : "")
                     + (r.naps > 0 ? ", \(r.naps) nap\(r.naps == 1 ? "" : "s")" : "")
             } else {
-                print("[OC] healthKit flush: nothing new to write (authorized=\(health.isShareAuthorized))")
+                print("[OC] healthKit flush: nothing new to write (authorized=\(health.isShareAuthorized))\(r.recoveryHRVLogSuffix)")
             }
         }
     }

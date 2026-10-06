@@ -332,7 +332,8 @@ struct HelioBackgroundRun: Equatable {
         if let result {
             parts.append("\(result.roundsStored) round(s) stored, \(result.roundsFailed) failed, \(result.nights.count) night(s)")
         }
-        if let flush { parts.append("Health samples=\(flush.samples) sleep=\(flush.sleepSegments) steps=\(flush.steps)") }
+        if let flush { parts.append("Health samples=\(flush.samples) sleep=\(flush.sleepSegments) steps=\(flush.steps)"
+            + flush.recoveryHRVLogSuffix) }
         return parts.joined(separator: "; ")
     }
 
