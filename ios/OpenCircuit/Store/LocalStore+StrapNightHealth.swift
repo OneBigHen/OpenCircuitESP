@@ -44,7 +44,9 @@ extension LocalStore {
     /// - the strap owns it (decision 28a, the rule it was stored under);
     /// - it isn't manually edited (the edit reconcile owns those);
     /// - it has a stored hypnogram;
-    /// - it has no Health mirror record for its key, in the zone it was stored in or the current one;
+    /// - it has no Health mirror record for its key, in the zone it was stored in or the current one,
+    ///   or its stored segments extend the record's span (decision 58e, `storedNightAwaitsHealth`);
+    /// - the writer hasn't declined this exact stored hypnogram (#259);
     /// - it began within `strapNightHealthLookback` of `now`;
     /// - a LATER stored night (any device, keyed no later than `now`, #259) exists, or, for the
     ///   newest night itself (decision 57), more than `strapNewestNightHealthBuffer` (3 h) has passed
@@ -95,18 +97,34 @@ extension LocalStore {
     }
 
     /// `row`'s stored hypnogram when the row is a strap night that may still go to Apple Health: the
-    /// strap owns it, it isn't manually edited, it has no mirror record and its hypnogram isn't empty.
+    /// strap owns it, it isn't manually edited, its hypnogram isn't empty, the writer hasn't declined
+    /// this exact hypnogram, and its mirror record allows it (`storedNightAwaitsHealth`: none, or the
+    /// stored night extends the written span, decision 58e).
     private func strapSegmentsAwaitingHealth(_ row: StoredSleepSummary, log: DeviceOwnershipLog,
                                              family: DeviceOwnershipLog.Family) -> [SleepSegment]? {
         guard row.inBedEnd > row.inBedStart, !row.isManuallyEdited,
               log.owner(ofNightFrom: row.inBedStart, to: row.inBedEnd) == family,
-              // Under its stored key's own zone too (#259): a time-zone change must not re-offer
-              // a week of nights Apple Health already holds.
-              !MirroredNightOverlay.hasRecord(storedNight: row.night),
               // The writer declined this exact stored night before (#259): it would again.
               StrapNightDeclinedOverlay.load(storedNight: row.night) != row.hypnogramData else { return nil }
         let segments = SleepHypnogramCodec.decode(row.hypnogramData)
-        return segments.isEmpty ? nil : segments
+        guard let start = segments.map(\.start).min(), let end = segments.map(\.end).max(), end > start,
+              storedNightAwaitsHealth(storedNight: row.night, window: DateInterval(start: start, end: end)) else { return nil }
+        return segments
+    }
+
+    /// Whether the stored night keyed `night`, offered as `window` (its stored segments' span), may go
+    /// to Apple Health as far as its mirror record goes: it has none, in the zone it was stored in or the
+    /// current one (#259: a time-zone change must not re-offer a week of nights Health already holds),
+    /// or `window` extends the written span (decision 58e, 58b's `strapNightExtends` applied to the
+    /// stored night). The exception exists for a night stored over a shorter written one inside its
+    /// settle margin and then re-delivered a little thinner: the merge keeps it, so no sync hands it to
+    /// the flush again. After the writer's rewrite the record's span is the union, which covers the
+    /// stored night, so this is false again and nothing is offered twice. A record that can't be read,
+    /// or has no span, counts as written.
+    func storedNightAwaitsHealth(storedNight night: Date, window: DateInterval) -> Bool {
+        guard MirroredNightOverlay.hasRecord(storedNight: night) else { return true }
+        guard let record = MirroredNightOverlay.record(storedNight: night), record.spanEnd > record.spanStart else { return false }
+        return Self.strapNightExtends(window, written: DateInterval(start: record.spanStart, end: record.spanEnd))
     }
 
     /// The newest stored night key that is not after `now`, from any device: the backstop's guard.
@@ -133,13 +151,17 @@ extension LocalStore {
     ///
     /// What is noted is the stored HYPNOGRAM, not just the night: a night whose stored hypnogram
     /// changes is a different offer, and is offered again. A `failed` write is never noted (it may
-    /// pass next time), and nor is a night with a mirror record. Nothing with an empty ownership log.
+    /// pass next time), and nor is a night whose mirror record keeps it out anyway. A night that
+    /// extends its mirror record IS noted (decision 58e): the backstop offers it despite the record,
+    /// so without the note a writer that keeps declining it (the other device keeps it, or it is
+    /// thinner than its card) would meet it on every strap flush for the whole lookback. Nothing with
+    /// an empty ownership log.
     func noteStrapNightDeclined(_ segments: [SleepSegment]) {
         guard !Self.ownershipLog().isEmpty,
               let start = segments.map(\.start).min(), let end = segments.map(\.end).max(), end > start,
               let row = try? sleepSummaryOverlapping(start: start, end: end),
               !row.hypnogramData.isEmpty,
-              !MirroredNightOverlay.hasRecord(storedNight: row.night),
+              storedNightAwaitsHealth(storedNight: row.night, window: DateInterval(start: start, end: end)),
               SleepHypnogramCodec.decode(row.hypnogramData) == segments else { return }
         StrapNightDeclinedOverlay.save(row.hypnogramData, storedNight: row.night)
     }

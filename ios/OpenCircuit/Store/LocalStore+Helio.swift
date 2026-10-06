@@ -545,7 +545,13 @@ final class HelioStoreSink: HelioHistorySink {
     /// - a row still overlaps `incoming` (re-read as the sync leaves the store);
     /// - the stored row is the strap's too (the loop's ownership check, on the row's own window);
     /// - it isn't manually edited (the edit reconcile owns it) and has a hypnogram;
-    /// - Health has no mirror record for its key (a written night is the mirror's to keep current);
+    /// - Health has no mirror record for its key (a written night is the mirror's to keep current),
+    ///   EXCEPT when the stored night, as offered (its segments' span), extends the written span
+    ///   (decision 58e, 58b's `strapNightExtends`) and the writer hasn't declined that exact stored
+    ///   hypnogram. That is a night stored over a shorter written one inside its settle margin, which
+    ///   the strap then re-delivers a little thinner: kept by the merge, and otherwise never offered
+    ///   again. After the writer's rewrite the mirror span is the union, which covers the row, so a
+    ///   thinner re-delivery is held out again (50a's protection);
     /// - the strap's re-delivered copy has settled as well: the margin is judged on the LATER of the
     ///   two ends, so a stored row that ends early is never sent while the night is still going on.
     /// The strap's score and recorded zone come from the incoming night; the window is the stored
@@ -554,12 +560,15 @@ final class HelioStoreSink: HelioHistorySink {
                                now: Date) -> (night: HelioSleepSelection.Night, key: Date)? {
         guard let row = try? store.sleepSummaryOverlapping(start: incoming.window.start, end: incoming.window.end),
               !row.isManuallyEdited,
-              LocalStore.ownershipLog().owner(ofNightFrom: row.inBedStart, to: row.inBedEnd) == family,
-              store.writtenNightSpan(for: incoming) == nil else { return nil }
+              LocalStore.ownershipLog().owner(ofNightFrom: row.inBedStart, to: row.inBedEnd) == family else { return nil }
         let segments = SleepHypnogramCodec.decode(row.hypnogramData)
         guard let start = segments.map(\.start).min(), let end = segments.map(\.end).max(), end > start,
               SleepHealthGate.isSettled(latestSegmentEnd: max(incoming.segments.map(\.end).max() ?? incoming.window.end, end),
                                         now: now) else { return nil }
+        if let written = store.writtenNightSpan(for: incoming) {
+            guard LocalStore.strapNightExtends(DateInterval(start: start, end: end), written: written),
+                  StrapNightDeclinedOverlay.load(storedNight: row.night) != row.hypnogramData else { return nil }
+        }
         return (HelioSleepSelection.Night(segments: segments, window: DateInterval(start: start, end: end),
                                           strapScore: incoming.strapScore, recordedTimeZone: incoming.recordedTimeZone),
                 row.night)

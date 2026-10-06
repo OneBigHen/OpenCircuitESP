@@ -961,12 +961,15 @@ extension StrapNightHealthTests {
 
     /// One strap flush at `now`: what `HelioConnection.flushStrap` hands the writer (`nights`, a sync's,
     /// then the backstop's), through the writer's own margin gate, each ready night to
-    /// `mirrorSettledNight`. A night that reaches the write step is recorded as written. The spans written.
+    /// `mirrorSettledNight`. A night that reaches the write step is recorded as written; a declined one
+    /// is noted, as the writer's flush does. The spans written.
     private func flush(_ nights: [[SleepSegment]], at now: Date, store: LocalStore) async throws -> [DateInterval] {
         var written: [DateInterval] = []
         for night in HelioConnection.strapNights(nights, store: store, timeline: timeline, now: now)
         where SleepHealthGate.isReadyToWrite(latestSegmentEnd: night.map(\.end).max(), now: now, finalized: false) {
             let outcome = await HealthKitWriter().mirrorSettledNight(local: store, segments: night)
+            // As the writer's flush does (#259): a refusal is noted against the stored hypnogram.
+            if case .declined = outcome { store.noteStrapNightDeclined(night) }
             guard !isUnchanged(outcome) else { continue }
             try recordWrite(night, store: store)
             written.append(span(night))
@@ -1394,5 +1397,131 @@ extension StrapNightHealthTests {
         XCTAssertEqual(try rows(store).map(\.inBedEnd), [hour(6)])
         XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(12)), [])
         XCTAssertEqual(extensionBreadcrumbs(), [])
+    }
+}
+
+// MARK: - Decision 58e (#274, review-275): an extension the merge then keeps still reaches Health
+//
+// A partial night is in Health. The final copy extends it and is first stored inside its settle margin,
+// so that sync's flush holds it. Every later sync re-delivers it a little different (5 min wider at
+// each end, 15 asleep-min fewer: the #253 shape), 58b lets each through, and the merge keeps the stored
+// night. 50a's hand-over and the 50b backstop skipped a night with a mirror record, so Health kept the
+// partial night. Now a stored night that extends its mirror record is offered by both, once.
+
+/// The final night re-delivered a little different: 5 min wider at each end, 15 asleep-min fewer.
+private let finalThinner: [(Double, Double, UInt8)] = [
+    (0.5 - 5.0 / 60, 0.5, awake), (0.5, 2, light), (2, 3, deep), (3, 4.25, rem), (4.25, 4.5, awake), (4.5, 6.5, light),
+    (6.5, 7.5, rem), (7.5, 8 + 50.0 / 60, light), (8 + 50.0 / 60, 8 + 55.0 / 60, awake),
+]
+
+extension StrapNightHealthTests {
+    /// The partial night in Health (the state a write of an in-progress record leaves), then the final
+    /// copy stored at 08:55, inside its margin: its own flush writes nothing.
+    private func finalStoredInsideItsMargin(_ store: LocalStore) async throws {
+        _ = try sync(partialNight, at: hour(6 + 5.0 / 60), store: store)
+        XCTAssertEqual(try recordWrite(try storedHypnogram(store), store: store), partialWindow)
+        let final = try await syncAndFlush(finalNight, at: hour(8 + 55.0 / 60), store: store)
+        XCTAssertEqual(final.result.nights.map(\.window), [finalWindow], "stored")
+        XCTAssertEqual(final.written, [], "held by its margin")
+        XCTAssertEqual(try XCTUnwrap(try rows(store).first).inBedEnd, hour(8 + 50.0 / 60))
+    }
+
+    /// 58e test 1: then every later sync re-delivers it thinner. The first of them after the margin
+    /// hands the stored night over (50a) and the writer replaces the partial night: Health ends with the
+    /// row's span. Nothing after that writes again.
+    func testAnExtensionStoredInsideItsMarginThenReDeliveredThinnerReachesHealth() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try await finalStoredInsideItsMargin(store)
+        let stored = try storedHypnogram(store)
+
+        let first = try await syncAndFlush(finalThinner, at: hour(9.5), store: store)
+        XCTAssertEqual(first.result.nights.map(\.segments), [stored], "the stored night, not the thinner copy")
+        XCTAssertEqual(first.written, [finalWindow])
+        var later: [DateInterval] = []
+        for t in [10.5, 12.0, 15.0] { later += try await syncAndFlush(finalThinner, at: hour(t), store: store).written }
+        for t in [16.0, 24.0, 30.0] { later += try await flush([], at: hour(t), store: store) }
+        XCTAssertEqual(later, [], "written once")
+        XCTAssertEqual(try XCTUnwrap(try rows(store).first).inBedEnd, hour(8 + 50.0 / 60), "the card")
+        XCTAssertEqual(try mirrorSpan(store), finalWindow, "Health")
+    }
+
+    /// 58e test 2: the strap never re-delivers it. The 50b backstop offers it despite its mirror
+    /// record: not before 3 hours after its end (it is the newest night), then once.
+    func testAnExtensionStoredInsideItsMarginAndNeverReDeliveredReachesHealthThroughTheBackstop() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try await finalStoredInsideItsMargin(store)
+        let end = hour(8 + 50.0 / 60)
+        var written: [DateInterval] = []
+        for t in [9.5, 10.5] { written += try await syncAndFlush(nil, at: hour(t), store: store).written }
+        written += try await flush([], at: end.addingTimeInterval(buffer - 1), store: store)
+        XCTAssertEqual(written, [], "the newest night waits its 3 hours")
+        XCTAssertEqual(store.newestStrapNightSettles(timeline: timeline, now: hour(8 + 55.0 / 60)),
+                       end.addingTimeInterval(SleepHealthGate.settleMargin), "and asks for its margin refresh")
+        let offered = try await flush([], at: end.addingTimeInterval(buffer + 1), store: store)
+        XCTAssertEqual(offered, [finalWindow])
+        XCTAssertEqual(try mirrorSpan(store), finalWindow)
+        let again = try await flush([], at: end.addingTimeInterval(buffer + 3600), store: store)
+        XCTAssertEqual(again, [], "once")
+    }
+
+    /// 58e test 3, no loop: after the rewrite the record's span is the union and covers the stored
+    /// night, so neither path offers it again, whether by a flush or a further thinner re-delivery.
+    func testAfterTheRewriteOfAnExtensionNothingOffersItAgain() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try await finalStoredInsideItsMargin(store)
+        let rewrite = try await syncAndFlush(finalThinner, at: hour(9.5), store: store)
+        XCTAssertEqual(rewrite.written, [finalWindow])
+        let key = try XCTUnwrap(try rows(store).first).night
+        XCTAssertFalse(store.storedNightAwaitsHealth(storedNight: key, window: finalWindow), "the exception is false again")
+        let record = mirrorRecord(store, key)
+
+        XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: hour(14)), [], "the backstop")
+        let thinner = try await syncAndFlush(finalThinner, at: hour(14), store: store)
+        XCTAssertEqual(thinner.result.nights.count, 0, "50a")
+        XCTAssertEqual(thinner.written, [])
+        XCTAssertNil(store.newestStrapNightSettles(timeline: timeline, now: hour(9 + 1.0 / 60)), "no refresh asked for")
+        XCTAssertEqual(mirrorRecord(store, key), record)
+    }
+
+    /// 58e test 4, 50a's protection: a re-delivery the merge keeps is handed over only while the stored
+    /// night extends what Health holds. Once Health holds the stored night, a longer but thinner copy
+    /// (past 58b, kept by the merge) is not.
+    func testAKeptReDeliveryIsHandedOverOnlyWhileItsStoredNightExtendsHealth() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try await finalStoredInsideItsMargin(store)
+        let extending = try await syncAndFlush(finalThinner, at: hour(9.5), store: store)
+        XCTAssertEqual(extending.result.nights.map(\.window), [finalWindow], "the stored night extends Health: handed over")
+
+        let longerButThinner: [(Double, Double, UInt8)] = [(0.5, 2, light), (2, 9 + 5.0 / 60, awake)]
+        let kept = try await syncAndFlush(longerButThinner, at: hour(11), store: store)
+        XCTAssertEqual(try XCTUnwrap(try rows(store).first).inBedEnd, hour(8 + 50.0 / 60), "the merge kept the stored night")
+        XCTAssertEqual(kept.result.nights.count, 0, "it doesn't extend Health any more: not handed over")
+        XCTAssertEqual(kept.written, [])
+    }
+
+    /// 58e test 5: a declined extension is offered once, then not on every flush (#259's note now
+    /// covers a night offered despite its mirror record). Declined here as thinner than its card.
+    func testADeclinedExtensionIsNotOfferedOnEveryFlush() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        try await finalStoredInsideItsMargin(store)
+        let row = try XCTUnwrap(try rows(store).first)
+        defer { StrapNightDeclinedOverlay.clear(storedNight: row.night) }
+        row.asleepMin += 60   // the card is fuller than the stored hypnogram: the writer declines it
+        try store.context.save()
+        let stored = try storedHypnogram(store)
+        let end = hour(8 + 50.0 / 60)
+        let first = end.addingTimeInterval(buffer + 1)
+        XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: first), [stored], "offered")
+        let written = try await flush([], at: first, store: store)
+        XCTAssertEqual(written, [], "declined")
+        for later in [first.addingTimeInterval(60), first.addingTimeInterval(86_400)] {
+            XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: later), [], "not again")
+        }
+        XCTAssertEqual(try mirrorSpan(store), partialWindow, "Health keeps what it has")
     }
 }
