@@ -122,6 +122,11 @@ declaration, a setting that has no API, or something that needs a phone and a we
     attached to 1.0 and in the Internal Testers group, with "What to Test" explaining the 7-tap
     unlock (and that the probe is Debug-only). Build 57 is superseded. *Owner:* install build 58
     from TestFlight on a phone with the ring or strap and use it before submitting.
+    *Later TestFlight build (not the submission):* build 73 (master `8d29cc5`, version 1.0) adds the
+    strap in-progress-night fix (#274) and the Recovery HRV write (#277). It was archived with
+    Xcode 26.6, uploaded, VALID, approved for beta testing and added to the Internal and External
+    Testers groups on 2026-10-06. The 1.0 submission above still points at build 58, so the
+    App Store build does not carry either change until a later version ships them.
 13. **Xcode privacy report**: partly done. Checked on 2026-10-03: Liveline 0.7.0 ships its own
     `PrivacyInfo.xcprivacy`, its sources use no network or required-reason API, and the Release
     binary imports no `stat`-family symbol. Checked on the build 58 archive: it contains the app
