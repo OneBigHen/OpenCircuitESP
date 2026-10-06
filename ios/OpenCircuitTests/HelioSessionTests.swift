@@ -1997,11 +1997,12 @@ final class HelioBackgroundSyncTests: XCTestCase {
         UserDefaults.standard.removeObject(forKey: "sleep.mirror.night.\(Calendar.current.startOfDay(for: night).timeIntervalSince1970)")
     }
 
-    /// A night already written to Apple Health stands. Back to bed 40 min after it ended, the next sync
-    /// re-delivers both sessions and 28f would stitch them into a longer night: that night is kept out,
-    /// so the stored night is unchanged and the flush carries no night (no second Health write, no
-    /// silent replacement). Before the night is written, the same sessions do stitch.
-    func testANightAlreadyInHealthIsNotGrownByALaterStitchableSession() async throws {
+    /// Decision 58b (#274): a night already written to Apple Health is replaced only by a night that
+    /// extends it. Back to bed 40 min after it ended, the next sync re-delivers both sessions and 28f
+    /// stitches them into a night 90 min longer: it is stored and handed to the flush, whose writer
+    /// replaces the written night (signature rewrite). Before the night is written, the same sessions
+    /// stitch as before. A re-delivery of the written night alone changes nothing.
+    func testANightAlreadyInHealthIsReplacedOnlyByALaterStitchableSessionThatExtendsIt() async throws {
         for written in [true, false] {
             let store = try makeStore()
             let device = makeStrap()
@@ -2016,6 +2017,13 @@ final class HelioBackgroundSyncTests: XCTestCase {
             if written {
                 // What `mirrorSettledNight` records once the night is in Apple Health.
                 store.setMirroredNight(night: night.night, signature: "written", spanStart: firstWindow.start, spanEnd: firstWindow.end)
+                // The written night re-delivered alone: the same night, nothing new for Health.
+                clock = clock.addingTimeInterval(1800)
+                let again = await service(link, store: store, flushes: { flushes.append($0) })
+                    .run(kind: .appRefresh, timeout: RingBackgroundSyncService.defaultTimeout)
+                XCTAssertEqual(again.ending, .synced)
+                XCTAssertEqual(try store.context.fetch(FetchDescriptor<StoredSleepSummary>()).first?.inBedEnd, firstWindow.end)
+                XCTAssertEqual(store.mirroredNight(night: night.night)?.signature, "written")
             }
             // The back-to-bed session arrives; the strap re-delivers both on the overlapping fetch.
             device.fetchData[.sleepSession] = (stamp(midnight), sessionRecord() + laterSessionRecord())
@@ -2026,17 +2034,11 @@ final class HelioBackgroundSyncTests: XCTestCase {
             let nights = try store.context.fetch(FetchDescriptor<StoredSleepSummary>())
             XCTAssertEqual(nights.count, 1, "one night per key")
             let stored = try XCTUnwrap(nights.first)
-            if written {
-                XCTAssertEqual(stored.inBedStart, firstWindow.start)
-                XCTAssertEqual(stored.inBedEnd, firstWindow.end, "the written night stands")
-                XCTAssertEqual(second.result?.nights.count, 0)
-                XCTAssertEqual(flushes.last?.nights, 0, "no second Health write of the night")
-                XCTAssertEqual(store.mirroredNight(night: night.night)?.signature, "written", "nothing re-mirrored")
-            } else {
-                XCTAssertEqual(stored.inBedStart, firstWindow.start)
-                XCTAssertEqual(stored.inBedEnd, Date(timeIntervalSince1970: midnight + 8 * 3600 + 30 * 60), "not yet written: stitched (28f)")
-                XCTAssertEqual(flushes.last?.nights, 1)
-            }
+            XCTAssertEqual(stored.inBedStart, firstWindow.start)
+            XCTAssertEqual(stored.inBedEnd, Date(timeIntervalSince1970: midnight + 8 * 3600 + 30 * 60), "stitched (28f)")
+            XCTAssertEqual(second.result?.nights.map(\.window), [DateInterval(start: firstWindow.start, end: stored.inBedEnd)],
+                           written ? "it extends the written night (58b)" : "not yet written")
+            XCTAssertEqual(flushes.last?.nights, 1)
         }
     }
 

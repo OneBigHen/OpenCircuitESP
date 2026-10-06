@@ -234,7 +234,7 @@ final class HelioStoreSink: HelioHistorySink {
     private var keptFullerNights: [HelioSleepSelection.Night] = []
     /// Daytime sessions already logged this sync (decision 28c), so a re-run logs each once.
     private var notOvernightLogged: Set<DateInterval> = []
-    /// Sleeps kept out of a night already written to Apple Health (28f), logged once per sync.
+    /// Sleeps kept out of a night already written to Apple Health (28f, 58b), logged once per sync.
     private var keptApartLogged: Set<DateInterval> = []
     /// #231: what the store made of each overnight sleep offered as a night this sync, by window. Only an
     /// overnight sleep another night kept out of its key (`nightKeptOut`) may be judged as a nap.
@@ -246,10 +246,13 @@ final class HelioStoreSink: HelioHistorySink {
 
     /// The strap's link breadcrumbs (`HelioConnection` hands them over); nil in tests.
     private let breadcrumbs: HelioBreadcrumbs?
+    /// Where the store's own sleep breadcrumbs go (`sleep-extend`, decision 58b).
+    private let observability: ObservabilityStore
 
-    init(store: LocalStore, breadcrumbs: HelioBreadcrumbs? = nil) {
+    init(store: LocalStore, breadcrumbs: HelioBreadcrumbs? = nil, observability: ObservabilityStore = ObservabilityStore()) {
         self.store = store
         self.breadcrumbs = breadcrumbs
+        self.observability = observability
     }
 
     func fetchCursors(timeline: SyncDeviceID, now: Date) -> [ZeppFetchType: Date] {
@@ -394,22 +397,39 @@ final class HelioStoreSink: HelioHistorySink {
             && !storedNights.contains(where: { $0.window == night.window }) {
             // Decision 28f stitches sessions 60 min or less apart into one night, so a night can grow
             // after it was written to Apple Health (back to bed within the hour, after the Sleep Focus
-            // finalization or the settle margin let the first part through). The written night stands:
-            // a different night for its key (the stitched one, or another sleep that would replace it)
-            // is kept out, so Health gets no second write of the night and nothing written is silently
-            // replaced. A night not yet written still stitches. The later session is not stored as a
-            // row of its own: it is 60 min or less from the night, so §21.5 makes it part of the main
-            // sleep, never a nap (#231, `storeNaps` never sees it).
+            // finalization or the settle margin let the first part through), and the strap lets the
+            // phone read a night still in progress (decision 58, #274), so a night written early can
+            // be far shorter than the final record. The written night stands against anything that
+            // does not EXTEND it (decision 58b): a different night for its key is kept out unless it
+            // overlaps the written span and ends at least 10 min later (`strapNightExtends`). That
+            // one is stored like any other, and its flush goes through the writer's signature rewrite
+            // (`mirrorSettledNight`: write first, then delete the old span, nap-safe), behind the same
+            // settle margin. Anything else is kept out, so Health gets no second write of it and
+            // nothing written is silently replaced or shortened. A night not yet written still
+            // stitches. The later session is not stored as a row of its own: it is 60 min or less
+            // from the night, so §21.5 makes it part of the main sleep, never a nap (#231,
+            // `storeNaps` never sees it).
+            var extending: DateInterval?
             if let written = store.writtenNightSpan(for: night),
                abs(written.start.timeIntervalSince(night.window.start)) > 1 || abs(written.end.timeIntervalSince(night.window.end)) > 1 {
-                if keptApartLogged.insert(night.window).inserted {
-                    helioLog.notice("helio: sleep \(Self.clockSpan(night.window, in: night.recordedTimeZone), privacy: .public) would change a night already in Apple Health (\(Self.clockSpan(written, in: night.recordedTimeZone), privacy: .public)); the written night stands")
+                guard LocalStore.strapNightExtends(night.window, written: written) else {
+                    if keptApartLogged.insert(night.window).inserted {
+                        helioLog.notice("helio: sleep \(Self.clockSpan(night.window, in: night.recordedTimeZone), privacy: .public) would change a night already in Apple Health (\(Self.clockSpan(written, in: night.recordedTimeZone), privacy: .public)) without extending it; the written night stands")
+                    }
+                    continue
                 }
-                continue
+                extending = written
             }
+            let before = (try? store.sleepSummaryOverlapping(start: night.window.start, end: night.window.end))
+                .map { DateInterval(start: $0.inBedStart, end: max($0.inBedStart, $0.inBedEnd)) }
             let outcome = try store.saveHelioNight(night, device: timeline)
             nightOutcomes[night.window] = outcome
             if outcome == .inserted || outcome == .updated { storedNights.append(night) }
+            // Decision 58b: one breadcrumb per accepted extension, when it changed the stored row. Not
+            // for a kept-out night: every sync re-delivers the last nights, so that one would flood.
+            if let written = extending, outcome == .inserted || outcome == .updated, before != night.window {
+                recordExtension(night, written: written)
+            }
             // Decision 50a (#253): the merge kept the stored night over this re-delivery, so without
             // this nothing offers the night to Health again: its first store can land inside the
             // settle margin, and every later sync re-delivers it a little thinner. Only remember it
@@ -551,6 +571,19 @@ final class HelioStoreSink: HelioHistorySink {
         if let zone { f.timeZone = zone }
         f.dateFormat = "HH:mm"
         return "\(f.string(from: window.start))–\(f.string(from: window.end))"
+    }
+
+    /// Decision 58b (#274): the `sleep-extend` breadcrumb for a night stored over a shorter one already
+    /// in Apple Health: its key and both spans (`HH:mm` in the recorded zone). No health value.
+    private func recordExtension(_ night: HelioSleepSelection.Night, written: DateInterval) {
+        let key = (try? store.sleepSummaryOverlapping(start: night.window.start, end: night.window.end))?.night
+            ?? SleepNightKey.night(inBedStart: night.window.start, inBedEnd: night.window.end)
+        let day = DateFormatter()   // the key is a start of day in the current zone, as stored
+        day.dateFormat = "MM-dd"
+        observability.recordMetricEvent(
+            source: "sleep-extend",
+            detail: "EXTENDED night=\(day.string(from: key)) written=\(Self.clockSpan(written, in: night.recordedTimeZone)) "
+                + "incoming=\(Self.clockSpan(night.window, in: night.recordedTimeZone))")
     }
 
     func finishSync(timeline: SyncDeviceID, now: Date) -> HelioSyncResult {
