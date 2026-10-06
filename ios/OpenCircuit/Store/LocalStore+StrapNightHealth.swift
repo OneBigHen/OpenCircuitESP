@@ -6,8 +6,10 @@ import SwiftData
 // flush carried it. A sync hands a night to its flush only through `HelioSyncResult.nights`, which
 // covers that one sync (and is gone after a relaunch), so a night whose every re-delivery after its
 // first store was kept as thinner, or that any other path left behind, was never offered again.
-// Decision 57 (#262): the newest stored night too: once settled when it ended near the scheduled wake,
-// else 3 hours after its end.
+// Decision 57 (#262): the newest stored night too, 3 hours after its end. Decision 58a (#274) withdrew
+// 57's faster path for a night ending near the scheduled wake: the strap lets the phone read a sleep
+// record while the sleep is still going on, so a stored end near the wake time can be minutes before
+// the sync that read it, hours before the real wake.
 
 extension LocalStore {
 
@@ -15,33 +17,25 @@ extension LocalStore {
     static let strapNightHealthLookback: TimeInterval = 7 * 86_400
 
     /// Decision 57a (#262): how long after its end the NEWEST stored night must have stayed the newest
-    /// before the backstop may claim it, when its end isn't near the sleep schedule's wake time (see
-    /// `strapNewestNightWakeSlack`). Juan's choice (1 h / 3 h / 6 h). A night's first Health write is
-    /// permanent (28f), so don't shorten it without asking Juan.
+    /// before the backstop may claim it, whatever clock time it ended at (decision 58a, #274). Juan's
+    /// choice (1 h / 3 h / 6 h). A night written too early is replaced only by a copy that extends it
+    /// (decision 58b), so don't shorten it without asking Juan.
     static let strapNewestNightHealthBuffer: TimeInterval = 3 * 3600
 
-    /// Decision 57 option B (#262, Juan): a newest night whose end is at least this close before the
-    /// sleep schedule's wake time (or after it) reads as the morning's final wake, and is claimed as
-    /// soon as its settle margin has passed.
-    static let strapNewestNightWakeSlack: TimeInterval = 60 * 60
+    /// Decision 58b (#274): how much later than the night already in Apple Health a re-delivered night
+    /// must end to replace it. The strap re-stages a night's start (and its end by a few minutes)
+    /// between deliveries; that is jitter, not growth. A night still in progress grows by far more
+    /// than this between the sync that read it early and the final record.
+    nonisolated static let strapNightExtensionMinimum: TimeInterval = 10 * 60
 
-    /// The sleep schedule's wake time, in minutes after local midnight: the value
-    /// `BackgroundRefreshScheduler.defaultWindow` reads (06:30 until the person sets one).
-    nonisolated static func scheduledWakeMinutes(_ defaults: UserDefaults = .standard) -> Int {
-        SleepScheduleDefaults.register(defaults)
-        return defaults.integer(forKey: SleepScheduleDefaults.wakeMinutes)
-    }
-
-    /// Whether a night that ended at `end` ended near the morning's final wake: at or after the
-    /// schedule's wake time minus `strapNewestNightWakeSlack`, and before noon (28d's wake window,
-    /// `SleepNightKey.wakeWindowEndHour`), in `calendar`'s zone. The noon bound keeps a time of day
-    /// read in another zone than the night's (after travel; stored rows keep no zone) from passing as
-    /// a morning. Wake times inside the slack of midnight make every morning end pass.
-    nonisolated static func strapNightEndsNearScheduledWake(_ end: Date, wakeMinutes: Int, calendar: Calendar = .current) -> Bool {
-        let clock = calendar.dateComponents([.hour, .minute], from: end)
-        let hour = clock.hour ?? 0
-        guard hour < SleepNightKey.wakeWindowEndHour else { return false }
-        return hour * 60 + (clock.minute ?? 0) >= wakeMinutes - Int(strapNewestNightWakeSlack / 60)
+    /// Decision 58b (#274): whether `incoming` extends the night already written to Apple Health
+    /// (`written`, its mirror record's span), so that it may replace it: the two overlap (touching
+    /// edges don't) and `incoming` ends at least `strapNightExtensionMinimum` after `written` does.
+    /// A night that ends earlier, at the same time or less than 10 minutes later, or that only starts
+    /// differently, doesn't.
+    nonisolated static func strapNightExtends(_ incoming: DateInterval, written: DateInterval) -> Bool {
+        incoming.start < written.end && written.start < incoming.end
+            && incoming.end >= written.end.addingTimeInterval(strapNightExtensionMinimum)
     }
 
     /// The stored hypnograms of the strap's nights that never reached Apple Health, for
@@ -50,28 +44,27 @@ extension LocalStore {
     /// - the strap owns it (decision 28a, the rule it was stored under);
     /// - it isn't manually edited (the edit reconcile owns those);
     /// - it has a stored hypnogram;
-    /// - it has no Health mirror record for its key, in the zone it was stored in or the current one;
+    /// - it has no Health mirror record for its key, in the zone it was stored in or the current one,
+    ///   or its stored segments extend the record's span (decision 58e, `storedNightAwaitsHealth`);
+    /// - the writer hasn't declined this exact stored hypnogram (#259);
     /// - it began within `strapNightHealthLookback` of `now`;
     /// - a LATER stored night (any device, keyed no later than `now`, #259) exists, or, for the
-    ///   newest night itself (decision 57), one of two paths holds. Its end is the later of the row's `inBedEnd` and its hypnogram's last
-    ///   segment.
-    ///   - Its end is near the morning's final wake (`strapNightEndsNearScheduledWake`, from the sleep
-    ///     schedule's wake time, `wakeMinutes`), and its 20-minute settle margin has passed
-    ///     (`SleepHealthGate.isSettled`, the margin every other write path uses).
-    ///   - Otherwise, more than `strapNewestNightHealthBuffer` (3 h) has passed since its end.
+    ///   newest night itself (decision 57), more than `strapNewestNightHealthBuffer` (3 h) has passed
+    ///   since its end. Its end is the later of the row's `inBedEnd` and its hypnogram's last segment.
     ///
-    /// Why two paths: the strap delivers a sleep only once it has ended, and 28f stitches sessions up
-    /// to an hour apart (a longer later sleep replaces the row). After a mid-night awakening (stored
-    /// 23:00–02:00, back to bed at 02:30), the margin alone would let the 02:20 margin refresh write
-    /// the first part, and "the written night stands" would keep the whole night out for good. A
-    /// night that ends near the scheduled wake is the common morning case, and goes as soon as it has
-    /// settled; one that ends far earlier waits the 3 hours.
+    /// Why the newest night waits 3 hours, whatever clock time it ended at (decision 58a, #274): a
+    /// stored newest night can be a night still in progress. The strap lets the phone read its sleep
+    /// record while the sleep goes on, so a sync can store an end minutes before the sync itself and
+    /// hours before the real wake; and after a mid-night awakening (stored 23:00–02:00, back to bed at
+    /// 02:30), 28f stitches the later sleep into the night. Decision 57d's faster path (once settled,
+    /// for an end near the sleep schedule's wake time) wrote such a partial night on a later short
+    /// sync. The sync that carries the final night still offers it through its own nights, behind the
+    /// settle margin, and that copy replaces a shorter written one (decision 58b).
     ///
     /// `now` must be the real wall clock at the check (`flushStrap`'s default), never a sync's start.
     ///
     /// Empty with an empty ownership log (a ring-only install): no query runs.
-    func strapNightsAwaitingHealth(timeline: SyncDeviceID, now: Date,
-                                   wakeMinutes: Int = LocalStore.scheduledWakeMinutes()) -> [[SleepSegment]] {
+    func strapNightsAwaitingHealth(timeline: SyncDeviceID, now: Date) -> [[SleepSegment]] {
         let log = Self.ownershipLog()
         guard !log.isEmpty, let newest = newestSleepNightKey(notAfter: now) else { return [] }
         let family = DeviceOwnershipLog.Family(timeline: timeline)
@@ -83,10 +76,6 @@ extension LocalStore {
             guard let segments = strapSegmentsAwaitingHealth(row, log: log, family: family) else { return nil }
             if row.night < newest { return segments }
             let end = max(row.inBedEnd, segments.map(\.end).max() ?? row.inBedEnd)
-            if Self.strapNightEndsNearScheduledWake(end, wakeMinutes: wakeMinutes),
-               SleepHealthGate.isSettled(latestSegmentEnd: end, now: now) {
-                return segments
-            }
             return now.timeIntervalSince(end) > Self.strapNewestNightHealthBuffer ? segments : nil
         }
     }
@@ -108,18 +97,34 @@ extension LocalStore {
     }
 
     /// `row`'s stored hypnogram when the row is a strap night that may still go to Apple Health: the
-    /// strap owns it, it isn't manually edited, it has no mirror record and its hypnogram isn't empty.
+    /// strap owns it, it isn't manually edited, its hypnogram isn't empty, the writer hasn't declined
+    /// this exact hypnogram, and its mirror record allows it (`storedNightAwaitsHealth`: none, or the
+    /// stored night extends the written span, decision 58e).
     private func strapSegmentsAwaitingHealth(_ row: StoredSleepSummary, log: DeviceOwnershipLog,
                                              family: DeviceOwnershipLog.Family) -> [SleepSegment]? {
         guard row.inBedEnd > row.inBedStart, !row.isManuallyEdited,
               log.owner(ofNightFrom: row.inBedStart, to: row.inBedEnd) == family,
-              // Under its stored key's own zone too (#259): a time-zone change must not re-offer
-              // a week of nights Apple Health already holds.
-              !MirroredNightOverlay.hasRecord(storedNight: row.night),
               // The writer declined this exact stored night before (#259): it would again.
               StrapNightDeclinedOverlay.load(storedNight: row.night) != row.hypnogramData else { return nil }
         let segments = SleepHypnogramCodec.decode(row.hypnogramData)
-        return segments.isEmpty ? nil : segments
+        guard let start = segments.map(\.start).min(), let end = segments.map(\.end).max(), end > start,
+              storedNightAwaitsHealth(storedNight: row.night, window: DateInterval(start: start, end: end)) else { return nil }
+        return segments
+    }
+
+    /// Whether the stored night keyed `night`, offered as `window` (its stored segments' span), may go
+    /// to Apple Health as far as its mirror record goes: it has none, in the zone it was stored in or the
+    /// current one (#259: a time-zone change must not re-offer a week of nights Health already holds),
+    /// or `window` extends the written span (decision 58e, 58b's `strapNightExtends` applied to the
+    /// stored night). The exception exists for a night stored over a shorter written one inside its
+    /// settle margin and then re-delivered a little thinner: the merge keeps it, so no sync hands it to
+    /// the flush again. After the writer's rewrite the record's span is the union, which covers the
+    /// stored night, so this is false again and nothing is offered twice. A record that can't be read,
+    /// or has no span, counts as written.
+    func storedNightAwaitsHealth(storedNight night: Date, window: DateInterval) -> Bool {
+        guard MirroredNightOverlay.hasRecord(storedNight: night) else { return true }
+        guard let record = MirroredNightOverlay.record(storedNight: night), record.spanEnd > record.spanStart else { return false }
+        return Self.strapNightExtends(window, written: DateInterval(start: record.spanStart, end: record.spanEnd))
     }
 
     /// The newest stored night key that is not after `now`, from any device: the backstop's guard.
@@ -146,13 +151,17 @@ extension LocalStore {
     ///
     /// What is noted is the stored HYPNOGRAM, not just the night: a night whose stored hypnogram
     /// changes is a different offer, and is offered again. A `failed` write is never noted (it may
-    /// pass next time), and nor is a night with a mirror record. Nothing with an empty ownership log.
+    /// pass next time), and nor is a night whose mirror record keeps it out anyway. A night that
+    /// extends its mirror record IS noted (decision 58e): the backstop offers it despite the record,
+    /// so without the note a writer that keeps declining it (the other device keeps it, or it is
+    /// thinner than its card) would meet it on every strap flush for the whole lookback. Nothing with
+    /// an empty ownership log.
     func noteStrapNightDeclined(_ segments: [SleepSegment]) {
         guard !Self.ownershipLog().isEmpty,
               let start = segments.map(\.start).min(), let end = segments.map(\.end).max(), end > start,
               let row = try? sleepSummaryOverlapping(start: start, end: end),
               !row.hypnogramData.isEmpty,
-              !MirroredNightOverlay.hasRecord(storedNight: row.night),
+              storedNightAwaitsHealth(storedNight: row.night, window: DateInterval(start: start, end: end)),
               SleepHypnogramCodec.decode(row.hypnogramData) == segments else { return }
         StrapNightDeclinedOverlay.save(row.hypnogramData, storedNight: row.night)
     }

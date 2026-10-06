@@ -96,8 +96,23 @@ stores and writes what it measured for time it owned:
     that owned its start (the strap). A nap never displaces a night: naps are judged after the
     sync's nights are stored, `saveNap` refuses one that overlaps a stored night, and a night stored
     later prunes an auto nap it overlaps, so the ring's night after a switch is kept either way;
-  - a strap night already written to Health stands: a later sync can't grow it by stitching or
-    replace it with another sleep for its key (#225); a night not yet written still stitches;
+  - a strap night already written to Health stands against anything that does not extend it (#225,
+    narrowed by decision 58b, #274): a later night for its key replaces it only when it overlaps the
+    written span and ends at least 10 min later (`LocalStore.strapNightExtends`). That one is stored
+    like any other and reaches the flush behind the same settle margin, where the writer's signature
+    rewrite (`mirrorSettledNight`: write first, then delete the old span, own samples only, naps and
+    the other device's nights excluded) replaces the written night. One `sleep-extend` breadcrumb is
+    left per accepted extension that changes the stored night (so a night whose in-progress copies
+    keep growing can leave several), none for a night kept out. A night whose window equals the
+    written span (within 1 s) passes through as before: if its stages differ the writer rewrites
+    Health, if they are identical it does nothing. Anything else (an earlier or under-10-min-later
+    end, a different start only, no overlap, or a thinner night the merge keeps out) is kept out as
+    before. A stored night that extends the written span is offered even when the merge kept it over
+    a later, slightly different re-delivery, by the sync's hand-over (50a) and by the store backstop
+    (50b) alike (decision 58e); after the rewrite the written span covers it and it is not offered
+    again, and a declined offer is noted like any other (#259). Why: the strap lets the phone read a
+    night still in progress, so a night written early could be hours short and was then locked in.
+    A night not yet written still stitches;
   - the strap's gate is the ring's pass 1 only: the ring's second pass (a night whose onset was
     never recorded, `onsetIsUnobserved:`) needs its epoch archive's evidence of a hole, which the
     strap has no equivalent of, so a strap session recorded only from 06:00 is not a night;
