@@ -26,7 +26,7 @@ extension LocalStore {
     /// must end to replace it. The strap re-stages a night's start (and its end by a few minutes)
     /// between deliveries; that is jitter, not growth. A night still in progress grows by far more
     /// than this between the sync that read it early and the final record.
-    static let strapNightExtensionMinimum: TimeInterval = 10 * 60
+    nonisolated static let strapNightExtensionMinimum: TimeInterval = 10 * 60
 
     /// Decision 58b (#274): whether `incoming` extends the night already written to Apple Health
     /// (`written`, its mirror record's span), so that it may replace it: the two overlap (touching
