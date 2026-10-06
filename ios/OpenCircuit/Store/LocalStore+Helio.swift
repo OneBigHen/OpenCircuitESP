@@ -425,8 +425,9 @@ final class HelioStoreSink: HelioHistorySink {
             let outcome = try store.saveHelioNight(night, device: timeline)
             nightOutcomes[night.window] = outcome
             if outcome == .inserted || outcome == .updated { storedNights.append(night) }
-            // Decision 58b: one breadcrumb per accepted extension, when it changed the stored row. Not
-            // for a kept-out night: every sync re-delivers the last nights, so that one would flood.
+            // Decision 58b: one breadcrumb per accepted extension, when it changed the stored row (so
+            // several for one night whose in-progress copies keep growing). Not for a kept-out night:
+            // every full sleep round re-delivers the last night or two, so that one would flood.
             if let written = extending, outcome == .inserted || outcome == .updated, before != night.window {
                 recordExtension(night, written: written)
             }

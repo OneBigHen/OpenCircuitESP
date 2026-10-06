@@ -2354,6 +2354,15 @@ fetches. OpenCircuit's rule (decision 58): the newest stored night reaches Apple
 store only 3 h after its end, and a later copy that overlaps the written night and ends at least
 10 min later replaces it.
 
+How long a night keeps being re-delivered (🟢 own strap, from the app's fetch plan and device
+pulls on four days): the sleep round starts at the earlier of its own cursor and the temperature
+cursor minus 24 h (`HelioFetchPlan.plan`). The strap records skin temperature only while asleep, so
+the temperature cursor stays at the end of the last night's temperature data from the morning until
+the next night's minutes arrive; it does not follow the clock. A full sleep round therefore
+re-delivers the last night, and the one before it when it ended later in the day than the night
+after it, until the next night's temperature minutes move the cursor. An older night is not
+re-delivered.
+
 ### 21.5 Telling a nap from the night (🔴 recommendation)
 
 Until §10 item 29 finds a marker in the record, apply Amazfit's rule on the phone:
