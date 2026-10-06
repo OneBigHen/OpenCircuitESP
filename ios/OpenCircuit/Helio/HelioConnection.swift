@@ -417,7 +417,7 @@ final class HelioConnection: NSObject {
         }
         let flush = await flushStrap(HealthKitWriter(), store: store, timeline: timeline,
                                      nights: nights.map(\.segments), nightsFinalized: finalized)
-        helioLog.notice("helio: Health flush samples=\(flush.samples, privacy: .public) sleep=\(flush.sleepSegments, privacy: .public) steps=\(flush.steps, privacy: .public) rhr=\(flush.restingDays, privacy: .public)")
+        helioLog.notice("helio: Health flush samples=\(flush.samples, privacy: .public) sleep=\(flush.sleepSegments, privacy: .public) steps=\(flush.steps, privacy: .public) rhr=\(flush.restingDays, privacy: .public)\(flush.recoveryHRVLogSuffix, privacy: .public)")
         return flush
     }
 

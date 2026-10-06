@@ -475,8 +475,14 @@ final class HealthKitWriter {
 
     /// Names of everything whose Health save is failing, for the "aren't reaching Apple Health"
     /// warning: each failing metric's `displayName`, plus "Recovery HRV" for its own sink.
-    static func healthWriteFailureNames(_ defaults: UserDefaults = .standard) -> [String] {
-        var names = healthWriteFailures(defaults).keys.map(\.displayName)
+    ///
+    /// With the regular-HRV switch off (only where Recovery HRV exists, decision 59c) no regular HRV
+    /// copy is attempted, so its last failure could never clear: it is left out of the names. The map
+    /// keeps it, so turning the switch back on shows it again until a regular HRV save succeeds.
+    static func healthWriteFailureNames(_ defaults: UserDefaults = .standard,
+                                        recoveryHRVType: HKQuantityType? = systemRecoveryHRVType) -> [String] {
+        let regularHRVOff = recoveryHRVType != nil && !RecoveryHRVDefaults.writesRegularCopy(defaults)
+        var names = healthWriteFailures(defaults).keys.filter { !(regularHRVOff && $0 == .hrvSDNN) }.map(\.displayName)
         if recoveryHRVWriteFailure(defaults) != nil { names.append(recoveryHRVName) }
         return names.sorted()
     }

@@ -2529,7 +2529,7 @@ struct ContentView: View {
                 if r.wroteAnything {
                     observability.recordHealthWrite()
                     refreshObservability()
-                    lastWrite = "Synced to Health: \(r.samples) samples"
+                    lastWrite = r.syncedToHealthLead
                         + (r.sleepSegments > 0 ? ", \(r.sleepSegments) sleep segments" : "")
                         + (r.steps > 0 ? ", \(r.steps) steps" : "")
                 }
@@ -2572,8 +2572,9 @@ struct ContentView: View {
                     + (r.distanceM > 0 ? " dist=\(Int(r.distanceM.rounded()))m" : "")
                     + (r.restingDays > 0 ? " rhr=\(r.restingDays)d" : "")
                     + (r.naps > 0 ? " naps=\(r.naps)" : "")
+                    + r.recoveryHRVLogSuffix
                 print("[OC] healthKit WROTE \(summary)")
-                lastWrite = "Synced to Health: \(r.samples) samples"
+                lastWrite = r.syncedToHealthLead
                     + (r.sleepSegments > 0 ? ", \(r.sleepSegments) sleep segments" : "")
                     + (r.steps > 0 ? ", \(r.steps) steps" : "")
                     + (r.distanceM > 0 ? ", \(Int(r.distanceM.rounded()))m est." : "")
@@ -2583,7 +2584,7 @@ struct ContentView: View {
                     + (r.exerciseMinutes > 0 ? ", \(Int(r.exerciseMinutes.rounded())) min exercise (est.)" : "")
                     + (r.naps > 0 ? ", \(r.naps) nap\(r.naps == 1 ? "" : "s")" : "")
             } else {
-                print("[OC] healthKit flush: nothing new to write (authorized=\(health.isShareAuthorized))")
+                print("[OC] healthKit flush: nothing new to write (authorized=\(health.isShareAuthorized))\(r.recoveryHRVLogSuffix)")
             }
         }
     }
