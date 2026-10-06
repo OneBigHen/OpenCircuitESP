@@ -232,10 +232,14 @@ foreground flush also counts the newest stored strap night that hasn't reached A
 is inside its margin, even when its sync no longer carries it (decision 57b, #262). Without that, an
 app opened just after a background wake stored the night cleared that wake's refresh. Every strap
 flush also offers the newest stored night from the store (`LocalStore.strapNightsAwaitingHealth`,
-decision 57). A night that ended near the sleep schedule's wake time (no earlier than an hour before
-it, and before noon) goes once its margin has passed, so that refresh writes it. One that ended
-earlier, such as a mid-night awakening that may still be stitched to a later sleep (28f), waits until
-3 h after its end. The ring's requests are unchanged.
+decision 57) once 3 h have passed since its end, whatever clock time it ended at (decision 58a,
+#274). The strap lets the phone read a sleep record while the sleep is still going on, so a stored
+end can be minutes before the sync that read it and hours before the real wake; and a mid-night
+awakening may still be stitched to a later sleep (28f). Decision 57d's faster path for an end near
+the sleep schedule's wake time wrote such partial nights and was withdrawn. A sync that carries the
+final night still hands it to its flush behind the settle margin, so the margin refresh writes it,
+and a longer copy replaces a shorter night already written (decision 58b, `HEALTHKIT_MAPPING.md`).
+The ring's requests are unchanged.
 
 **Opening the app syncs an idle strap session** (review-225e SF-1): a link that came back in the
 background (a teardown's re-arm, a reconnect or restoration inside the wake gates, a connect that

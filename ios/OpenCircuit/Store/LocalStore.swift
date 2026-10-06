@@ -580,6 +580,15 @@ enum MirroredNightOverlay {
         return exact != key(night) && UserDefaults.standard.data(forKey: exact) != nil
     }
 
+    /// The mirror record for a STORED night key, looked up as `hasRecord` does (the current zone's
+    /// key, then the stored key's exact instant); nil when there is none or it can't be read.
+    static func record(storedNight night: Date) -> MirroredNightRecord? {
+        if let record = load(night: night) { return record }
+        let exact = "sleep.mirror.night.\(night.timeIntervalSince1970)"
+        guard exact != key(night), let data = UserDefaults.standard.data(forKey: exact) else { return nil }
+        return try? JSONDecoder().decode(MirroredNightRecord.self, from: data)
+    }
+
     /// One-shot night-key migration hook — see `moveNightScopedDefault`. Without it every migrated
     /// night would look "never mirrored", and the next flush would delete-and-replace it in Apple
     /// Health for no reason.

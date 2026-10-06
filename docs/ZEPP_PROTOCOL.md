@@ -2326,8 +2326,9 @@ the Zepp app) is the day's **main sleep**; with no plan, the window is **00:00�
 
 ### 21.4 When a session record exists, and re-fetching it
 
-- 🔴 Whether the strap writes a session record only after the session ends, or also while it is
-  in progress, is unknown for Zepp OS. On another vendor's band, Gadgetbridge has fetched an
+- Whether the strap writes a session record only after the session ends, or also while it is
+  in progress, was 🔴 unknown for Zepp OS. For the Helio Strap it is also while it is in progress
+  (🟢, observed below). On another vendor's band, Gadgetbridge has fetched an
   in-progress sleep file at 04:25 and never received the completed night. Its maintainer's fix
   idea was to stop marking such a file synced (`GB#6484`, Xiaomi, 2026-07-28 to 2026-08-26). Also, a nap can
   only be told apart from a main sleep once the main sleep is known (§21.1).
@@ -2343,6 +2344,34 @@ the Zepp app) is the day's **main sleep**; with no plan, the window is **00:00�
   record with the same key arrives with different content.
 - After a `06 00` wake event (§16.2), expect the night's record to be late or partial. Fetch again
   later.
+
+**Observed: the Helio Strap exposes an in-progress `0x48` record** (🟢 own strap, 2026-10-05 and
+2026-10-06; #274). On two mornings a sync read the night's sleep record while the sleep was still
+going on: the record's end trailed the sync that read it by a few minutes, and the strap's wake
+event (`06 00`) came hours later. A later sync delivered the same session again, ending at the real
+wake. So a stored night's end is not proof that the night is over, and a record can grow between
+fetches. OpenCircuit's rule (decision 58): the newest stored night reaches Apple Health from the
+store only 3 h after its end, and a later copy that overlaps the written night and ends at least
+10 min later replaces it.
+
+How long a night keeps being re-delivered:
+- The app asks for sleep sessions from the earlier of its own sleep cursor and the temperature cursor
+  minus 24 h (`HelioFetchPlan.plan`). The sleep cursor is the last record's session timestamp plus
+  one minute, on the assumption that the strap filters `0x48` by that timestamp; whether it compares
+  `since` against it at all is 🔴 (above). A session timestamp is not the night's end: a record
+  rewritten hours after the wake carries a later one.
+- The temperature cursor is the last temperature minute fetched, held back to the later of the
+  latest night's end and now minus 36 h (`HelioFetchPlan.temperatureCursor`). The strap records skin
+  temperature only while asleep, so the cursor does not follow the clock (🟢 own strap, 25 device
+  pulls: within a few minutes of the newest night's end in 21, later than it in 4).
+- So the **last** night is re-delivered by every full sleep round until the next night's
+  temperature minutes move the cursor (🟢: inside the window in all 25 pulls).
+- The night before it is re-delivered only when its session record's timestamp falls at or after
+  the temperature cursor minus 24 h (🟡: follows from the plan, and is not guaranteed).
+- An older night is not re-delivered.
+- Observed once (🟢 own strap, the first sync after installing the build with decision 58): the
+  first full sleep round re-delivered both the last night and the night before it; each extended
+  its short written copy once and was rewritten in Apple Health once, and nothing further followed.
 
 ### 21.5 Telling a nap from the night (🔴 recommendation)
 
