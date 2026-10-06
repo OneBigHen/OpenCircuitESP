@@ -36,7 +36,8 @@ struct ContentView: View {
     @State private var mirrorsSleepToHealth = false
     /// Persisted per-metric Health write failures (#135) — a metric whose `save` actually threw
     /// (e.g. a category toggled off in Settings ▸ Health). Surfaced as an amber "hasn't synced" line.
-    @State private var healthWriteFailures: [MetricKind] = []
+    /// Names, so Recovery HRV's own failure (decision 59e) reads as itself, not as the regular HRV.
+    @State private var healthWriteFailureNames: [String] = []
     @Environment(\.openURL) private var openURL
     @State private var lastWrite: String?
     /// Drives the "Bluetooth is off" explainer alert from the connect card's Turn-on-Bluetooth
@@ -2400,7 +2401,7 @@ struct ContentView: View {
         if case .partial(let denied) = healthShareState {
             names.formUnion(HealthKitWriter.friendlyNames(for: denied))
         }
-        names.formUnion(healthWriteFailures.map(\.displayName))
+        names.formUnion(healthWriteFailureNames)
         return names.sorted()
     }
 
@@ -2410,7 +2411,7 @@ struct ContentView: View {
     /// the Health app while away.
     private func refreshHealthShareState() {
         healthShareState = health.shareState
-        healthWriteFailures = HealthKitWriter.healthWriteFailures().keys.sorted { $0.rawValue < $1.rawValue }
+        healthWriteFailureNames = HealthKitWriter.healthWriteFailureNames()
         mirrorsSleepToHealth = health.isSleepShareAuthorized
     }
 

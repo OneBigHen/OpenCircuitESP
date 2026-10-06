@@ -1268,7 +1268,7 @@ struct LocalStore {
             let name = SyncCursorKey.name(fromKey: row.kindRaw, device: SyncDeviceID(rawValue: deviceID))
                 ?? row.kindRaw
             let bareKind = name.hasPrefix(Self.healthCursorPrefix)
-                ? String(name.dropFirst(Self.healthCursorPrefix.count))
+                ? Self.healthWatermarkSourceKind(String(name.dropFirst(Self.healthCursorPrefix.count)))
                 : name
             var latestDescriptor = FetchDescriptor<StoredSample>(
                 predicate: #Predicate { $0.kindRaw == bareKind && $0.deviceID == deviceID && $0.start <= now },
@@ -1408,18 +1408,34 @@ struct LocalStore {
                               kinds: [MetricKind]? = nil) throws -> [QuantitySample] {
         let kinds = kinds ?? Self.healthMirroredKinds
         let cursor = try loadHealthCursor(device: device)
-        let deviceID = device.rawValue
         var out: [QuantitySample] = []
         for kind in Self.healthMirroredKinds where kinds.contains(kind) {
-            let kindRaw = kind.rawValue
-            let last = cursor.last(kind) ?? .distantPast
-            let descriptor = FetchDescriptor<StoredSample>(
-                predicate: #Predicate {
-                    $0.kindRaw == kindRaw && $0.deviceID == deviceID && $0.start > last && $0.value > 0
-                },
-                sortBy: [SortDescriptor(\.start, order: .forward)])
-            out += try context.fetch(descriptor).compactMap(\.sample)
+            out += try healthMirrorRows(kind: kind, device: device, after: cursor.last(kind))
         }
+        return healthMirrorGates(out, device: device, heartRateWatermark: cursor.last(.heartRate))
+    }
+
+    /// `device`'s stored rows of `kind` newer than `last` with a value above zero, oldest→newest: the
+    /// first gate every Health sink applies (the regular copies and Recovery HRV, decision 59a).
+    private func healthMirrorRows(kind: MetricKind, device: SyncDeviceID, after last: Date?) throws -> [QuantitySample] {
+        let kindRaw = kind.rawValue
+        let deviceID = device.rawValue
+        let last = last ?? .distantPast
+        let descriptor = FetchDescriptor<StoredSample>(
+            predicate: #Predicate {
+                $0.kindRaw == kindRaw && $0.deviceID == deviceID && $0.start > last && $0.value > 0
+            },
+            sortBy: [SortDescriptor(\.start, order: .forward)])
+        return try context.fetch(descriptor).compactMap(\.sample)
+    }
+
+    /// The gates after the fetch, shared by every Health sink so they can't drift apart (decision 59a):
+    /// time `device` owned, then the workout readings Health already holds. Sorted oldest→newest.
+    /// `heartRateWatermark` lets the workout filter prune spans the regular heart-rate copy has passed;
+    /// nil prunes nothing.
+    private func healthMirrorGates(_ rows: [QuantitySample], device: SyncDeviceID,
+                                   heartRateWatermark: Date?) -> [QuantitySample] {
+        var out = rows
         // Decision 28: only time `device` owned reaches Apple Health. What it recorded for the other
         // device's time (the ring's catch-up after a switch back) stays in the app. A no-op for a
         // ring-only install (empty log: the ring owns all time).
@@ -1437,8 +1453,50 @@ struct LocalStore {
         // to Health a SECOND time, beside the HKWorkout that already holds them. For a timeline with no
         // span recorded — every ring install until its first workout under this build — `filter`
         // returns `out` untouched.
-        out = WorkoutHealthExclusions().filter(out, device: device, healthWatermark: cursor.last(.heartRate))
+        out = WorkoutHealthExclusions().filter(out, device: device, healthWatermark: heartRateWatermark)
         return out.sorted { $0.start < $1.start }
+    }
+
+    // MARK: Recovery HRV watermark (decision 59b)
+    //
+    // The HRV readings also go to HealthKit's RMSSD type (Recovery HRV) where it exists. That sink has
+    // its own `hk:` row per device, beside `hk:hrvSDNN`, so it backfills from the start of the retained
+    // store on its first run and neither sink's failure moves the other's watermark. One more
+    // `StoredCursor` row: no schema change.
+
+    /// The Recovery HRV watermark's cursor name (an `hk:` row, so the ingest cursor never reads it).
+    static let recoveryHRVHealthCursorName = healthCursorPrefix + "recoveryHRV"
+
+    /// The stored kind a Health watermark row tracks, from its name without the `hk:` prefix: the kind
+    /// itself, or HRV for Recovery HRV's row.
+    static func healthWatermarkSourceKind(_ bareName: String) -> String {
+        bareName == String(recoveryHRVHealthCursorName.dropFirst(healthCursorPrefix.count))
+            ? MetricKind.hrvSDNN.rawValue : bareName
+    }
+
+    /// `device`'s stored HRV readings not yet in Recovery HRV, oldest→newest, through exactly the
+    /// regular copy's gates (`value > 0`, decision 28's ownership, the workout exclusions). With no
+    /// watermark yet, every retained reading that passes them (the backfill). Doesn't advance the
+    /// watermark (`markRecoveryHRVHealthWritten` does, after a confirmed save).
+    func pendingRecoveryHRVHealthSamples(device: SyncDeviceID = .ringConn) throws -> [QuantitySample] {
+        let rows = try healthMirrorRows(kind: .hrvSDNN, device: device, after: recoveryHRVHealthWatermark(device: device))
+        return healthMirrorGates(rows, device: device, heartRateWatermark: nil)
+    }
+
+    /// Advance `device`'s Recovery HRV watermark to the newest start among `samples` (the readings that
+    /// saved). Forward only.
+    func markRecoveryHRVHealthWritten(_ samples: [QuantitySample], device: SyncDeviceID = .ringConn) throws {
+        guard let newest = samples.filter({ $0.kind == .hrvSDNN }).map(\.start).max() else { return }
+        if let current = try recoveryHRVHealthWatermark(device: device), current >= newest { return }
+        upsertCursor(name: Self.recoveryHRVHealthCursorName, last: newest, device: device)
+        try context.save()
+    }
+
+    /// `device`'s Recovery HRV watermark, or nil before its first confirmed save.
+    func recoveryHRVHealthWatermark(device: SyncDeviceID = .ringConn) throws -> Date? {
+        let key = SyncCursorKey.key(Self.recoveryHRVHealthCursorName, device: device)
+        let descriptor = FetchDescriptor<StoredCursor>(predicate: #Predicate { $0.kindRaw == key })
+        return try context.fetch(descriptor).first?.last
     }
 
     /// Sleep segments for a night not yet mirrored to Apple Health, gated on the `.sleep`

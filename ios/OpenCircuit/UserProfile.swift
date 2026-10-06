@@ -53,13 +53,16 @@ struct UserProfileSettingsView: View {
     /// not read as a plain "Connected" while those metrics silently never reach Health.
     @State private var healthShareState: HealthKitWriter.ShareState = .unauthorized
     /// Persisted per-metric Health write failures (#135), surfaced here alongside the partial-grant
-    /// state so Profile and the dashboard tell one consistent story.
-    @State private var healthWriteFailures: [MetricKind] = []
+    /// state so Profile and the dashboard tell one consistent story. Names, so Recovery HRV's own
+    /// failure (decision 59e) reads as itself, not as the regular HRV.
+    @State private var healthWriteFailureNames: [String] = []
     /// The one-time iOS permission sheet was already used (declined) — `requestAuthorization`
     /// would silently no-op, so the button must route to the Health app instead. Re-probed on
     /// appear, on foreground return (the user may have just flipped the toggles), and after a
     /// live decline.
     @State private var healthPromptExhausted = false
+    /// Decision 59c: the regular-HRV copy's switch, read by every flush (`RecoveryHRVDefaults`).
+    @AppStorage(RecoveryHRVDefaults.writesRegularCopyKey) private var writesRegularHRV = true
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @State private var historicalReport: HealthKitHistoryInspector.Report?
@@ -328,6 +331,11 @@ struct UserProfileSettingsView: View {
                     }
                 } else {
                     Text("Apple Health isn't available on this device.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if HealthKitWriter.isAvailable, RecoveryHRVCopy.showsSwitch(recoveryHRVType: health.recoveryHRVType) {
+                    Toggle(RecoveryHRVCopy.switchTitle, isOn: $writesRegularHRV)
+                    Text(RecoveryHRVCopy.switchFooter)
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if HealthKitWriter.isAvailable {
@@ -659,7 +667,7 @@ struct UserProfileSettingsView: View {
         // Recompute the honest partial-grant (#132) + persisted write-failure (#135) surfaces at the
         // same points, since the user can flip a type off in the Health app while away.
         healthShareState = health.shareState
-        healthWriteFailures = HealthKitWriter.healthWriteFailures().keys.sorted { $0.rawValue < $1.rawValue }
+        healthWriteFailureNames = HealthKitWriter.healthWriteFailureNames()
         if healthAuthorized {
             healthUnavailable = false
             healthPromptExhausted = false
@@ -727,7 +735,7 @@ struct UserProfileSettingsView: View {
         if case .partial(let denied) = healthShareState {
             names.formUnion(HealthKitWriter.friendlyNames(for: denied))
         }
-        names.formUnion(healthWriteFailures.map(\.displayName))
+        names.formUnion(healthWriteFailureNames)
         return names.sorted()
     }
 

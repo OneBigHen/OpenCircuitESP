@@ -52,6 +52,23 @@ final class HealthKitWriter {
     var quantitySaveOverride: (([HKQuantitySample]) async throws -> Void)?
 #endif
 
+    /// HealthKit's RMSSD type (Health's Recovery HRV, decision 59), or nil where this OS has no such
+    /// type. Resolved once per writer, from the OS (`resolveRecoveryHRVType()`); nil below iOS 27, so
+    /// there every rule that reads it is master's behaviour exactly.
+    let recoveryHRVType: HKQuantityType?
+
+    init() { recoveryHRVType = Self.systemRecoveryHRVType }
+
+#if DEBUG
+    /// Tests only, and DEBUG only: a writer that treats `recoveryHRVType` as the RMSSD type. No iOS 27
+    /// runtime exists on the build host, so this is how the RMSSD path is exercised at all (59g).
+    ///
+    /// ⚠️ NEVER make this available in Release. A type passed here joins `allTypes`, and a read-only
+    /// type in the share set crashes the authorization request (#110, #121); only the OS's own answer
+    /// may decide what the shipped app asks for.
+    init(recoveryHRVType: HKQuantityType?) { self.recoveryHRVType = recoveryHRVType }
+#endif
+
     /// HKQuantityType for a scalar metric, or nil for non-quantity kinds (sleep).
     static func quantityType(for kind: MetricKind) -> HKQuantityType? {
         let id: HKQuantityTypeIdentifier
@@ -119,6 +136,10 @@ final class HealthKitWriter {
         for k in MetricKind.allCases {
             if let t = Self.quantityType(for: k) { set.insert(t) }
         }
+        // Decision 59d: Recovery HRV only where the OS has the type, so the share set below iOS 27 is
+        // exactly the shipped one. It is third-party writable (measured against the iOS 27 framework,
+        // decision 59), unlike the Apple-computed types that crash this request (#110, #121).
+        if let recoveryHRVType { set.insert(recoveryHRVType) }
         set.insert(HKQuantityType(.basalEnergyBurned))
         set.insert(HKCategoryType(.sleepAnalysis))
         // Workout types (#75): HKWorkout + GPS route (workout sessions feature).
@@ -308,11 +329,13 @@ final class HealthKitWriter {
 
     /// User-facing name for a share type, for the partial-grant / failure warnings. Maps quantity
     /// types back through `MetricKind` where possible; a small table covers the non-`MetricKind`
-    /// extras (sleep, energy, cycle tracking, blood pressure, workouts).
-    static func friendlyName(for type: HKSampleType) -> String {
+    /// extras (sleep, energy, cycle tracking, blood pressure, workouts, Recovery HRV).
+    static func friendlyName(for type: HKSampleType,
+                             recoveryHRVType: HKQuantityType? = systemRecoveryHRVType) -> String {
         for k in MetricKind.allCases {
             if let qt = quantityType(for: k), qt.isEqual(type) { return k.displayName }
         }
+        if let recoveryHRVType, type.isEqual(recoveryHRVType) { return recoveryHRVName }
         if type.isEqual(HKCategoryType(.sleepAnalysis)) { return "Sleep" }
         if type.isEqual(HKQuantityType(.basalEnergyBurned)) { return "Resting Energy" }
         if type.isEqual(HKCategoryType(.menstrualFlow)) { return "Cycle Tracking" }
@@ -327,10 +350,12 @@ final class HealthKitWriter {
 
     /// De-duplicated, stably-sorted friendly names for a set of denied/failed types (both BP
     /// constituents collapse to one "Blood Pressure", etc.).
-    static func friendlyNames(for types: [HKSampleType]) -> [String] {
+    static func friendlyNames(for types: [HKSampleType],
+                              recoveryHRVType: HKQuantityType? = systemRecoveryHRVType) -> [String] {
         var seen = Set<String>()
         var out: [String] = []
-        for name in types.map({ friendlyName(for: $0) }).sorted() where seen.insert(name).inserted {
+        for name in types.map({ friendlyName(for: $0, recoveryHRVType: recoveryHRVType) }).sorted()
+        where seen.insert(name).inserted {
             out.append(name)
         }
         return out
@@ -379,6 +404,12 @@ final class HealthKitWriter {
         var exerciseMinutes = 0.0   // estimated exercise minutes written (#82)
         var menstrualFlowEntries = 0  // user-logged period entries written (#78)
         var headacheEntries = 0       // user-logged headache entries written (headache signals P1)
+        /// HRV readings saved to Recovery HRV this pass (decision 59). The same readings may also be
+        /// in `samples`, through the regular copy, so the two are counted apart.
+        var recoveryHRVSamples = 0
+        /// The Recovery HRV save threw this pass (decision 59e). Kept apart from `failures`, which
+        /// names the regular copies: an HRV failure there means the regular HRV type.
+        var recoveryHRVFailed = false
         /// Metrics whose HealthKit `save` actually THREW this pass (#135) — distinct from "nothing
         /// pending". Persisted per-metric so the UI can surface an honest "X hasn't synced" warning
         /// instead of the blanket "Auto-syncing" line. Empty on a clean/idle flush.
@@ -387,7 +418,7 @@ final class HealthKitWriter {
             samples > 0 || sleepSegments > 0 || steps > 0
                 || restingDays > 0 || passiveHours > 0 || activeKcal > 0 || naps > 0
                 || distanceM > 0 || exerciseMinutes > 0 || menstrualFlowEntries > 0
-                || headacheEntries > 0
+                || headacheEntries > 0 || recoveryHRVSamples > 0
         }
     }
 
@@ -407,11 +438,18 @@ final class HealthKitWriter {
 
     /// Merge one flush pass into the persisted failure map: stamp `failed` metrics with `now`, and
     /// clear any `written` metric's flag (a later success wins, so a re-enabled type self-heals).
+    ///
+    /// Recovery HRV (decision 59e) has its own key in the same map, `recoveryHRVFailureKey`, with the
+    /// same rule. So the regular HRV copy succeeding never clears a Recovery HRV failure, and a Recovery
+    /// HRV failure is never reported as the regular copy's.
     static func recordFlushOutcome(written: Set<MetricKind>, failed: Set<MetricKind>,
+                                   recoveryHRVWritten: Bool = false, recoveryHRVFailed: Bool = false,
                                    now: Date = Date(), _ defaults: UserDefaults = .standard) {
         var map = (defaults.dictionary(forKey: failureMapKey) as? [String: Double]) ?? [:]
         for m in failed { map[m.rawValue] = now.timeIntervalSince1970 }
+        if recoveryHRVFailed { map[recoveryHRVFailureKey] = now.timeIntervalSince1970 }
         for m in written { map.removeValue(forKey: m.rawValue) }
+        if recoveryHRVWritten { map.removeValue(forKey: recoveryHRVFailureKey) }
         if map.isEmpty { defaults.removeObject(forKey: failureMapKey) }
         else { defaults.set(map, forKey: failureMapKey) }
     }
@@ -422,6 +460,25 @@ final class HealthKitWriter {
         return map.reduce(into: [:]) { acc, kv in
             if let kind = MetricKind(rawValue: kv.key) { acc[kind] = Date(timeIntervalSince1970: kv.value) }
         }
+    }
+
+    /// The failure map's key for Recovery HRV (decision 59e). Not a `MetricKind` raw value, so
+    /// `healthWriteFailures` never reads it as one.
+    static let recoveryHRVFailureKey = "recoveryHRV"
+
+    /// When the Recovery HRV save last failed, or nil when it isn't failing (decision 59e).
+    static func recoveryHRVWriteFailure(_ defaults: UserDefaults = .standard) -> Date? {
+        guard let map = defaults.dictionary(forKey: failureMapKey) as? [String: Double],
+              let t = map[recoveryHRVFailureKey] else { return nil }
+        return Date(timeIntervalSince1970: t)
+    }
+
+    /// Names of everything whose Health save is failing, for the "aren't reaching Apple Health"
+    /// warning: each failing metric's `displayName`, plus "Recovery HRV" for its own sink.
+    static func healthWriteFailureNames(_ defaults: UserDefaults = .standard) -> [String] {
+        var names = healthWriteFailures(defaults).keys.map(\.displayName)
+        if recoveryHRVWriteFailure(defaults) != nil { names.append(recoveryHRVName) }
+        return names.sorted()
     }
 
     /// Mirror everything pending into Apple Health in one pass — scalar vitals, the night's
@@ -464,18 +521,13 @@ final class HealthKitWriter {
         pendingFlushFailures = []            // per-pass failure accumulator (#135)
         var writtenKinds: Set<MetricKind> = []  // metrics that landed at least one sample this pass
 
-        // Scalars: write, THEN advance the watermark, so a failed save backfills next time. The
-        // write is SPLIT per metric (#132): a single denied type (e.g. SpO₂) no longer sinks the
-        // whole batch — the granted metrics still land and only the denied one is left pending.
-        if let pending = try? store.pendingHealthSamples(device: device, kinds: mirroredKinds), !pending.isEmpty {
-            let outcome = await write(pending, timeline: device)
-            if !outcome.written.isEmpty {
-                try? store.markHealthWritten(outcome.written, device: device)   // advance ONLY for what actually saved
-                result.samples = outcome.written.count
-                writtenKinds.formUnion(outcome.written.map(\.kind))
-            }
-            pendingFlushFailures.formUnion(outcome.failed)
-        }
+        // Scalars, and HRV's Recovery HRV copy (decision 59): see `flushScalars`.
+        let scalars = await flushScalars(store: store, device: device, mirroredKinds: mirroredKinds)
+        result.samples = scalars.regular.written.count
+        writtenKinds.formUnion(scalars.regular.written.map(\.kind))
+        pendingFlushFailures.formUnion(scalars.regular.failed)
+        result.recoveryHRVSamples = scalars.recoveryHRV.written.count
+        result.recoveryHRVFailed = !scalars.recoveryHRV.failed.isEmpty
         // Sleep: mirror the SETTLED night to Health (SleepHealthGate) — with periodic overnight
         // draining the staged night grows as epochs arrive, so an in-progress night is held back
         // behind the quiet margin. A night also routinely RE-STAGES hours after wake (denser data /
@@ -699,7 +751,9 @@ final class HealthKitWriter {
         // three flush entry points surface a consistent "X hasn't synced" state; a same-pass success
         // clears a prior failure so a re-enabled type self-heals. (#135)
         result.failures = pendingFlushFailures
-        Self.recordFlushOutcome(written: writtenKinds, failed: pendingFlushFailures)
+        Self.recordFlushOutcome(written: writtenKinds, failed: pendingFlushFailures,
+                                recoveryHRVWritten: result.recoveryHRVSamples > 0,
+                                recoveryHRVFailed: result.recoveryHRVFailed)
         return result
     }
 
@@ -1199,14 +1253,20 @@ final class HealthKitWriter {
     /// Attribution follows the row (decision 28, #215): samples of a device's timeline (`timeline`)
     /// name that device; untagged samples (steps, distance) name the device that owned their start.
     /// For a ring-only install both are exactly the connected ring, as before.
-    func write(_ samples: [QuantitySample], timeline: SyncDeviceID? = nil) async -> ScalarWriteOutcome {
+    ///
+    /// `sample` builds each row's Health sample from the row and the device named above; the default is
+    /// the regular copy (`quantitySample`). Recovery HRV passes its own builder, so its samples name
+    /// exactly the device the regular copy names (decision 59a).
+    func write(_ samples: [QuantitySample], timeline: SyncDeviceID? = nil,
+               sample: (QuantitySample, HKDevice?) -> HKQuantitySample? = HealthKitWriter.quantitySample)
+        async -> ScalarWriteOutcome {
         var outcome = ScalarWriteOutcome()
         let byKind = Dictionary(grouping: samples, by: \.kind)
         let tagged: HKDevice? = timeline.flatMap { wearableDevice(forTimeline: $0) }
         var owners = OwnerDeviceCache()
         for (kind, group) in byKind {
             let hk: [HKQuantitySample] = group.compactMap { s in
-                Self.quantitySample(s, device: timeline == nil ? owners.device(at: s.start, writer: self) : tagged)
+                sample(s, timeline == nil ? owners.device(at: s.start, writer: self) : tagged)
             }
             guard !hk.isEmpty else { continue }   // no writable HK type for this kind — nothing to save
             do {
