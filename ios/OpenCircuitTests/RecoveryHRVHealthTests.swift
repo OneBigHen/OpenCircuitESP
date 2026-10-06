@@ -140,7 +140,7 @@ final class RecoveryHRVHealthTests: XCTestCase {
         let pending = [QuantitySample(kind: .heartRate, start: at(1), value: 60), hrv(2)]
         for writesRegular in [true, false] {
             for kinds in [nil, HelioHealthPolicy.healthMirroredKinds(writesHRV: true)] {
-                let plan = HealthKitWriter.scalarWritePlan(regularPending: pending, recoveryHRVPending: [hrv(2)],
+                let plan = HealthKitWriter.scalarWritePlan(regularPending: pending, recoveryHRVPending: { [hrv(2)] },
                                                            mirroredKinds: kinds, recoveryHRVType: nil,
                                                            writesRegularHRV: writesRegular)
                 XCTAssertEqual(plan, .init(regular: pending, recoveryHRV: []))
@@ -228,6 +228,54 @@ final class RecoveryHRVHealthTests: XCTestCase {
         XCTAssertEqual(recorder.of(standIn).count, 1)
         XCTAssertEqual(recorder.of(sdnnType).count, 1)
         XCTAssertEqual(shipped.recoveryHRV.written.map(\.start), [at(2)])
+    }
+
+    /// The plan itself withholds Recovery HRV for a policy without HRV, with the type resolved, and
+    /// never even runs the fetch. The same policy with HRV offers the rows (control).
+    func testThePlanWithAResolvedTypeWithholdsRecoveryHRVForAPolicyWithoutHRV() {
+        let pending = [QuantitySample(kind: .heartRate, start: at(1), value: 60)]
+        var fetches = 0
+        let fetch: () -> [QuantitySample] = { fetches += 1; return [self.hrv(2), self.hrv(3)] }
+        for writesRegular in [true, false] {
+            let withheld = HealthKitWriter.scalarWritePlan(
+                regularPending: pending, recoveryHRVPending: fetch,
+                mirroredKinds: HelioHealthPolicy.healthMirroredKinds(writesHRV: false),
+                recoveryHRVType: standIn, writesRegularHRV: writesRegular)
+            XCTAssertEqual(withheld, .init(regular: pending, recoveryHRV: []))
+        }
+        XCTAssertEqual(fetches, 0, "no fetch behind a closed gate")
+
+        let mirrored = HealthKitWriter.scalarWritePlan(
+            regularPending: pending, recoveryHRVPending: fetch,
+            mirroredKinds: HelioHealthPolicy.healthMirroredKinds(writesHRV: true),
+            recoveryHRVType: standIn, writesRegularHRV: true)
+        XCTAssertEqual(mirrored.recoveryHRV, [hrv(2), hrv(3)])
+        XCTAssertEqual(fetches, 1)
+    }
+
+    /// Through the flush: a strap whose `writesHRV` is off saves no Recovery HRV and creates no
+    /// `hk:recoveryHRV` row, with HRV rows in the store, whatever the switch says. The rows stay
+    /// pending for the day the policy mirrors HRV.
+    func testAStrapFlushWithHRVWithheldSavesNoRecoveryHRVAndCreatesNoWatermark() async throws {
+        ownership.install(.strapOwnsAllTime)
+        let store = try makeStore()
+        _ = try store.ingest([hrv(1), QuantitySample(kind: .heartRate, start: at(2), value: 60), hrv(3), hrv(4)],
+                             device: strapTimeline)
+        let writer = HealthKitWriter(recoveryHRVType: standIn)
+        let recorder = SaveRecorder()
+        recorder.install(on: writer)
+        for writesRegular in [true, false] {
+            let outcome = await writer.flushScalars(store: store, device: strapTimeline,
+                                                    mirroredKinds: HelioHealthPolicy.healthMirroredKinds(writesHRV: false),
+                                                    writesRegularHRV: writesRegular)
+            XCTAssertTrue(outcome.recoveryHRV.written.isEmpty)
+            XCTAssertTrue(outcome.recoveryHRV.failed.isEmpty)
+        }
+        XCTAssertTrue(recorder.of(standIn).isEmpty)
+        XCTAssertTrue(recorder.of(sdnnType).isEmpty)
+        XCTAssertFalse(try healthCursorNames(store, device: strapTimeline).contains("hk:recoveryHRV"))
+        XCTAssertNil(try store.recoveryHRVHealthWatermark(device: strapTimeline))
+        XCTAssertEqual(try store.pendingRecoveryHRVHealthSamples(device: strapTimeline).map(\.start), [at(1), at(3), at(4)])
     }
 
     // MARK: T-C: independent watermarks
@@ -461,10 +509,62 @@ final class RecoveryHRVHealthTests: XCTestCase {
         XCTAssertTrue(r.failures.isEmpty)
     }
 
+    /// The flush log lines gain Recovery HRV's result and nothing else: empty on a pass with nothing
+    /// to say, so every line is byte-identical below iOS 27.
+    func testTheLogSuffixNamesRecoveryHRVOnlyWhenThereIsSomethingToSay() {
+        var r = HealthKitWriter.FlushResult()
+        r.samples = 5
+        XCTAssertEqual(r.recoveryHRVLogSuffix, "")
+        r.recoveryHRVSamples = 12
+        XCTAssertEqual(r.recoveryHRVLogSuffix, " recoveryHRV=12")
+        r.recoveryHRVSamples = 0
+        r.recoveryHRVFailed = true
+        XCTAssertEqual(r.recoveryHRVLogSuffix, " recoveryHRV=failed")
+        r.recoveryHRVSamples = 12
+        XCTAssertEqual(r.recoveryHRVLogSuffix, " recoveryHRV=12 recoveryHRV=failed")
+    }
+
+    /// The card's lead is the old string exactly when no Recovery HRV was saved, and names Recovery HRV
+    /// (never adding it into `samples`) when it was, alone when nothing else saved.
+    func testTheSyncCardLeadNamesWhatWasWritten() {
+        var r = HealthKitWriter.FlushResult()
+        r.samples = 7
+        XCTAssertEqual(r.syncedToHealthLead, "Synced to Health: 7 samples")
+        r.recoveryHRVFailed = true
+        XCTAssertEqual(r.syncedToHealthLead, "Synced to Health: 7 samples", "a failure isn't a write")
+        r.recoveryHRVSamples = 12
+        XCTAssertEqual(r.syncedToHealthLead, "Synced to Health: 7 samples, 12 Recovery HRV")
+        r.samples = 0
+        XCTAssertEqual(r.syncedToHealthLead, "Synced to Health: 12 Recovery HRV")
+        r.recoveryHRVSamples = 0
+        XCTAssertEqual(r.syncedToHealthLead, "Synced to Health: 0 samples", "unchanged when Recovery HRV wrote nothing")
+    }
+
+    /// With the regular-HRV switch off where Recovery HRV exists, a regular-HRV failure stamped before
+    /// it can't clear, so it's left out of the warning's names; the map keeps it, and turning the switch
+    /// on again shows it as today. Below iOS 27 (no type) the switch value changes nothing.
+    func testAFrozenRegularHRVFailureIsNotNamedWhileTheSwitchIsOff() {
+        HealthKitWriter.recordFlushOutcome(written: [], failed: [.hrvSDNN, .spo2], recoveryHRVFailed: true,
+                                           now: at(1), defaults)
+        XCTAssertEqual(HealthKitWriter.healthWriteFailureNames(defaults, recoveryHRVType: standIn),
+                       ["HRV", "Recovery HRV", "SpO₂"])
+        defaults.set(false, forKey: RecoveryHRVDefaults.writesRegularCopyKey)
+        XCTAssertEqual(HealthKitWriter.healthWriteFailureNames(defaults, recoveryHRVType: standIn),
+                       ["Recovery HRV", "SpO₂"])
+        XCTAssertEqual(HealthKitWriter.healthWriteFailureNames(defaults, recoveryHRVType: nil),
+                       ["HRV", "Recovery HRV", "SpO₂"], "no type: the switch doesn't exist")
+        XCTAssertEqual(Set(HealthKitWriter.healthWriteFailures(defaults).keys), [.hrvSDNN, .spo2], "kept in the map")
+        defaults.set(true, forKey: RecoveryHRVDefaults.writesRegularCopyKey)
+        XCTAssertEqual(HealthKitWriter.healthWriteFailureNames(defaults, recoveryHRVType: standIn),
+                       ["HRV", "Recovery HRV", "SpO₂"])
+    }
+
     // MARK: T-H: the switch
 
     func testTheSwitchDefaultsOnWithNoStoredKey() {
-        XCTAssertNil(defaults.object(forKey: RecoveryHRVDefaults.writesRegularCopyKey))
+        // Nothing stored (the registered default lives in the process-wide registration domain, so
+        // `object(forKey:)` can already see it once any test registered it).
+        XCTAssertNil(defaults.persistentDomain(forName: suite)?[RecoveryHRVDefaults.writesRegularCopyKey])
         XCTAssertTrue(RecoveryHRVDefaults.writesRegularCopy(defaults))
         defaults.set(false, forKey: RecoveryHRVDefaults.writesRegularCopyKey)
         XCTAssertFalse(RecoveryHRVDefaults.writesRegularCopy(defaults))
