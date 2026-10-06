@@ -256,6 +256,11 @@ section. Where it exists, every HRV reading the regular copy is offered is ALSO 
   asked once more, for the new type, by the #129 re-ask. A refusal shows as "Recovery HRV" in the
   partial-grant line, and a failing save as its own "Recovery HRV" failure (`recoveryHRV` in
   `hk.failures.byMetric`), never as the regular HRV's.
+- **On the phone.** The flush log lines (`helio: Health flush …`, the strap's background run line,
+  `[OC] healthKit …`) end in `recoveryHRV=<n>` when it saved and `recoveryHRV=failed` when its save
+  threw, and say nothing about it otherwise. The sync card names it ("Synced to Health: 12 Recovery
+  HRV"). With the switch off, an older regular-HRV failure is left out of the warning (it can't clear
+  while no regular copy is attempted) and comes back if the switch is turned on again.
 - **Not verified.** That Health's Recovery HRV screen shows a third-party sample. Apple hasn't
   documented it, and its support page says Recovery HRV is sampled while the person is still, while the
   ring's HRV comes from any worn epoch (#185). Retiring the regular copy waits until a phone shows it.
