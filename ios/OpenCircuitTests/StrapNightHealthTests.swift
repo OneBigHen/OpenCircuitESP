@@ -998,7 +998,7 @@ extension StrapNightHealthTests {
     // MARK: 58a: no faster path for the newest night
 
     /// T-A. The newest stored night (no mirror record, no later night) is offered only once 3 hours have
-    /// passed since its end, at any clock time: ending 06:00, not at 06:46, not at 08:59:59, at 09:00:01.
+    /// passed since its end, at any clock time: ending 06:00, not at 06:45, not at 08:59:59, at 09:00:01.
     /// The same with no sleep schedule keys, and with an enabled schedule waking at 06:30; and the same
     /// for ends at 05:29, 05:30 and 11:59, the old faster path's edges.
     func testTheNewestNightWaitsThreeHoursWhateverItsEndAndTheSchedule() throws {
@@ -1010,8 +1010,8 @@ extension StrapNightHealthTests {
                 try saveNight(store, from: 0.5, to: end)
                 let tonight = try hypnogram(store, endingAt: end)
                 let label = "end \(end), schedule \(scheduled)"
-                XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(end + 46.0 / 60)), [], label)
-                XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: hour(end + 46.0 / 60)), [], label)
+                XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(end + 45.0 / 60)), [], label)
+                XCTAssertEqual(HelioConnection.strapNights([], store: store, timeline: timeline, now: hour(end + 45.0 / 60)), [], label)
                 XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(end).addingTimeInterval(buffer - 1)), [], label)
                 XCTAssertEqual(store.strapNightsAwaitingHealth(timeline: timeline, now: hour(end).addingTimeInterval(buffer + 1)), [tonight], label)
             }
@@ -1019,17 +1019,17 @@ extension StrapNightHealthTests {
     }
 
     /// T-A, through a sync: the measured shape. An in-progress record ending 06:00 is stored by a sync at
-    /// 06:03; a short sync at 06:46 carries no sleep round. Its flush writes nothing, with no schedule
+    /// 06:05; a short sync at 06:45 carries no sleep round. Its flush writes nothing, with no schedule
     /// keys or with one waking at 06:30.
     func testAShortSyncAfterAnInProgressRecordWritesNothing() async throws {
         for scheduled in [false, true] {
             ownership.install(.strapOwnsAllTime)
             if scheduled { setSchedule(wake: 6 * 60 + 30) }
             let store = try makeStore()
-            let snapshot = try await syncAndFlush(partialNight, at: hour(6 + 3.0 / 60), store: store)
+            let snapshot = try await syncAndFlush(partialNight, at: hour(6 + 5.0 / 60), store: store)
             XCTAssertEqual(snapshot.result.nights.map(\.window), [partialWindow])
             XCTAssertEqual(snapshot.written, [], "inside its margin")
-            let short = try await syncAndFlush(nil, at: hour(6 + 46.0 / 60), store: store)
+            let short = try await syncAndFlush(nil, at: hour(6 + 45.0 / 60), store: store)
             XCTAssertEqual(short.result.nights.count, 0)
             XCTAssertEqual(short.written, [], "schedule \(scheduled)")
             XCTAssertNil(try mirrorSpan(store))
@@ -1037,21 +1037,21 @@ extension StrapNightHealthTests {
         }
     }
 
-    /// #262's shape on 58a: a wake stores 00:24–09:08 at 09:11 and the strap stops re-delivering it. It
-    /// is not offered when its margin closes (09:28), only 3 hours after its end; mirrored, never again.
+    /// #262's shape on 58a: a wake stores 00:30–09:00 at 09:05 and the strap stops re-delivering it. It
+    /// is not offered when its margin closes (09:20), only 3 hours after its end; mirrored, never again.
     func testANightEndingNearTheScheduledWakeWaitsThreeHoursLikeAnyOther() async throws {
         ownership.install(.strapOwnsAllTime)
         setSchedule(wake: 9 * 60)
         let store = try makeStore()
-        let night: [(Double, Double, UInt8)] = [(0.4, 3, light), (3, 5, deep), (5, 7, rem), (7, 9 + 8.0 / 60, light)]
-        let end = hour(9 + 8.0 / 60)
-        let first = try sync(night, at: hour(9 + 11.0 / 60), store: store)
-        XCTAssertEqual(first.nights.map(\.window), [DateInterval(start: hour(0.4), end: end)])
+        let night: [(Double, Double, UInt8)] = [(0.5, 3, light), (3, 5, deep), (5, 7, rem), (7, 9, light)]
+        let end = hour(9)
+        let first = try sync(night, at: hour(9 + 5.0 / 60), store: store)
+        XCTAssertEqual(first.nights.map(\.window), [DateInterval(start: hour(0.5), end: end)])
         let stored = try storedHypnogram(store)
-        let opened = try sync(nil, at: hour(9 + 13.0 / 60), store: store)
+        let opened = try sync(nil, at: hour(9 + 10.0 / 60), store: store)
         XCTAssertEqual(opened.nights.count, 0)
         let flushed1 = try await flush([], at: end.addingTimeInterval(SleepHealthGate.settleMargin), store: store)
-        XCTAssertEqual(flushed1, [], "not at 09:28")
+        XCTAssertEqual(flushed1, [], "not at 09:20")
         let flushed2 = try await flush([], at: end.addingTimeInterval(buffer - 1), store: store)
         XCTAssertEqual(flushed2, [])
         let flushed3 = try await flush([], at: end.addingTimeInterval(buffer + 1), store: store)
@@ -1133,7 +1133,7 @@ extension StrapNightHealthTests {
         clearMirror(expected.night)
 
         let store = try makeStore()
-        let snapshot = try sync(partialNight, at: hour(6 + 3.0 / 60), store: store)
+        let snapshot = try sync(partialNight, at: hour(6 + 5.0 / 60), store: store)
         XCTAssertEqual(snapshot.nights.map(\.window), [partialWindow])
         let partialRow = try XCTUnwrap(try rows(store).first)
         let partialAsleep = partialRow.asleepMin
@@ -1153,7 +1153,7 @@ extension StrapNightHealthTests {
 
         let flushed5 = try await flush(final.nights.map(\.segments), at: hour(9), store: store)
         XCTAssertEqual(flushed5, [], "inside its margin")
-        let flushed6 = try await flush(final.nights.map(\.segments), at: hour(9 + 11.0 / 60), store: store)
+        let flushed6 = try await flush(final.nights.map(\.segments), at: hour(9 + 15.0 / 60), store: store)
         XCTAssertEqual(flushed6, [finalWindow])
         XCTAssertEqual(store.mirroredNight(night: row.night)?.signature, HealthKitWriter.sleepSignature(try storedHypnogram(store)))
         let record = try XCTUnwrap(try mirrorSpan(store))
@@ -1187,7 +1187,7 @@ extension StrapNightHealthTests {
         for (label, incoming) in cases {
             ownership.install(.strapOwnsAllTime)
             let store = try makeStore()
-            _ = try sync(partialNight, at: hour(6 + 3.0 / 60), store: store)
+            _ = try sync(partialNight, at: hour(6 + 5.0 / 60), store: store)
             let before = try XCTUnwrap(try rows(store).first)
             let (hypnogramBefore, asleepBefore, key) = (before.hypnogramData, before.asleepMin, before.night)
             try recordWrite(try storedHypnogram(store), store: store)
@@ -1213,9 +1213,9 @@ extension StrapNightHealthTests {
     func testTheFinalCopyAgainAfterTheRewriteWritesNothing() async throws {
         ownership.install(.strapOwnsAllTime)
         let store = try makeStore()
-        _ = try sync(partialNight, at: hour(6 + 3.0 / 60), store: store)
+        _ = try sync(partialNight, at: hour(6 + 5.0 / 60), store: store)
         try recordWrite(try storedHypnogram(store), store: store)
-        let final = try sync(finalNight, at: hour(9 + 11.0 / 60), store: store)
+        let final = try sync(finalNight, at: hour(9 + 15.0 / 60), store: store)
         let flushed9 = try await flush(final.nights.map(\.segments), at: clock, store: store)
         XCTAssertEqual(flushed9, [finalWindow])
         let key = try XCTUnwrap(try rows(store).first).night
@@ -1287,16 +1287,16 @@ extension StrapNightHealthTests {
             let store = try makeStore()
             var written: [DateInterval] = []
             // Each snapshot ends a few minutes before the sync that reads it.
-            let snapshots: [(end: Double, syncedAt: Double)] = [(3, 3 + 4.0 / 60), (5, 5 + 2.0 / 60), (6, 6 + 3.0 / 60)]
+            let snapshots: [(end: Double, syncedAt: Double)] = [(3, 3 + 4.0 / 60), (5, 5 + 2.0 / 60), (6, 6 + 5.0 / 60)]
             for snapshot in snapshots {
                 written += try await syncAndFlush(inProgress(until: snapshot.end), at: hour(snapshot.syncedAt), store: store).written
             }
             written += try await syncAndFlush(nil, at: hour(6 + 21.0 / 60), store: store).written   // the margin refresh
-            written += try await syncAndFlush(nil, at: hour(6 + 46.0 / 60), store: store).written   // the short sync
+            written += try await syncAndFlush(nil, at: hour(6 + 45.0 / 60), store: store).written   // the short sync
             written += try await flush([], at: hour(8), store: store)
             XCTAssertEqual(written, [], "no partial night written (re-delivered \(reDelivered))")
 
-            let final = try await syncAndFlush(finalNight, at: hour(8 + 53.0 / 60), store: store)
+            let final = try await syncAndFlush(finalNight, at: hour(8 + 55.0 / 60), store: store)
             XCTAssertEqual(final.written, [], "inside its margin")
             let end = hour(8 + 50.0 / 60)
             if reDelivered {
@@ -1318,12 +1318,12 @@ extension StrapNightHealthTests {
     func testReplayFromAPartialNightAlreadyInHealth() async throws {
         ownership.install(.strapOwnsAllTime)
         let store = try makeStore()
-        _ = try await syncAndFlush(partialNight, at: hour(6 + 3.0 / 60), store: store)
+        _ = try await syncAndFlush(partialNight, at: hour(6 + 5.0 / 60), store: store)
         try recordWrite(try storedHypnogram(store), store: store)   // the old write at the short sync
         var written: [DateInterval] = []
-        written += try await syncAndFlush(nil, at: hour(6 + 46.0 / 60), store: store).written
-        written += try await syncAndFlush(finalNight, at: hour(8 + 53.0 / 60), store: store).written
-        written += try await syncAndFlush(finalNight, at: hour(9 + 11.0 / 60), store: store).written
+        written += try await syncAndFlush(nil, at: hour(6 + 45.0 / 60), store: store).written
+        written += try await syncAndFlush(finalNight, at: hour(8 + 55.0 / 60), store: store).written
+        written += try await syncAndFlush(finalNight, at: hour(9 + 15.0 / 60), store: store).written
         written += try await syncAndFlush(finalNight, at: hour(10), store: store).written
         written += try await syncAndFlush(nil, at: hour(12), store: store).written
         XCTAssertEqual(written, [finalWindow])
@@ -1338,7 +1338,7 @@ extension StrapNightHealthTests {
     func testAnEditedWrittenNightIsNotExtended() async throws {
         ownership.install(.strapOwnsAllTime)
         let store = try makeStore()
-        _ = try sync(partialNight, at: hour(6 + 3.0 / 60), store: store)
+        _ = try sync(partialNight, at: hour(6 + 5.0 / 60), store: store)
         try recordWrite(try storedHypnogram(store), store: store)
         let row = try XCTUnwrap(try rows(store).first)
         row.isManuallyEdited = true
