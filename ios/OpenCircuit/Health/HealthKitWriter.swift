@@ -1967,7 +1967,8 @@ final class HealthKitWriter {
     /// BMR/TRIMP energy estimates; the ring transmits none of these inputs.
     static func storedUserProfile(_ defaults: UserDefaults = .standard) -> UserProfile {
         let age = defaults.object(forKey: "userProfile.age") as? Int ?? 35
-        let weightKg = defaults.object(forKey: "userProfile.weightKg") as? Double ?? 70
+        // Manual weight, or the cached Apple Health body mass when that is newer (#284).
+        let weightKg = WeightResolver.resolve(defaults: defaults).kg
         let heightCm = defaults.object(forKey: "userProfile.heightCm") as? Double ?? 170
         let sexRaw = defaults.string(forKey: "userProfile.sex") ?? BiologicalSex.male.rawValue
         return UserProfile(age: age, weightKg: max(weightKg, 1), heightCm: max(heightCm, 1),

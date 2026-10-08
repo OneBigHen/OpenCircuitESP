@@ -2744,6 +2744,14 @@ struct CaloriesCardView: View {
     // Shared @AppStorage keys with UserProfileSettingsView (single source of truth).
     @AppStorage("userProfile.age") private var age = 35
     @AppStorage("userProfile.weightKg") private var weightKg = 70.0
+    // #284: manual-entry date + cached latest Apple Health body mass; the newer one feeds the math.
+    @AppStorage(WeightResolver.Keys.manualSetAt) private var weightSetAtEpoch = 0.0
+    @AppStorage(WeightResolver.Keys.healthKg) private var healthWeightKg = 0.0
+    @AppStorage(WeightResolver.Keys.healthAt) private var healthWeightAtEpoch = 0.0
+    private var effectiveWeightKg: Double {
+        WeightResolver.resolve(manualKg: weightKg, manualSetAtEpoch: weightSetAtEpoch,
+                               healthKg: healthWeightKg, healthAtEpoch: healthWeightAtEpoch).kg
+    }
     @AppStorage("userProfile.heightCm") private var heightCm = 170.0
     @AppStorage("userProfile.sex") private var sexRaw = BiologicalSex.male.rawValue
 
@@ -2788,12 +2796,12 @@ struct CaloriesCardView: View {
     /// Identity for the recompute `.task` — the HR count, today's steps, and the profile inputs.
     private var caloriesInputsKey: String {
         "\(hrSamples.count)|\(todayDaily.first?.steps ?? 0)|\(recentStepSamples.count)|"
-        + "\(age)|\(weightKg)|\(heightCm)|\(sexRaw)|"
+        + "\(age)|\(effectiveWeightKg)|\(heightCm)|\(sexRaw)|"
         + "\(latestSleep.first?.night.timeIntervalSince1970 ?? 0)"
     }
 
     private var profile: UserProfile {
-        UserProfile(age: age, weightKg: max(weightKg, 1), heightCm: max(heightCm, 1),
+        UserProfile(age: age, weightKg: max(effectiveWeightKg, 1), heightCm: max(heightCm, 1),
                     sex: BiologicalSex(rawValue: sexRaw) ?? .male)
     }
     private var maxHR: Int { max(220 - age, 1) }
@@ -2853,5 +2861,7 @@ struct CaloriesCardView: View {
                 ).activeKcal
             }.value
         }
+        // #284: refresh the cached Apple Health body mass (lazy, read-only, silent when unavailable).
+        .task { await HealthKitWeightReader().refreshCache() }
     }
 }

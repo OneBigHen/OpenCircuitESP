@@ -81,6 +81,10 @@ final class HealthKitAuthorizationSurfaceTests: XCTestCase {
     /// `testTheLazyVO2MaxRequestNamesOnlyVO2Max` below and, on the app side, by
     /// `HealthKitShareTypesTests.testVO2MaxStaysOutOfTheMainRequest`.
     ///
+    /// `HealthKitWeightReader.swift` = 1 (#284): the lazy, READ-ONLY body-mass request, same isolation
+    /// argument as the VO₂ max one — pinned by `testTheLazyBodyMassRequestNamesOnlyBodyMass` below and,
+    /// on the app side, by `HealthKitShareTypesTests.testBodyMassStaysOutOfTheMainRequest`.
+    ///
     /// `CalibrationSupport.swift` = 3 (SpO₂, Apple Watch HR, Apple Watch ECG). These are read-only
     /// requests inside the cuff/PPG calibration dev tool, reachable ONLY from the `#if DEBUG` block
     /// in `ContentView` (`showCalibration = true` at ContentView.swift is inside `#if DEBUG` …
@@ -107,7 +111,7 @@ final class HealthKitAuthorizationSurfaceTests: XCTestCase {
         }
 
         let expected = ["HealthKitWriter.swift": 2, "CalibrationSupport.swift": 3,
-                        "VO2MaxHealthWriter.swift": 1]
+                        "VO2MaxHealthWriter.swift": 1, "HealthKitWeightReader.swift": 1]
         XCTAssertEqual(found, expected, """
             The HealthKit authorization surface moved. Found \(found), expected \(expected).
 
@@ -212,6 +216,50 @@ final class HealthKitAuthorizationSurfaceTests: XCTestCase {
         if let writer = sources.first(where: { $0.name == "HealthKitWriter.swift" }) {
             XCTAssertEqual(try matchCount(#"vo2MaxType"#, in: writer), 0,
                            "HealthKitWriter must not borrow VO2MaxHealthWriter.vo2MaxType into its sets")
+        } else {
+            XCTFail("HealthKitWriter.swift not found under ios/OpenCircuit — FIX THE AUDIT")
+        }
+    }
+
+    /// The weight reader (#284) is safe only while it names a type no other request names. So: in
+    /// `HealthKitWeightReader.swift` it shares NOTHING and reads exactly `[Self.bodyMassType]` (both
+    /// the status probe and the request), and the bodyMass HealthKit type is spelled nowhere else in the
+    /// app — in particular not in `HealthKitWriter.allTypes`/`authorizationReadTypes`, where it would be
+    /// named by two requests (the build-50 shape) and would also make the #129 probe prompt at launch.
+    /// No read/share overlap with the main request is possible while both hold.
+    func testTheLazyBodyMassRequestNamesOnlyBodyMass() throws {
+        let sources = try appSources()
+        guard let reader = sources.first(where: { $0.name == "HealthKitWeightReader.swift" }) else {
+            return XCTFail("HealthKitWeightReader.swift not found under ios/OpenCircuit — FIX THE AUDIT")
+        }
+        let exact = try matchCount(
+            #"requestAuthorization\s*\(\s*toShare\s*:\s*\[\s*\]\s*,\s*read\s*:\s*\[\s*Self\.bodyMassType\s*\]\s*\)"#,
+            in: reader)
+        XCTAssertEqual(exact, 1, """
+            HealthKitWeightReader's request must be exactly \
+            `requestAuthorization(toShare: [], read: [Self.bodyMassType])`. Anything wider names a type \
+            the main request may also name — the build-50 permission-loop shape.
+            """)
+        let probe = try matchCount(
+            #"statusForAuthorizationRequest\s*\(\s*toShare\s*:\s*\[\s*\]\s*,\s*read\s*:\s*\[\s*Self\.bodyMassType\s*\]\s*\)"#,
+            in: reader)
+        XCTAssertEqual(probe, 1, "the status probe must describe the same single-type read request")
+        XCTAssertEqual(try matchCount(#"HKQuantityType\(\s*\.bodyMass\s*\)"#, in: reader), 1,
+                       "bodyMassType must stay the bodyMass quantity type")
+
+        let typePattern = #"HKQuantityType\s*\(\s*\.bodyMass\b|HKQuantityTypeIdentifier\s*\.\s*bodyMass\b|HKQuantityTypeIdentifierBodyMass"#
+        var elsewhere: [String] = []
+        for source in sources where source.name != "HealthKitWeightReader.swift" {
+            if try matchCount(typePattern, in: source) > 0 { elsewhere.append(source.name) }
+        }
+        XCTAssertEqual(elsewhere, [], """
+            The bodyMass HealthKit type is named outside HealthKitWeightReader.swift (\(elsewhere)). \
+            Body mass is read ONLY through that file's lazy request; naming it in \
+            HealthKitWriter.allTypes or authorizationReadTypes would put it in two requests.
+            """)
+        if let writer = sources.first(where: { $0.name == "HealthKitWriter.swift" }) {
+            XCTAssertEqual(try matchCount(#"bodyMassType"#, in: writer), 0,
+                           "HealthKitWriter must not borrow HealthKitWeightReader.bodyMassType into its sets")
         } else {
             XCTFail("HealthKitWriter.swift not found under ios/OpenCircuit — FIX THE AUDIT")
         }
