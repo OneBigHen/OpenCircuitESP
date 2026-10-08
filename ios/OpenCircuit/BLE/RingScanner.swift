@@ -744,13 +744,18 @@ final class RingScanner: NSObject {
                     // use, so the background captures daytime data too, not just overnight (#99).
                     // Previously this opened the live-enter drain (channel 0x00 only) which is why
                     // automatic syncs never refreshed daytime SpO₂.
-                    // `forceHistoryDrain` bypasses the overnight-quiet gate: only the Sleep Focus-END
+                    // `forceHistoryDrain` bypasses the session's sleep window: only the Sleep Focus-END
                     // path sets it, because Focus ending is the authoritative "sleep is over" wake
                     // signal the overnight-quiet policy defers the whole-night drain TO — so it pulls
                     // the complete night even when the learned sleep window still overlaps the moment.
-                    // Every other background caller leaves it false and stays gated (a 03:00 app-refresh
-                    // must never drain mid-sleep and shred the night).
-                    session.syncHistory(manual: forceHistoryDrain)
+                    // It does NOT bypass the clock floor (#280): Focus can end on its schedule while the
+                    // wearer still sleeps. Every other background caller stays fully gated (a 03:00
+                    // app-refresh must never drain mid-sleep and shred the night).
+                    if forceHistoryDrain {
+                        session.syncHistoryAfterSleepFocus()
+                    } else {
+                        session.syncHistory(manual: false)
+                    }
                     didDrain = true
                     drainStartAt = Date()
                 } else if session.syncing == false && !allowLivePoll {
