@@ -46,9 +46,12 @@ struct HealthKitWeightReader {
     /// and never blocks the caller on anything but the query: every failure leaves the cache cleared or
     /// untouched and the manual weight in charge.
     func refreshCache() async {
-        guard HKHealthStore.isHealthDataAvailable() else { return }
-        // Not connected to Health at all: no body-mass sheet out of context.
-        guard HealthKitWriter().isShareAuthorized else { return }
+        guard HKHealthStore.isHealthDataAvailable(), HealthKitWriter().isShareAuthorized else {
+            // Health unavailable, or disconnected since the last refresh: forget any earlier cache so
+            // a revoked grant (or Health going away) stops steering the math with a stale value.
+            clearCache()
+            return
+        }
 
         if !defaults.bool(forKey: Self.askedKey) {
             let status = try? await store.statusForAuthorizationRequest(toShare: [], read: [Self.bodyMassType])
@@ -70,9 +73,14 @@ struct HealthKitWeightReader {
         } else {
             // No sample, or read access off (HealthKit returns an empty result for both): forget any
             // earlier cache so a revoked grant stops steering the math.
-            defaults.removeObject(forKey: WeightResolver.Keys.healthKg)
-            defaults.removeObject(forKey: WeightResolver.Keys.healthAt)
+            clearCache()
         }
+    }
+
+    /// Forget any cached Health weight, so the resolver falls back to the manual entry.
+    private func clearCache() {
+        defaults.removeObject(forKey: WeightResolver.Keys.healthKg)
+        defaults.removeObject(forKey: WeightResolver.Keys.healthAt)
     }
 
     private func latestSample() async -> WeightResolver.HealthSample? {
