@@ -279,7 +279,10 @@ final class RingSession: NSObject {
     /// OSA 0x48 — was never drained). Fully adaptive, no wall-clock cap: the gate tracks the user's
     /// real hours. If the learned wake itself reads late, that's an over-count in sleep STAGING (the
     /// source) to fix there, not to mask here with a fixed clock. See `isInSleepWindow`.
-    private static let drainWakeMarginTrim: TimeInterval = 5400   // matches habitualInterval wakeMargin
+    /// (#280 later added a wall-clock floor for automatic DRAINS only, `drainClockQuiet`: the learned
+    /// hours are built from recorded nights, and one mis-staged night poisons them. This window and
+    /// every other reader of `isInSleepWindow` remain clock-free.)
+    private static let drainWakeMarginTrim = SleepWindowGate.drainWakeMarginTrim   // 5400, matches habitualInterval wakeMargin
     /// Wake-ACCELERATOR latch for the drain gate: stamped with the time we saw a genuine MORNING walking
     /// bout (a real same-day step increment past this night's learned wake) so overnight-quiet can end at
     /// the user's actual wake instead of the fixed ceiling below. Nil until then; reset on any new night.
@@ -318,7 +321,21 @@ final class RingSession: NSObject {
     /// on a suspended night (see the latch scope note above). Bounded so the worst case only DELAYS the
     /// drain to here — strictly later than the pre-fix gate (which opened AT the learned wake), so never
     /// worse than today. Not a detection threshold; a safety cap on how long quiet may hold.
-    private static let maxQuietPastLearnedWake: TimeInterval = 6 * 3600
+    private static let maxQuietPastLearnedWake = SleepWindowGate.maxQuietPastLearnedWake   // 6 h
+    /// The lie-in walk for the drain gate's CLOCK floor (`OvernightQuiet`, #280): when a real walking
+    /// bout (the same step-delta test as `morningWakeConfirmedAt`) was last seen between 07:00 and 11:00.
+    /// Kept apart from `morningWakeConfirmedAt` on purpose: that latch never stamps under an explicit
+    /// schedule, stamps once per night and only past the LEARNED wake (so on a poisoned learner a
+    /// pre-dawn bathroom bout uses it up), and lives in this session only. This one is clock-scoped,
+    /// read only as "at or after 07:00 today", and persisted, so a reconnect (a new session) keeps it.
+    private var lieInWalkAt: Date? {
+        get {
+            let t = UserDefaults.standard.double(forKey: Self.lieInWalkAtKey)
+            return t > 0 ? Date(timeIntervalSince1970: t) : nil
+        }
+        set { UserDefaults.standard.set(newValue?.timeIntervalSince1970 ?? 0, forKey: Self.lieInWalkAtKey) }
+    }
+    private static let lieInWalkAtKey = "drainGate.lieInWalkAt"
 
     private static let drainEmptyNoPagesCap = 12   // seconds: cut a zero-page, no-end-signal channel here instead of the drainTickCap backstop — safely above first-page latency
 
@@ -1303,7 +1320,8 @@ final class RingSession: NSObject {
         let cadenceDue = gotDataFrame
             && HistoryDrainCadence.isDue(lastDrainAt: epochArchiveStore.lastDrainAt,
                                          now: Date(), isNight: night, batterySaver: saver)
-        guard HistoryDrainCadence.shouldDrain(manual: false, inSleepWindow: night, isDue: cadenceDue)
+        guard HistoryDrainCadence.shouldDrain(.automatic, inSleepWindow: night,
+                                              clockQuiet: drainClockQuiet, isDue: cadenceDue)
         else { return false }
         ringLog.notice("sync: periodic history drain (\(night ? "night?!" : "daytime / wake catch-up", privacy: .public), trigger=\(trigger ?? "keepalive", privacy: .public))")
         pendingDrainTrigger = trigger
@@ -1586,37 +1604,43 @@ final class RingSession: NSObject {
     /// manual/default schedule so the gate still holds before the async window resolves (e.g. a cold
     /// background drain). MANUAL user syncs bypass this entirely (user intent wins).
     var isInSleepWindow: Bool {
+        // An EXPLICIT user schedule (iOS Sleep / manual) is the real bed→wake — trusted as-is.
+        // Otherwise `nightWindow` is the GENEROUS skin-temp window: wake + ~1.5 h margin, adapted
+        // from LEARNED nights. `earliestWake` trims that margin back to the learned wake — the
+        // EARLIEST overnight-quiet may end. But the learned wake is a MEDIAN: ending quiet there
+        // fires the morning drain mid-sleep on a LIE-IN, and the cursor≈now open walks the ring's
+        // resume pointer past the still-unwritten tail (🟢 2026-07-12 truncation). So past the
+        // earliest wake we stay quiet until the OBSERVED morning wake (`morningWakeConfirmedAt`, a
+        // fresh step delta), bounded by a fail-safe ceiling so an up-but-still / disconnected
+        // morning still drains. Before the earliest wake it's unambiguously still night. The
+        // `confirmed >= w.start` bound rejects a stale latch carried over from a prior night (which
+        // would otherwise open the gate mid-recording on a later lie-in → the truncation we fix).
+        // The arithmetic is `SleepWindowGate` (kit, unit-tested); the drain gate adds the clock
+        // floor on top of it (`drainClockQuiet`, #280).
         let now = Date()
-        if let w = nightWindow {
-            // An EXPLICIT user schedule (iOS Sleep / manual) is the real bed→wake — trust it as-is.
-            if nightWindowIsExplicit { return w.contains(now) }
-            // Otherwise `nightWindow` is the GENEROUS skin-temp window: wake + ~1.5 h margin, adapted
-            // from LEARNED nights. `earliestWake` trims that margin back to the learned wake — the
-            // EARLIEST overnight-quiet may end. But the learned wake is a MEDIAN: ending quiet there
-            // fires the morning drain mid-sleep on a LIE-IN, and the cursor≈now open walks the ring's
-            // resume pointer past the still-unwritten tail (🟢 2026-07-12 truncation). So past the
-            // earliest wake we stay quiet until the OBSERVED morning wake (`morningWakeConfirmedAt`, a
-            // fresh step delta), bounded by a fail-safe ceiling so an up-but-still / disconnected
-            // morning still drains. Before the earliest wake it's unambiguously still night.
-            let earliestWake = w.end.addingTimeInterval(-Self.drainWakeMarginTrim)
-            guard earliestWake > w.start else { return false }  // trimmed away → treat as awake
-            if now < w.start { return false }                   // before tonight's bedtime
-            let ceiling = earliestWake.addingTimeInterval(Self.maxQuietPastLearnedWake)
-            if now >= ceiling { return false }                  // fail-safe: force the one morning drain
-            if now < earliestWake { return true }               // deep night, before any plausible wake
-            // Past the learned wake: quiet until we've SEEN the user wake (walking) THIS night. The
-            // `confirmed >= w.start` bound rejects a stale latch carried over from a prior night (which
-            // would otherwise open the gate mid-recording on a later lie-in → the truncation we fix).
-            if let confirmed = morningWakeConfirmedAt, confirmed >= w.start, confirmed <= now { return false }
-            return true
-        }
-        let d = UserDefaults.standard
-        SleepScheduleDefaults.register(d)
-        guard let w = SleepWindow.interval(
-            bedMinutes: d.integer(forKey: SleepScheduleDefaults.bedMinutes),
-            wakeMinutes: d.integer(forKey: SleepScheduleDefaults.wakeMinutes),
-            nightEndingNear: now) else { return false }
-        return w.contains(now)
+        return SleepWindowGate.isInSleepWindow(
+            now: now,
+            nightWindow: nightWindow,
+            isExplicit: nightWindowIsExplicit,
+            morningWakeConfirmedAt: morningWakeConfirmedAt,
+            fallback: {
+                let d = UserDefaults.standard
+                SleepScheduleDefaults.register(d)
+                return SleepWindow.interval(
+                    bedMinutes: d.integer(forKey: SleepScheduleDefaults.bedMinutes),
+                    wakeMinutes: d.integer(forKey: SleepScheduleDefaults.wakeMinutes),
+                    nightEndingNear: now)
+            })
+    }
+
+    /// The wall-clock floor under the AUTOMATIC drain gate (#280, decision 60): 21:00–07:00 always,
+    /// 07:00–11:00 until `lieInWalkAt`. `isInSleepWindow` can read "awake" mid-sleep (nil
+    /// `nightWindow` on a fresh background session, a learner poisoned by a mis-staged night), and an
+    /// automatic drain then walks the ring's one resume pointer past the night. Applied ONLY where an
+    /// automatic drain is gated — not inside `isInSleepWindow`, whose other readers (auto-measure, the
+    /// keepalive's fetch, device snapshots) are user-visible and keep their behavior.
+    private var drainClockQuiet: Bool {
+        OvernightQuiet.suppressAutomaticHistoryOpen(now: Date(), morningWalkAt: lieInWalkAt)
     }
 
     /// Persist decoded samples to the local store (the vitals dashboard reads from it, so
@@ -3505,6 +3529,18 @@ final class RingSession: NSObject {
     /// The official app drains both channels every sync; we previously only pulled `0x00`, so daytime
     /// SpO₂ went stale (the #99 gap — resolved by mining the captures, not a byte[6] selector sweep).
     func syncHistory(manual: Bool = false) {
+        syncHistory(request: manual ? .manual : .automatic)
+    }
+
+    /// Sleep Focus turned off (`RingScanner.captureForBackground(forceHistoryDrain:)`). It used to
+    /// drain as `manual`, bypassing the gate outright — but Focus can end on its own schedule while
+    /// the wearer still sleeps, and that drain walked the pointer past the rest of the night (#280).
+    /// It still skips the session's learned window, not the clock floor.
+    func syncHistoryAfterSleepFocus() {
+        syncHistory(request: .sleepFocusEnded)
+    }
+
+    private func syncHistory(request: HistoryDrainCadence.Request) {
         // OVERNIGHT-QUIET gate (#111/#119): an AUTOMATIC drain inside the sleep window is suppressed.
         // Cadenced overnight drains were thought "safe and additive" (only the old 60 s `0x07` temp
         // heartbeat shredded the night), but Randy's 6/30 capture disproved that — draining every ~30
@@ -3512,13 +3548,20 @@ final class RingSession: NSObject {
         // So we drain NOTHING inside the window (the keepalive keeps the link warm with statusQuery and
         // the night accumulates untouched on the ring) and pull the whole night in ONE pass at wake.
         // A user-initiated sync (`manual`) always bypasses the gate. (See HistoryDrainCadence header.)
-        guard HistoryDrainCadence.shouldDrain(manual: manual, inSleepWindow: isInSleepWindow, isDue: true)
+        // The clock floor (`drainClockQuiet`, #280) holds automatic and Sleep Focus drains even when
+        // the session window reads awake mid-sleep.
+        guard HistoryDrainCadence.shouldDrain(request, inSleepWindow: isInSleepWindow,
+                                              clockQuiet: drainClockQuiet, isDue: true)
         else {
-            ringLog.notice("sync: SKIP (overnight-quiet — drain deferred to wake)")
+            ringLog.notice("sync: SKIP (overnight-quiet — drain deferred to wake, request=\(String(describing: request), privacy: .public))")
             return
         }
         guard syncTask == nil else { return }    // already syncing
-        historySyncTrigger = manual ? "manual" : "auto"
+        switch request {
+        case .manual: historySyncTrigger = "manual"
+        case .sleepFocusEnded: historySyncTrigger = "sleep-focus"
+        case .automatic: historySyncTrigger = "auto"
+        }
         stopLiveMonitoring(scheduleStatusRefresh: false)   // live polling would fight the drain
         syncTask = Task { [weak self] in
             await self?.performHistoryDrain()
@@ -5000,6 +5043,16 @@ extension RingSession: CBPeripheralDelegate {
                         self.morningWakeConfirmedAt = Date()
                         self.morningWakeConfirmedForNightStart = w.start
                         ringLog.notice("drain-gate: morning wake observed (\(update.deltaToAdd) steps) → overnight-quiet ends")
+                    }
+                    // The clock floor's lie-in walk (#280): the same real-bout test, but stamped by the
+                    // clock alone (07:00–11:00), whatever the window is or whether the latch above fired.
+                    let now = Date()
+                    if !update.isReset, !dayChanged, previousRaw != nil,
+                       update.deltaToAdd >= Self.morningWakeStepThreshold,
+                       OvernightQuiet.isLieIn(now),
+                       !OvernightQuiet.hasMorningWalk(self.lieInWalkAt, now: now) {
+                        self.lieInWalkAt = now
+                        ringLog.notice("drain-gate: lie-in walk observed (\(update.deltaToAdd) steps) → clock floor released")
                     }
                 }
                 // Re-read the sample day's total from the store as the live display value: a fresh
