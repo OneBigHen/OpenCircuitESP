@@ -27,7 +27,7 @@ struct ShortcutsGuideView: View {
             }
 
             Section("Set Wake Alarm on Wearable") {
-                Text("Sets a wake alarm on your wearable for a time of day. Choose Once, Every Day, Weekdays or Weekends. A Once alarm that is requested too late to fire is dropped rather than fired a day late. Repeating alarms never expire.")
+                Text("Sets a wake alarm on your wearable for a time of day. Choose Once, Every Day, Weekdays or Weekends. If a Once alarm's time has already passed today, it fires at that time tomorrow instead. Repeating alarms never expire.")
                 recipe([
                     "Open Shortcuts, tap Automation, then New Automation.",
                     "Choose Sleep, then Bedtime Begins (or Wind Down), and Run Immediately.",
@@ -50,7 +50,7 @@ struct ShortcutsGuideView: View {
 
             Section("Ring and strap differ") {
                 Text("Helio Strap: the wake alarm is stored on the strap, which vibrates by itself at that time, even with your phone away.")
-                Text("RingConn Gen 3: the wake alarm is driven by the app. It can fire up to 15 minutes late or be missed, in which case a backup notification is sent. Keep the ring connected overnight.")
+                Text("RingConn Gen 3: the wake alarm is driven by the app. It can fire up to 15 minutes late or be missed if the ring isn't connected. Turn on Backup Notification (Profile ▸ Device Info ▸ Vibration & alarm) so a notification also fires if the buzz is missed — it's off by default. Keep the ring connected overnight.")
             }
         }
         .navigationTitle("Shortcuts")
