@@ -89,6 +89,8 @@ struct TrendsData {
         var temps: [TempRow]
         var stepDeltas: [StepRow]
         var naps: [NapRow]
+        /// The ring's own activity sessions, for the #281 motion gate (`Calories.dailyEstimate`).
+        var activityIntervals: [DateInterval]
         var profile: UserProfile
         var goals: GoalHistory.Goals
         var tempUnitRaw: String
@@ -221,6 +223,7 @@ struct TrendsData {
                       hr: samples(.heartRate), hrv: samples(.hrvSDNN),
                       spo2: samples(.spo2), rr: samples(.respiratoryRate),
                       temps: temps, stepDeltas: stepDeltas, naps: naps,
+                      activityIntervals: RingActivityEventLedger.load().corroboratingIntervals(now: now),
                       profile: profile, goals: goals, tempUnitRaw: tempUnitRaw)
     }
 
@@ -265,7 +268,8 @@ struct TrendsData {
                 (daySteps != nil || !dayHRSamples.isEmpty)
                 ? Calories.dailyEstimate(hrSamples: dayHRSamples, steps: daySteps ?? 0,
                                          profile: i.profile, sleepWindow: window,
-                                         stepWindows: dayStepWindows, dayStart: day)
+                                         stepWindows: dayStepWindows, dayStart: day,
+                                         activityIntervals: i.activityIntervals)
                 : nil
             // 🟢 ELEVATED MINUTES ARE HR-DERIVED, so with no retained HR the estimate returns a
             // real-looking `0.0` rather than "unknown". Left as 0 it scores a hard MISS, breaks the

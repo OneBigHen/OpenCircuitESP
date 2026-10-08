@@ -234,6 +234,12 @@ public enum Calories {
     /// computed a zero delta on every flush for 5.5 hours, and Apple Health showed a hard stop at
     /// 2pm (2026-07-28). Attribution pays each channel where it actually earned, so a sedentary-HR
     /// afternoon of walking still accrues.
+    ///
+    /// `activityIntervals` + `corroborateMotion` feed the #281 motion gate
+    /// (`ExerciseMinutes.motionCorroborationEnabled`, OFF). Its evidence is `stepWindows` plus
+    /// `activityIntervals` (the ring's own activity sessions,
+    /// `RingActivityEventLedger.corroboratingIntervals`). Both paths below get the SAME evidence, so
+    /// the degrade path can't be the one that still prices a seated hour.
     public static func dailyEstimate(
         hrSamples: [HRSample],
         steps: Int,
@@ -241,8 +247,14 @@ public enum Calories {
         sleepWindow: DateInterval? = nil,
         stepWindows: [StepWindow] = [],
         dayStart: Date? = nil,
-        bucketSeconds: TimeInterval = energyBucketSeconds
+        bucketSeconds: TimeInterval = energyBucketSeconds,
+        activityIntervals: [DateInterval] = [],
+        creditedWorkoutIntervals: [DateInterval] = [],
+        corroborateMotion: Bool = ExerciseMinutes.motionCorroborationEnabled
     ) -> DailyEstimate {
+        let motion = ExerciseMinutes.MotionEvidence(stepWindows: stepWindows,
+                                                    activityIntervals: activityIntervals,
+                                                    creditedWorkoutIntervals: creditedWorkoutIntervals)
         if let dayStart, bucketSeconds > 0, steps == 0 || !stepWindows.isEmpty,
            let attributed = attributedDailyEstimate(hrSamples: hrSamples,
                                                     steps: steps,
@@ -250,43 +262,48 @@ public enum Calories {
                                                     sleepWindow: sleepWindow,
                                                     stepWindows: stepWindows,
                                                     dayStart: dayStart,
-                                                    bucketSeconds: bucketSeconds) {
+                                                    bucketSeconds: bucketSeconds,
+                                                    motion: motion,
+                                                    corroborateMotion: corroborateMotion) {
             return attributed
         }
         return legacyDailyEstimate(hrSamples: hrSamples, steps: steps,
-                                   profile: profile, sleepWindow: sleepWindow)
+                                   profile: profile, sleepWindow: sleepWindow,
+                                   motion: motion, corroborateMotion: corroborateMotion)
     }
 
     /// The pre-attribution estimate, kept verbatim as the degrade path (and as the thing the
     /// attribution tests assert they still reproduce for steps-only / HR-only days).
+    ///
+    /// `motion` is the #281 gate's evidence. With the gate off (`corroborateMotion` false) every
+    /// elevated reading counts and the result is byte-identical to before the gate existed.
     public static func legacyDailyEstimate(
         hrSamples: [HRSample],
         steps: Int,
         profile: UserProfile,
-        sleepWindow: DateInterval? = nil
+        sleepWindow: DateInterval? = nil,
+        motion: ExerciseMinutes.MotionEvidence = ExerciseMinutes.MotionEvidence(),
+        corroborateMotion: Bool = ExerciseMinutes.motionCorroborationEnabled
     ) -> DailyEstimate {
         let maxHR = max(220 - profile.age, 1)
-        let elevatedMinutes = ExerciseMinutes.estimate(
+
+        // The minutes AND the qualifying bpm come from ONE list of elevated readings, so they always
+        // share a threshold and a gate verdict. Until #281 this re-derived the threshold by hand,
+        // which had to go through `effectiveRestingBaseline` to stay in step: a hybrid (old-model
+        // minutes ÷ new-model qualifying samples) mis-prices the day by up to +40 % while both
+        // halves stay individually self-consistent, so no test catches it. A hand-rolled motion
+        // filter here would reopen exactly that, so the gate is applied inside
+        // `elevatedIntervals` and nowhere else. With the gate off every interval is corroborated:
+        // the same readings and the same Int sum as before, so the same average.
+        let counted = ExerciseMinutes.elevatedIntervals(
             hrSamples: hrSamples,
             maxHR: maxHR,
-            sleepWindow: sleepWindow
-        )
-
-        // MUST be the same threshold `elevatedPieces` just used inside `estimate` above — it is
-        // derived from these same samples, so re-deriving it here reproduces it exactly. Calling
-        // the bare `threshold(maxHR:)` would price a DIFFERENT qualifying set than the minutes it
-        // divides by, silently mixing two models in one kcal number.
-        // MUST go through `effectiveRestingBaseline`, never `restingBaseline` directly — the latter
-        // ignores the kill-switch, and a hybrid (old-model minutes ÷ new-model qualifying samples)
-        // mis-prices the day by up to +40 % while both halves stay individually self-consistent, so
-        // no test catches it.
-        let threshold = ExerciseMinutes.threshold(
-            maxHR: maxHR, restingHR: ExerciseMinutes.effectiveRestingBaseline(hrSamples))
-        let qualifyingBPM = hrSamples.compactMap { sample -> Int? in
-            guard sample.bpm >= threshold,
-                  sleepWindow.map({ !$0.contains(sample.start) }) ?? true else { return nil }
-            return sample.bpm
-        }
+            sleepWindow: sleepWindow,
+            motion: ExerciseMinutes.effectiveMotionEvidence(motion, corroborate: corroborateMotion)
+        ).filter(\.corroborated)
+        let elevatedMinutes = ExerciseMinutes.pieces(sweeping: counted)
+            .reduce(0.0) { $0 + $1.seconds } / 60.0
+        let qualifyingBPM = counted.map(\.bpm)
         let hrKcal: Double
         if elevatedMinutes > 0, !qualifyingBPM.isEmpty {
             let average = Int((Double(qualifyingBPM.reduce(0, +))
@@ -328,12 +345,18 @@ public enum Calories {
         sleepWindow: DateInterval?,
         stepWindows: [StepWindow],
         dayStart: Date,
-        bucketSeconds: TimeInterval
+        bucketSeconds: TimeInterval,
+        motion: ExerciseMinutes.MotionEvidence = ExerciseMinutes.MotionEvidence(),
+        corroborateMotion: Bool = ExerciseMinutes.motionCorroborationEnabled
     ) -> DailyEstimate? {
         let maxHR = max(220 - profile.age, 1)
+        // #281: a gated reading is simply not a piece. Everything below is untouched, so its steps
+        // (if any) are credited in full as walking energy, as for any other non-elevated time.
         let pieces = ExerciseMinutes.elevatedPieces(hrSamples: hrSamples,
                                                     maxHR: maxHR,
-                                                    sleepWindow: sleepWindow)
+                                                    sleepWindow: sleepWindow,
+                                                    motion: motion,
+                                                    corroborateMotion: corroborateMotion)
         let elevatedMinutes = pieces.reduce(0.0) { $0 + $1.seconds } / 60.0
         let dayEnd = dayStart.addingTimeInterval(maxAttributionSeconds)
 

@@ -2862,6 +2862,9 @@ struct CaloriesCardView: View {
                 StepWindow(start: $0.start, end: $0.end, delta: $0.delta)
             }
             let dayStart = Calendar.current.startOfDay(for: Date())
+            // #281 motion gate (off by default): the ring's own activity sessions.
+            let activityIntervals = RingActivityEventLedger.load().corroboratingIntervals(now: Date())
+            let creditedWorkoutIntervals = HealthKitWriter.workoutCreditedSpans(day: dayStart)
             cachedActiveKcal = await Task.detached {
                 Calories.dailyEstimate(
                     hrSamples: samples,
@@ -2869,7 +2872,9 @@ struct CaloriesCardView: View {
                     profile: profile,
                     sleepWindow: sleepWindow,
                     stepWindows: stepWindows,
-                    dayStart: dayStart
+                    dayStart: dayStart,
+                    activityIntervals: activityIntervals,
+                    creditedWorkoutIntervals: creditedWorkoutIntervals
                 ).activeKcal
             }.value
         }

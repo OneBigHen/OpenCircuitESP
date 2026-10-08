@@ -77,6 +77,218 @@ public enum ExerciseMinutes {
         derive ? restingBaseline(hrSamples) : nil
     }
 
+    // MARK: Motion corroboration (#281)
+
+    /// ══ THE MOTION GATE IS OFF. READ THIS BEFORE TURNING IT ON. ══
+    ///
+    /// `false` ⇒ every reading at or above `threshold` is elevated, exactly as through build 73. This
+    /// is the ONE switch: `elevatedPieces`, `estimate`, `Calories.attributedDailyEstimate` and
+    /// `Calories.legacyDailyEstimate` all resolve it through `effectiveMotionEvidence`, so nothing can
+    /// be left half-gated. A half-gated day is worse than either model: the minutes ring and the
+    /// calorie number would stop sharing a qualifying set (see `effectiveRestingBaseline` for what
+    /// that cost the last time).
+    ///
+    /// WHAT IT FIXES. Nothing in this file has ever asked whether the wearer was MOVING. A seated hour
+    /// at 104 bpm (coffee, stress, a fever, a hot room) crosses the same bar as a brisk walk and is
+    /// priced by the same Keytel regression: for a synthetic 35-year-old 70 kg man that hour is
+    /// 451.61 kcal and 60 elevated minutes, more than a 30-minute walk at 110 bpm (254.68 kcal). A
+    /// tester reported ~4000 active kcal on a day with no workout (#281). With the gate on, an elevated
+    /// reading prices only where `corroborates` finds motion around it; the same seated hour reads
+    /// 0 kcal and 0 minutes, and the walk is unchanged to the last digit. The pinned fixtures are in
+    /// `MotionCorroborationGateTests`.
+    ///
+    /// It is a GATE, not a repricing. A gated reading is still a real heart rate. It keeps its sample
+    /// and its HR chart, and its steps (if any) still earn walking energy in `Calories`. Only the
+    /// Keytel channel and the exercise minutes leave it out.
+    ///
+    /// WHY IT SHIPS OFF. Every rule in it is argued from physiology and from the shape of the data we
+    /// store, but none has been checked against real days, and this file has twice shipped a model
+    /// that was self-consistent under `swift test` and wrong on a phone. Apple Health SUMS active
+    /// energy: a wrong write can't be taken back. Known costs, each of which is a real day getting
+    /// LESS than it gets now:
+    ///   • Unrecorded exercise that is not walking (cycling, rowing, weights, swimming) produces few
+    ///     or no steps. It keeps its HR energy only if the ring flagged it as an activity session or
+    ///     the wearer recorded it as a workout.
+    ///   • The ring keeps no step backlog: a quarter-hour nobody was connected for has no steps at all
+    ///     (PROTOCOL.md §5.4, #192), while its HR arrives later as history. A walk in such a gap is
+    ///     corroborated only by the ring's own activity session, which needs ≥ 10 min of continuous
+    ///     activity before the ring recognises one (`AutomaticWorkoutDetector.minimumDuration`).
+    ///   • The ring's activity sessions are kept for 48 h (`RingActivityEventLedger.retention`), so
+    ///     Trends' re-pricing of older days loses that evidence.
+    ///   • A day whose step rows predate per-snapshot step history has no step windows. With the gate
+    ///     on, its HR channel reads 0 and the day falls back to step energy only.
+    ///
+    /// Before turning this on: run a few real days per device both ways (`corroborateMotion:` exists
+    /// so a day can be priced side by side), and check that a day with a known walk keeps it and a
+    /// day with a known seated elevated stretch loses it.
+    public static let motionCorroborationEnabled = false
+
+    /// Minimum step cadence, in steps per minute AVERAGED over a reading's corroboration window,
+    /// that counts as motion.
+    ///
+    /// Tudor-Locke's free-living cadence bands (Tudor-Locke & Rowe, Sports Med 2012;42(5):381–398)
+    /// split stepping into 0 (no movement), 1–19 (incidental: a step to the printer, shifting at a
+    /// desk), 20–39 (sporadic), 40–59 (purposeful), 60–79 / 80–99 / 100–119 (slow, medium, brisk
+    /// walking) and 120+. A cadence of ≥ 100 is the moderate-intensity (≈ 3 MET) heuristic
+    /// (Tudor-Locke et al., BJSM 2018;52(12):776–788).
+    ///
+    /// 20 is the lowest band edge above incidental movement, and it is deliberately not 100.
+    /// Grading intensity is the job of `threshold`, not of this gate. The gate only rejects elevated
+    /// heart rate with no walking behind it, and a seated caffeine or stress bout is incidental
+    /// movement by definition. The cadence is also an average, not a per-minute reading: the ring
+    /// only ever reports a quarter-hour bucket (PROTOCOL.md §5.4), so a 5-minute brisk walk inside an
+    /// otherwise seated quarter reads 500 / 15 ≈ 33 spm. A bar of 100 would refuse most real ring
+    /// walks. A bar of 20 still needs ≥ 250 steps in the 12.5-minute window around one 150 s epoch.
+    /// The incidental band can't produce that, and any real walk does.
+    public static let minCorroboratingCadence: Double = 20
+
+    /// How far BEFORE an elevated reading its corroborating motion may lie.
+    ///
+    /// Heart rate lags movement both ways: it rises within a minute or two of setting off, and it
+    /// stays raised for minutes after stopping. So a reading is explained by motion in the minutes
+    /// before it, never after. The window is `[start − lookback, end]`. 10 min is the recovery tail
+    /// `HealthAlertEvaluator.nonExercising` already pads for the same physiology (#144). The two
+    /// gates therefore agree on what "just exercised" means: a reading this gate credits as exercise
+    /// is one that alert gate would treat as exercising.
+    public static let corroborationLookback: TimeInterval = 10 * 60
+
+    /// Largest gap between two recorded-workout readings that still belongs to the same workout (see
+    /// `recordedWorkoutIntervals`). The ring records a workout reading only on a fresh HR lock, and
+    /// the lock can drop out for minutes in motion (#45). Erring wide costs at most crediting the
+    /// stretch between two recorded workouts. Erring narrow puts part of a recorded workout through
+    /// the gate, and the Health flush still nets the workout's whole committed kcal out of the day
+    /// (`HealthKitWriter.netDailyActiveKcalEstimate`). That would eat energy earned elsewhere.
+    public static let recordedWorkoutMaxGap: TimeInterval = 30 * 60
+
+    /// Everything the gate may treat as motion, as stored. A pure value so the gate stays testable
+    /// off the app's SwiftData models.
+    public struct MotionEvidence: Equatable, Sendable {
+        /// Step snapshots (`StoredStepSample`): ring quarter-hour buckets, strap minutes. Windows
+        /// wider than `HealthAlertEvaluator.maxActivityWindow` are ignored. That width is only ever
+        /// the day-wide `[startOfDay, sampleDate]` fallback, which places none of its steps in time.
+        public let stepWindows: [StepWindow]
+        /// Spans a device itself judged the wearer active: the ring's `0x50` activity sessions,
+        /// already widened by `HealthAlertEvaluator.ringActivityIntervals`
+        /// (`RingActivityEventLedger.corroboratingIntervals`). A piece overlapping one, or its
+        /// `corroborationLookback` tail, is corroborated outright. This is the evidence for a walk the
+        /// suspended app recorded no steps for (2026-09-27).
+        public let activityIntervals: [DateInterval]
+        /// Spans a workout's committed active energy was credited for via
+        /// `HealthKitWriter.recordWorkoutActiveKcal`, recorded independently of any LocalStore HR
+        /// rows (review-281 F1). Some recorded-workout paths bank that credit without ever landing
+        /// span rows — a confirmed ring-detected import (`importDetectedWorkout`), a crash-recovered
+        /// orphan (`saveRecoveredWorkout`), and a live ring session whose HR never locked — so
+        /// `recordedWorkoutIntervals(_:)` alone (which reads only LocalStore rows) misses them, and
+        /// the gate would double-subtract their energy. Today-scoped, same as the kcal credit it
+        /// travels beside.
+        public let creditedWorkoutIntervals: [DateInterval]
+
+        public init(stepWindows: [StepWindow] = [], activityIntervals: [DateInterval] = [],
+                    creditedWorkoutIntervals: [DateInterval] = []) {
+            self.stepWindows = stepWindows
+            self.activityIntervals = activityIntervals
+            self.creditedWorkoutIntervals = creditedWorkoutIntervals
+        }
+    }
+
+    /// The evidence every consumer must resolve the gate through, so the kill-switch can't be honoured
+    /// in one place and ignored in another (the `effectiveRestingBaseline` lesson). nil = no gate:
+    /// every elevated reading counts, byte-identical to before #281.
+    ///
+    /// With the gate on, EMPTY evidence is not "no gate". It means nothing corroborates, so only
+    /// recorded-workout readings count. A caller that forgets to pass its evidence therefore
+    /// under-credits, which is the direction Health can still recover from on a later day. It never
+    /// silently restores the over-credit this gate exists to stop.
+    public static func effectiveMotionEvidence(
+        _ evidence: MotionEvidence,
+        corroborate: Bool = motionCorroborationEnabled
+    ) -> MotionEvidence? {
+        corroborate ? evidence : nil
+    }
+
+    /// The recorded workouts in an HR series, recovered from the readings themselves.
+    ///
+    /// A recorded workout is explicit intent and is NEVER gated (#281). It needs no extra plumbing to
+    /// find, because of an invariant both stores keep (`WorkoutHealthExclusions`): every history row
+    /// either device stores is an INSTANT (`end == start`), and only a recorded workout's readings
+    /// last a moment. The ring stores the ~2 s before each lock (`WorkoutSessionManager`) and the
+    /// strap the second before each reading (`StrapWorkoutSampleLine`). Runs of those readings, split
+    /// at gaps wider than `maxGap`, are the workouts.
+    ///
+    /// This matters for more than intent. The workout's HR lands in the same series this estimate
+    /// prices, and the Health flush nets the workout's committed kcal back out
+    /// (`HealthKitWriter.netDailyActiveKcalEstimate`). Gating a recorded cycling session (few steps)
+    /// would subtract its kcal from energy earned at other times of the day.
+    static func recordedWorkoutIntervals(_ hrSamples: [HRSample],
+                                         maxGap: TimeInterval = recordedWorkoutMaxGap) -> [DateInterval] {
+        let readings = hrSamples.filter { $0.end > $0.start }.sorted { $0.start < $1.start }
+        var out: [DateInterval] = []
+        var open: (start: Date, end: Date)?
+        for r in readings {
+            if let o = open, r.start.timeIntervalSince(o.end) <= maxGap {
+                open = (o.start, Swift.max(o.end, r.end))
+            } else {
+                if let o = open { out.append(DateInterval(start: o.start, end: o.end)) }
+                open = (r.start, r.end)
+            }
+        }
+        if let o = open { out.append(DateInterval(start: o.start, end: o.end)) }
+        return out
+    }
+
+    /// The gate itself, built once per estimate. Internal so the tests can probe single windows.
+    struct MotionGate {
+        /// Usable step windows (moved, and narrow enough to place their steps), sorted by start.
+        private let steps: [StepWindow]
+        /// Activity sessions and recorded workouts: corroborate anything they or their tail overlap.
+        private let spans: [DateInterval]
+
+        init(evidence: MotionEvidence, hrSamples: [HRSample]) {
+            steps = evidence.stepWindows
+                .filter { $0.delta > 0
+                    && $0.end >= $0.start
+                    && $0.end.timeIntervalSince($0.start) <= HealthAlertEvaluator.maxActivityWindow }
+                .sorted { $0.start < $1.start }
+            spans = evidence.activityIntervals + evidence.creditedWorkoutIntervals
+                + ExerciseMinutes.recordedWorkoutIntervals(hrSamples)
+        }
+
+        /// Whether motion explains elevated heart rate over `[start, end]`.
+        func corroborates(start: Date, end: Date) -> Bool {
+            let lookback = ExerciseMinutes.corroborationLookback
+            if spans.contains(where: { start <= $0.end.addingTimeInterval(lookback) && end >= $0.start }) {
+                return true
+            }
+            let lo = start.addingTimeInterval(-lookback)
+            let hi = Swift.max(end, start)
+            // A usable window is at most `maxActivityWindow` wide, so none starting earlier than
+            // this can reach `lo`. Binary-search past them instead of scanning the whole day.
+            let earliest = lo.addingTimeInterval(-HealthAlertEvaluator.maxActivityWindow)
+            var a = 0, b = steps.count
+            while a < b {
+                let m = (a + b) / 2
+                if steps[m].start < earliest { a = m + 1 } else { b = m }
+            }
+            // Prorate each window's steps on its overlap, as `Calories` does on metres: a quarter
+            // bucket earned its steps across the whole quarter, not in the minute we look at.
+            var counted = 0.0
+            var i = a
+            while i < steps.count, steps[i].start <= hi {
+                let w = steps[i]
+                let span = w.end.timeIntervalSince(w.start)
+                if span > 0 {
+                    let overlap = Swift.min(w.end, hi).timeIntervalSince(Swift.max(w.start, lo))
+                    if overlap > 0 { counted += Double(w.delta) * overlap / span }
+                } else if w.start >= lo {
+                    counted += Double(w.delta)  // a point snapshot inside the window counts whole
+                }
+                i += 1
+            }
+            let minutes = hi.timeIntervalSince(lo) / 60
+            return counted >= ExerciseMinutes.minCorroboratingCadence * minutes
+        }
+    }
+
     /// Plausibility band for a derived resting HR. Outside it we do not trust the value and fall
     /// back to the %-of-max model rather than compute a threshold off a bad baseline.
     ///
@@ -221,7 +433,9 @@ public enum ExerciseMinutes {
         epochSeconds: TimeInterval = TimeInterval(BulkRecord.epochSeconds),
         pointSampleWidth: TimeInterval = 0,
         restingHR: Double? = nil,
-        deriveRestingHR: Bool = personalisedThresholdEnabled
+        deriveRestingHR: Bool = personalisedThresholdEnabled,
+        motion: MotionEvidence = MotionEvidence(),
+        corroborateMotion: Bool = motionCorroborationEnabled
     ) -> Double {
         let seconds = elevatedPieces(hrSamples: hrSamples,
                                      maxHR: maxHR,
@@ -229,7 +443,9 @@ public enum ExerciseMinutes {
                                      epochSeconds: epochSeconds,
                                      pointSampleWidth: pointSampleWidth,
                                      restingHR: restingHR,
-                                     deriveRestingHR: deriveRestingHR)
+                                     deriveRestingHR: deriveRestingHR,
+                                     motion: motion,
+                                     corroborateMotion: corroborateMotion)
             .reduce(0.0) { $0 + $1.seconds }
         return seconds / 60.0
     }
@@ -274,6 +490,11 @@ public enum ExerciseMinutes {
     /// Sendable and so the tests can pin both models side by side; flipping this default to `false`
     /// is the one-line revert. Note nil-`restingHR` alone does NOT mean "old model" here — nil means
     /// "derive it", which is why this flag is separate.
+    ///
+    /// `motion` + `corroborateMotion` are the #281 gate, resolved through `effectiveMotionEvidence`
+    /// (see `motionCorroborationEnabled`). Gate on: a reading's interval counts only if
+    /// `MotionGate.corroborates` it. The decision is made per reading BEFORE the overlap collapse, so
+    /// time a gated reading would have claimed goes to a corroborated reading that overlaps it.
     public static func elevatedPieces(
         hrSamples: [HRSample],
         maxHR: Int,
@@ -281,8 +502,46 @@ public enum ExerciseMinutes {
         epochSeconds: TimeInterval = TimeInterval(BulkRecord.epochSeconds),
         pointSampleWidth: TimeInterval = 0,
         restingHR: Double? = nil,
-        deriveRestingHR: Bool = personalisedThresholdEnabled
+        deriveRestingHR: Bool = personalisedThresholdEnabled,
+        motion: MotionEvidence = MotionEvidence(),
+        corroborateMotion: Bool = motionCorroborationEnabled
     ) -> [ElevatedPiece] {
+        let intervals = elevatedIntervals(
+            hrSamples: hrSamples,
+            maxHR: maxHR,
+            sleepWindow: sleepWindow,
+            epochSeconds: epochSeconds,
+            pointSampleWidth: pointSampleWidth,
+            restingHR: restingHR,
+            deriveRestingHR: deriveRestingHR,
+            motion: effectiveMotionEvidence(motion, corroborate: corroborateMotion))
+        return pieces(sweeping: intervals.filter(\.corroborated))
+    }
+
+    /// One elevated reading's interval, before overlap collapse, with the gate's verdict on it.
+    struct ElevatedInterval {
+        let start: Date
+        let end: Date
+        let bpm: Int
+        /// Always true with the gate off (`motion == nil`).
+        let corroborated: Bool
+    }
+
+    /// One interval per elevated reading (at/above threshold, outside the sleep window), in start
+    /// order. `Calories.legacyDailyEstimate` builds its qualifying bpm from the SAME list, so its
+    /// average and its minutes can't come from two different qualifying sets (the hybrid
+    /// `effectiveRestingBaseline`'s comment measures). `motion` is the RESOLVED evidence: pass it
+    /// through `effectiveMotionEvidence`, never raw.
+    static func elevatedIntervals(
+        hrSamples: [HRSample],
+        maxHR: Int,
+        sleepWindow: DateInterval?,
+        epochSeconds: TimeInterval = TimeInterval(BulkRecord.epochSeconds),
+        pointSampleWidth: TimeInterval = 0,
+        restingHR: Double? = nil,
+        deriveRestingHR: Bool = personalisedThresholdEnabled,
+        motion: MotionEvidence?
+    ) -> [ElevatedInterval] {
         let effectiveRHR = restingHR ?? effectiveRestingBaseline(hrSamples, derive: deriveRestingHR)
         let thresh = threshold(maxHR: maxHR, restingHR: effectiveRHR)
         let elevated = hrSamples
@@ -308,6 +567,15 @@ public enum ExerciseMinutes {
             return (s.start, s.start.addingTimeInterval(width), s.bpm)
         }
 
+        let gate = motion.map { MotionGate(evidence: $0, hrSamples: hrSamples) }
+        return intervals.map { iv in
+            ElevatedInterval(start: iv.start, end: iv.end, bpm: iv.bpm,
+                             corroborated: gate?.corroborates(start: iv.start, end: iv.end) ?? true)
+        }
+    }
+
+    /// The overlap collapse `elevatedPieces` has always done, over intervals already in start order.
+    static func pieces(sweeping intervals: [ElevatedInterval]) -> [ElevatedPiece] {
         // Collapse overlaps by sweeping a cursor instead of merging into maximal runs: each
         // interval contributes only the part not already covered. The emitted slices therefore
         // tile exactly the same union the old merge produced (same total duration), but keep the

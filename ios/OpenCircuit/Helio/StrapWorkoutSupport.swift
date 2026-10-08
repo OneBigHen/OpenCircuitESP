@@ -92,6 +92,7 @@ final class StrapWorkoutHealthWriter: StrapWorkoutHealthWriting {
         if energySampleWritten, let kcal = summary.estimatedActiveKcal, kcal > 0,
            Calendar.current.isDateInToday(summary.endDate) {
             HealthKitWriter.recordWorkoutActiveKcal(kcal, day: summary.endDate)
+            HealthKitWriter.recordWorkoutCreditedSpan(start: summary.startDate, end: summary.endDate)
         }
         if !write.route.isEmpty, summary.hasRoute {
             let routeBuilder = HKWorkoutRouteBuilder(healthStore: hkStore, device: nil)

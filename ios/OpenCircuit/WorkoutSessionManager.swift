@@ -1012,6 +1012,7 @@ final class WorkoutSessionManager: NSObject {
         if energySampleWritten, let kcal = summary.estimatedActiveKcal, kcal > 0,
            Calendar.current.isDateInToday(summary.endDate) {
             HealthKitWriter.recordWorkoutActiveKcal(kcal, day: summary.endDate)
+            HealthKitWriter.recordWorkoutCreditedSpan(start: summary.startDate, end: summary.endDate)
         }
 
         // Write GPS route if available
