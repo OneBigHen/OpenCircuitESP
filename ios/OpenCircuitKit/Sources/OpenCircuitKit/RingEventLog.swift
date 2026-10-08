@@ -192,4 +192,14 @@ public struct RingActivityEventLedger: Codable, Equatable, Sendable {
     public func sessions(now: Date) -> [(Date, Date)] {
         events.keys.sorted().flatMap { RingEventLog.activitySessions(events[$0] ?? [], now: now) }
     }
+
+    /// The same sessions as motion evidence for the active-energy gate
+    /// (`ExerciseMinutes.MotionEvidence.activityIntervals`, #281). They are widened back by
+    /// `HealthAlertEvaluator.ringActivityLead` exactly as the alert gate widens them: the ring stamps
+    /// a session when it has recognised the activity, not when the activity began.
+    public func corroboratingIntervals(now: Date) -> [DateInterval] {
+        HealthAlertEvaluator.ringActivityIntervals(sessions(now: now)).compactMap { start, end in
+            end >= start ? DateInterval(start: start, end: end) : nil
+        }
+    }
 }
