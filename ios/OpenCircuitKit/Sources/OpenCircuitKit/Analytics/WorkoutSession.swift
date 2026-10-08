@@ -27,6 +27,7 @@ import Foundation
 /// CoreLocation; indoor types (strength, yoga, other) do not.
 public enum WorkoutSportType: String, Codable, CaseIterable, Sendable {
     case walkingOutdoor
+    case walkingIndoor
     case runningOutdoor
     case runningIndoor
     case cyclingOutdoor
@@ -40,6 +41,7 @@ public enum WorkoutSportType: String, Codable, CaseIterable, Sendable {
     public var displayName: String {
         switch self {
         case .walkingOutdoor: return "Outdoor Walking"
+        case .walkingIndoor:  return "Indoor Walking"
         case .runningOutdoor: return "Outdoor Running"
         case .runningIndoor:  return "Indoor Running"
         case .cyclingOutdoor: return "Outdoor Cycling"
@@ -57,13 +59,14 @@ public enum WorkoutSportType: String, Codable, CaseIterable, Sendable {
     public var isOutdoor: Bool {
         switch self {
         case .walkingOutdoor, .runningOutdoor, .cyclingOutdoor, .hiking: return true
-        case .runningIndoor, .cyclingIndoor, .rowing, .strengthTraining, .yoga, .other: return false
+        case .walkingIndoor, .runningIndoor, .cyclingIndoor, .rowing, .strengthTraining, .yoga, .other: return false
         }
     }
 
     public var systemImageName: String {
         switch self {
         case .walkingOutdoor:    return "figure.walk"
+        case .walkingIndoor:     return "figure.walk.treadmill"
         case .runningOutdoor:    return "figure.run"
         case .runningIndoor:     return "figure.run.treadmill"
         case .cyclingOutdoor:    return "bicycle"
@@ -83,6 +86,7 @@ public enum WorkoutSportType: String, Codable, CaseIterable, Sendable {
         switch self {
         case .runningOutdoor:   return SportType.outdoorRunning.rawValue   // 0x01
         case .walkingOutdoor:   return SportType.outdoorWalking.rawValue   // 0x02
+        case .walkingIndoor:    return SportType.outdoorWalking.rawValue   // 0x02 — ring has no indoor-walk code
         case .runningIndoor:    return SportType.indoorRunning.rawValue    // 0x03
         case .cyclingOutdoor:   return SportType.outdoorCycling.rawValue   // 0x04
         case .cyclingIndoor:    return SportType.indoorCycling.rawValue    // 0x05

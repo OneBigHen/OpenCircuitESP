@@ -8,6 +8,13 @@ import XCTest
 // maxHR formula: 220 - age.
 final class WorkoutSessionTests: XCTestCase {
 
+    func testIndoorWalkingIsIndoorAndReusesOutdoorWalkingRingByte() {
+        XCTAssertEqual(WorkoutSportType.walkingIndoor.displayName, "Indoor Walking")
+        XCTAssertFalse(WorkoutSportType.walkingIndoor.isOutdoor)
+        XCTAssertEqual(WorkoutSportType.walkingIndoor.firmwareByte, 0x02)
+        XCTAssertTrue(WorkoutSportType.allCases.contains(.walkingIndoor))
+    }
+
     // MARK: - HRZoneClassifier.zone(bpm:maxHR:)
 
     func testZoneBelowHalfMaxHRIsNil() {

@@ -270,6 +270,7 @@ final class WorkoutSessionManager: NSObject {
     static func hkActivityType(for sport: WorkoutSportType) -> HKWorkoutActivityType {
         switch sport {
         case .walkingOutdoor:    return .walking
+        case .walkingIndoor:     return .walking
         case .runningOutdoor:    return .running
         case .runningIndoor:     return .running
         case .cyclingOutdoor:    return .cycling
