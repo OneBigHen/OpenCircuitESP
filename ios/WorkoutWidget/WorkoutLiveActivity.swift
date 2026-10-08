@@ -54,13 +54,38 @@ struct WorkoutLiveActivity: Widget {
                         .widgetURL(WorkoutQuickLink.activeSession)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    HStack(alignment: .firstTextBaseline) {
-                        ElapsedText(startDate: context.attributes.startDate, state: context.state)
-                            .font(.system(.title2, design: .rounded).weight(.bold))
-                            .monospacedDigit()
-                        Spacer()
-                        CaloriesLabel(kcal: context.state.activeKcal)
-                            .font(.system(.title3, design: .rounded).weight(.semibold))
+                    VStack(spacing: 4) {
+                        HStack(alignment: .firstTextBaseline) {
+                            ElapsedText(startDate: context.attributes.startDate, state: context.state)
+                                .font(.system(.title2, design: .rounded).weight(.bold))
+                                .monospacedDigit()
+                            Spacer()
+                            CaloriesLabel(kcal: context.state.activeKcal)
+                                .font(.system(.title3, design: .rounded).weight(.semibold))
+                        }
+                        // Only what exists: no distance/pace indoors or without a fix, no zone on a stale HR.
+                        let live = !(context.state.hrIsStale || context.isStale)
+                        if context.state.hasGPSMetrics || (live && context.state.hrZone != nil) {
+                            HStack(spacing: 10) {
+                                if let meters = context.state.distanceMeters {
+                                    Text(LiveFormat.distance(meters, miles: context.state.usesMiles))
+                                }
+                                if let pace = context.state.currentPaceSecPerKm {
+                                    Text("\(LiveFormat.pace(pace, miles: context.state.usesMiles)) GPS")
+                                }
+                                if let avg = context.state.avgPaceSecPerKm {
+                                    Text("avg \(LiveFormat.pace(avg, miles: context.state.usesMiles))")
+                                }
+                                if live, let zone = context.state.hrZone {
+                                    Text("Z\(zone)")
+                                }
+                            }
+                            .font(.caption.weight(.semibold)).monospacedDigit()
+                            .foregroundStyle(.secondary)
+                        }
+                        if context.state.pausedElapsed != nil {
+                            Text("Paused").font(.caption.weight(.semibold)).foregroundStyle(.orange)
+                        }
                     }
                     .padding(.top, 2)
                     .widgetURL(WorkoutQuickLink.activeSession)
@@ -132,8 +157,50 @@ private struct LockScreenLiveActivityView: View {
                         .font(.system(.title, design: .rounded).weight(.bold))
                 }
             }
+
+            // GPS row — only what exists. Indoor / no-fix workouts have no distance or pace and show
+            // no row at all (NO-FABRICATION); the zone appears only for a fresh reading.
+            if context.state.hasGPSMetrics || zoneText != nil {
+                HStack(alignment: .top) {
+                    if let meters = context.state.distanceMeters {
+                        metric(title: "DISTANCE") {
+                            Text(LiveFormat.distance(meters, miles: context.state.usesMiles))
+                                .font(.system(.headline, design: .rounded).weight(.bold)).monospacedDigit()
+                        }
+                    }
+                    if let pace = context.state.currentPaceSecPerKm {
+                        Spacer()
+                        metric(title: "PACE (GPS)") {
+                            Text(LiveFormat.pace(pace, miles: context.state.usesMiles))
+                                .font(.system(.headline, design: .rounded).weight(.bold)).monospacedDigit()
+                        }
+                    }
+                    if let avg = context.state.avgPaceSecPerKm {
+                        Spacer()
+                        metric(title: "AVG PACE") {
+                            Text(LiveFormat.pace(avg, miles: context.state.usesMiles))
+                                .font(.system(.headline, design: .rounded).weight(.bold)).monospacedDigit()
+                        }
+                    }
+                    if let zoneText {
+                        Spacer()
+                        metric(title: "ZONE") {
+                            Text(zoneText)
+                                .font(.system(.headline, design: .rounded).weight(.bold))
+                        }
+                    }
+                }
+            }
+            if context.state.pausedElapsed != nil {
+                Text("Paused").font(.caption.weight(.semibold)).foregroundStyle(.orange)
+            }
         }
         .padding()
+    }
+
+    private var zoneText: String? {
+        guard !(context.state.hrIsStale || context.isStale), let zone = context.state.hrZone else { return nil }
+        return "Z\(zone)"
     }
 
     @ViewBuilder
@@ -145,6 +212,26 @@ private struct LockScreenLiveActivityView: View {
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+// MARK: - Formatting
+
+private extension WorkoutActivityAttributes.ContentState {
+    /// Any GPS-derived figure is present.
+    var hasGPSMetrics: Bool { distanceMeters != nil || currentPaceSecPerKm != nil || avgPaceSecPerKm != nil }
+}
+
+/// Distance and pace text, in the unit the app chose (`usesMiles`; the widget cannot read the setting).
+private enum LiveFormat {
+    static func distance(_ meters: Double, miles: Bool) -> String {
+        miles ? String(format: "%.2f mi", meters / 1609.344) : String(format: "%.2f km", meters / 1000)
+    }
+
+    /// m:ss per km (or per mi).
+    static func pace(_ secPerKm: Double, miles: Bool) -> String {
+        let t = Int((miles ? secPerKm * 1.609344 : secPerKm).rounded())
+        return String(format: "%d:%02d/%@", t / 60, t % 60, miles ? "mi" : "km")
     }
 }
 

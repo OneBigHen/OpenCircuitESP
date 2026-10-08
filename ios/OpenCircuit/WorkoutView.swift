@@ -29,6 +29,9 @@ struct WorkoutView: View {
     /// `@Observable`, so a plain `let` still re-renders this view on every state change.
     let manager: WorkoutSessionManager
     @State private var detectedCandidate: AutomaticWorkoutDetector.Candidate?
+    /// Pause and End each ask first (#283): a single mis-tap must not pause or end a session.
+    @State private var confirmPause = false
+    @State private var confirmEnd = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
 
@@ -314,8 +317,10 @@ struct WorkoutView: View {
                     .monospacedDigit()
                     .contentTransition(.numericText())
                     .lineLimit(1).minimumScaleFactor(0.5)
-                Text(manager.selectedSport.displayName.uppercased())
-                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    .foregroundStyle(manager.isPaused ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                Text(manager.isPaused ? "PAUSED" : manager.selectedSport.displayName.uppercased())
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(manager.isPaused ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
             }
             .padding(.top, 8)
 
@@ -405,17 +410,42 @@ struct WorkoutView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            // Stop button
-            Button(role: .destructive) {
-                Task { await manager.stop() }
-            } label: {
-                Label("Stop Workout", systemImage: "stop.fill")
-                    .frame(maxWidth: .infinity)
+            if manager.isPaused {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "pause.circle").foregroundStyle(.orange)
+                    Text("Paused. Time, heart rate and distance aren't counted until you resume.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .padding(.horizontal)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-            .controlSize(.large)
+
+            // Pause / Resume, and a hold-to-end (the confirmations are below).
+            HStack(spacing: 12) {
+                Button {
+                    if manager.isPaused { manager.resume() } else { confirmPause = true }
+                } label: {
+                    Label(manager.isPaused ? "Resume" : "Pause",
+                          systemImage: manager.isPaused ? "play.fill" : "pause.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .disabled(manager.recordingState != .active)
+                HoldToEndButton(title: "End") { confirmEnd = true }
+            }
             .padding()
+            .confirmationDialog("Pause this workout?", isPresented: $confirmPause, titleVisibility: .visible) {
+                Button("Pause") { manager.pause() }
+                Button("Keep Going", role: .cancel) {}
+            } message: {
+                Text("Time, heart rate and distance stop counting until you resume.")
+            }
+            .confirmationDialog("End this workout?", isPresented: $confirmEnd, titleVisibility: .visible) {
+                Button("End and Save", role: .destructive) { Task { await manager.stop() } }
+                Button("Keep Going", role: .cancel) {}
+            } message: {
+                Text("It will be saved to Apple Health.")
+            }
         }
     }
 
@@ -437,7 +467,7 @@ struct WorkoutView: View {
 
                 // Stats grid
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    statCell("Duration", formattedDuration(summary.durationSeconds))
+                    statCell("Duration", formattedDuration(manager.finishedActiveSeconds ?? summary.durationSeconds))
                     if let avg = summary.avgHR {
                         statCell("Avg HR", "\(avg) bpm")
                     } else {

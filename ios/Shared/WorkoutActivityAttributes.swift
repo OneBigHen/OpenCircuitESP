@@ -15,6 +15,8 @@
 // best-effort live-HR poll can't lock (the common in-motion case), the app sends `bpm = nil` /
 // `hrIsStale = true` and the widget shows "--" / "measuring…" rather than freezing a held value
 // and pretending it is live. `activeKcal` is an ESTIMATE (Keytel HR→energy); the widget labels it.
+// The same holds for `distanceMeters`, the two paces and `hrZone` (#283): nil unless genuinely measured,
+// and the widget HIDES them (indoor / no GPS) instead of showing 0 or a held value. Pace is GPS-derived.
 
 import Foundation
 import ActivityKit
@@ -42,12 +44,26 @@ struct WorkoutActivityAttributes: ActivityAttributes {
         /// True when `bpm` is older than the freshness window — the widget dims it and shows
         /// "measuring…" instead of implying the number is live (#45 honesty).
         public var hrIsStale: Bool
-        /// A workout with pauses (the strap's, #227): the instant the clock counts up from, so it
-        /// shows running time only. nil (the ring's workout, which has no pause) counts from
-        /// `startDate`, exactly as before.
+        /// A workout with pauses (either device, #227 / #283): the instant the clock counts up from,
+        /// so it shows running time only. nil (a workout never paused) counts from `startDate`,
+        /// exactly as before.
         public var clockStart: Date? = nil
         /// Set while paused: the clock stands still at this many seconds. nil while running.
         public var pausedElapsed: TimeInterval? = nil
+        /// GPS distance so far in metres (phone location; the same figure both devices' workouts use).
+        /// nil for indoor sports, with location off, or before the first fix — the widget then shows
+        /// no distance at all rather than 0 or a held value.
+        public var distanceMeters: Double? = nil
+        /// Pace over the last ~30 s of GPS, seconds per km. nil when the fixes are stale or too few.
+        /// GPS-derived; the widget labels it so.
+        public var currentPaceSecPerKm: Double? = nil
+        /// Pace over the whole running time (pauses excluded), seconds per km. nil without enough GPS.
+        public var avgPaceSecPerKm: Double? = nil
+        /// Live HR zone 1...5 from the last FRESH reading; nil when HR is stale/absent or below zone 1.
+        public var hrZone: Int? = nil
+        /// Show distance in miles and pace per mile (the app's distance-unit setting, which the
+        /// widget extension cannot read itself). false = km.
+        public var usesMiles: Bool = false
     }
 
     // MARK: Fixed attributes (set once at start, immutable for the Activity's life)

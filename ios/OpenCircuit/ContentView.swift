@@ -258,7 +258,8 @@ struct ContentView: View {
                     Task { await loadTrends(.syncFinished) }
                 }))
             // The strap's workout (#227): its sheet, the interrupted-workout offer, the landing pass.
-            .modifier(StrapWorkoutHooks(recorder: strapWorkouts, session: helioSession, show: $showStrapWorkout,
+            .modifier(StrapWorkoutHooks(recorder: strapWorkouts, session: helioSession, ringManager: workoutManager,
+                                        show: $showStrapWorkout,
                                         onWorkoutsChanged: { workoutHistoryToken += 1 }))
             // Feed / reset the liveline live-vitals buffer as on-demand readings arrive.
             .onChange(of: session?.liveHR) { _, hr in

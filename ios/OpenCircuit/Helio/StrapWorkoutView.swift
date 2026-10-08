@@ -7,6 +7,9 @@ import OpenCircuitKit
 
 struct StrapWorkoutView: View {
     let recorder: StrapWorkoutRecorder
+    /// Pause and End each ask first (#283).
+    @State private var confirmPause = false
+    @State private var confirmEnd = false
     let session: HelioSession?
     @Environment(\.dismiss) private var dismiss
 
@@ -192,9 +195,10 @@ struct StrapWorkoutView: View {
                        "Location is off, so tracking will pause when the screen locks. Keep the app open, or enable location for OpenCircuit in Settings.")
             }
 
+            // Pause asks first, End needs a hold and then asks (#283): one mis-tap must not do either.
             HStack(spacing: 12) {
                 Button {
-                    if recorder.isPaused { recorder.resume() } else { recorder.pause() }
+                    if recorder.isPaused { recorder.resume() } else { confirmPause = true }
                 } label: {
                     Label(recorder.isPaused ? "Resume" : "Pause",
                           systemImage: recorder.isPaused ? "play.fill" : "pause.fill")
@@ -202,16 +206,21 @@ struct StrapWorkoutView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
-                Button(role: .destructive) {
-                    Task { await recorder.end() }
-                } label: {
-                    Label("End", systemImage: "stop.fill").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .controlSize(.large)
+                HoldToEndButton(title: "End") { confirmEnd = true }
             }
             .padding()
+            .confirmationDialog("Pause this workout?", isPresented: $confirmPause, titleVisibility: .visible) {
+                Button("Pause") { recorder.pause() }
+                Button("Keep Going", role: .cancel) {}
+            } message: {
+                Text("Time, heart rate and distance stop counting until you resume.")
+            }
+            .confirmationDialog("End this workout?", isPresented: $confirmEnd, titleVisibility: .visible) {
+                Button("End and Save", role: .destructive) { Task { await recorder.end() } }
+                Button("Keep Going", role: .cancel) {}
+            } message: {
+                Text("It will be saved to Apple Health.")
+            }
         }
     }
 
@@ -386,11 +395,16 @@ struct StrapWorkoutCard: View {
 struct StrapWorkoutHooks: ViewModifier {
     let recorder: StrapWorkoutRecorder
     let session: HelioSession?
+    let ringManager: WorkoutSessionManager
     @Binding var show: Bool
     let onWorkoutsChanged: () -> Void
 
     func body(content: Content) -> some View {
         content
+            // One app-lifetime observer handles either active device; it pauses locally and asks
+            // before resuming after the last call ends (#283).
+            .modifier(WorkoutCallPausePrompt(coordinator: .shared))
+            .onAppear { WorkoutCallPauseCoordinator.shared.start(ring: ringManager) }
             .task {
                 recorder.resolveOrphan()
                 recorder.landPendingHeartRate()
