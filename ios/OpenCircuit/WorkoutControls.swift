@@ -131,3 +131,21 @@ final class WorkoutCallPauseCoordinator: NSObject, CXCallObserverDelegate {
         tracker.clear()
     }
 }
+
+/// The "paused for a call — resume?" question. An alert (not a dialog) because it must reach the
+/// person on whichever screen they come back to, with the workout sheet minimised or open.
+struct WorkoutCallPausePrompt: ViewModifier {
+    let coordinator: WorkoutCallPauseCoordinator
+
+    func body(content: Content) -> some View {
+        content.alert("Workout paused for a call", isPresented: Binding(
+            get: { coordinator.resumePromptVisible },
+            set: { if !$0 { coordinator.stayPaused() } })
+        ) {
+            Button("Resume") { coordinator.resumeAfterCall() }
+            Button("Stay Paused", role: .cancel) { coordinator.stayPaused() }
+        } message: {
+            Text("Your workout paused when the call connected. Resume it now?")
+        }
+    }
+}

@@ -68,13 +68,13 @@ struct WorkoutLiveActivity: Widget {
                         if context.state.hasGPSMetrics || (live && context.state.hrZone != nil) {
                             HStack(spacing: 10) {
                                 if let meters = context.state.distanceMeters {
-                                    Text(LiveFormat.distance(meters))
+                                    Text(LiveFormat.distance(meters, miles: context.state.usesMiles))
                                 }
                                 if let pace = context.state.currentPaceSecPerKm {
-                                    Text("\(LiveFormat.pace(pace)) GPS")
+                                    Text("\(LiveFormat.pace(pace, miles: context.state.usesMiles)) GPS")
                                 }
                                 if let avg = context.state.avgPaceSecPerKm {
-                                    Text("avg \(LiveFormat.pace(avg))")
+                                    Text("avg \(LiveFormat.pace(avg, miles: context.state.usesMiles))")
                                 }
                                 if live, let zone = context.state.hrZone {
                                     Text("Z\(zone)")
@@ -164,21 +164,21 @@ private struct LockScreenLiveActivityView: View {
                 HStack(alignment: .top) {
                     if let meters = context.state.distanceMeters {
                         metric(title: "DISTANCE") {
-                            Text(LiveFormat.distance(meters))
+                            Text(LiveFormat.distance(meters, miles: context.state.usesMiles))
                                 .font(.system(.headline, design: .rounded).weight(.bold)).monospacedDigit()
                         }
                     }
                     if let pace = context.state.currentPaceSecPerKm {
                         Spacer()
                         metric(title: "PACE (GPS)") {
-                            Text(LiveFormat.pace(pace))
+                            Text(LiveFormat.pace(pace, miles: context.state.usesMiles))
                                 .font(.system(.headline, design: .rounded).weight(.bold)).monospacedDigit()
                         }
                     }
                     if let avg = context.state.avgPaceSecPerKm {
                         Spacer()
                         metric(title: "AVG PACE") {
-                            Text(LiveFormat.pace(avg))
+                            Text(LiveFormat.pace(avg, miles: context.state.usesMiles))
                                 .font(.system(.headline, design: .rounded).weight(.bold)).monospacedDigit()
                         }
                     }
@@ -222,20 +222,16 @@ private extension WorkoutActivityAttributes.ContentState {
     var hasGPSMetrics: Bool { distanceMeters != nil || currentPaceSecPerKm != nil || avgPaceSecPerKm != nil }
 }
 
-/// Distance and pace text. The widget has no access to the app's unit setting (a separate process),
-/// so it follows the device region, the same default the app starts from.
+/// Distance and pace text, in the unit the app chose (`usesMiles`; the widget cannot read the setting).
 private enum LiveFormat {
-    private static var imperial: Bool { Locale.current.measurementSystem == .us || Locale.current.measurementSystem == .uk }
-
-    static func distance(_ meters: Double) -> String {
-        imperial ? String(format: "%.2f mi", meters / 1609.344) : String(format: "%.2f km", meters / 1000)
+    static func distance(_ meters: Double, miles: Bool) -> String {
+        miles ? String(format: "%.2f mi", meters / 1609.344) : String(format: "%.2f km", meters / 1000)
     }
 
     /// m:ss per km (or per mi).
-    static func pace(_ secPerKm: Double) -> String {
-        let perUnit = imperial ? secPerKm * 1.609344 : secPerKm
-        let t = Int(perUnit.rounded())
-        return String(format: "%d:%02d/%@", t / 60, t % 60, imperial ? "mi" : "km")
+    static func pace(_ secPerKm: Double, miles: Bool) -> String {
+        let t = Int((miles ? secPerKm * 1.609344 : secPerKm).rounded())
+        return String(format: "%d:%02d/%@", t / 60, t % 60, miles ? "mi" : "km")
     }
 }
 

@@ -15,6 +15,8 @@
 // best-effort live-HR poll can't lock (the common in-motion case), the app sends `bpm = nil` /
 // `hrIsStale = true` and the widget shows "--" / "measuring…" rather than freezing a held value
 // and pretending it is live. `activeKcal` is an ESTIMATE (Keytel HR→energy); the widget labels it.
+// The same holds for `distanceMeters`, the two paces and `hrZone` (#283): nil unless genuinely measured,
+// and the widget HIDES them (indoor / no GPS) instead of showing 0 or a held value. Pace is GPS-derived.
 
 import Foundation
 import ActivityKit
@@ -59,6 +61,9 @@ struct WorkoutActivityAttributes: ActivityAttributes {
         public var avgPaceSecPerKm: Double? = nil
         /// Live HR zone 1...5 from the last FRESH reading; nil when HR is stale/absent or below zone 1.
         public var hrZone: Int? = nil
+        /// Show distance in miles and pace per mile (the app's distance-unit setting, which the
+        /// widget extension cannot read itself). false = km.
+        public var usesMiles: Bool = false
     }
 
     // MARK: Fixed attributes (set once at start, immutable for the Activity's life)

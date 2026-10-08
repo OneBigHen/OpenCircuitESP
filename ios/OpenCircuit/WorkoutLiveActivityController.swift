@@ -43,7 +43,7 @@ final class WorkoutLiveActivityController {
     static func state(activeSeconds: TimeInterval, activeKcal: Int, bpm: Int?, hrIsStale: Bool,
                       paused: Bool, everPaused: Bool, distanceMeters: Double?,
                       currentPaceSecPerKm: Double?, avgPaceSecPerKm: Double?, hrZone: Int?,
-                      now: Date) -> WorkoutActivityAttributes.ContentState {
+                      now: Date, usesMiles: Bool? = nil) -> WorkoutActivityAttributes.ContentState {
         WorkoutActivityAttributes.ContentState(
             elapsedSeconds: activeSeconds, activeKcal: activeKcal,
             bpm: paused ? nil : bpm, hrIsStale: paused || hrIsStale,
@@ -52,7 +52,15 @@ final class WorkoutLiveActivityController {
             distanceMeters: distanceMeters,
             currentPaceSecPerKm: paused ? nil : currentPaceSecPerKm,
             avgPaceSecPerKm: avgPaceSecPerKm,
-            hrZone: paused ? nil : hrZone)
+            hrZone: paused ? nil : hrZone,
+            usesMiles: usesMiles ?? prefersMiles)
+    }
+
+    /// The app's distance-unit setting (same key and default as the workout screens), handed to the
+    /// widget because the extension cannot read it.
+    static var prefersMiles: Bool {
+        let raw = UserDefaults.standard.string(forKey: "units.distance") ?? DistanceUnit.localeDefault.rawValue
+        return (DistanceUnit(rawValue: raw) ?? .metric) != .metric
     }
 
     /// True when an activity is currently presented (used to gate updates cheaply).
