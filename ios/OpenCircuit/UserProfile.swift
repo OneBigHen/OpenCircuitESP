@@ -618,6 +618,16 @@ struct UserProfileSettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            Section("Shortcuts") {
+                NavigationLink {
+                    ShortcutsGuideView()
+                } label: {
+                    Label("Shortcuts guide", systemImage: "square.stack.3d.up")
+                }
+                Text("Vibrate your wearable or set its wake alarm from an automation.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             // MARK: Data export (#80)
             Section("Data export") {
                 NavigationLink {
