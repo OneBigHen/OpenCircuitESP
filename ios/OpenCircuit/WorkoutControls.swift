@@ -26,18 +26,21 @@ struct HoldToEndButton: View {
     @State private var hint = false
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 12).fill(Color.red.opacity(0.18))
-            GeometryReader { geo in
-                RoundedRectangle(cornerRadius: 12).fill(Color.red)
-                    .frame(width: geo.size.width * progress)
+        // The fill lives in `.background` so it never takes part in layout: a `GeometryReader` as a
+        // ZStack child is greedy and stretched this button far taller than the Pause button beside it.
+        // The label alone sets the height, matching a `.bordered` `.controlSize(.large)` button.
+        Label(hint ? "Hold to end" : title, systemImage: "stop.fill")
+            .font(.headline)
+            .foregroundStyle(progress > 0.5 ? Color.white : Color.red)
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .background(alignment: .leading) {
+                ZStack(alignment: .leading) {
+                    Color.red.opacity(0.18)
+                    GeometryReader { geo in
+                        Color.red.frame(width: geo.size.width * progress)
+                    }
+                }
             }
-            Label(hint ? "Hold to end" : title, systemImage: "stop.fill")
-                .font(.headline)
-                .foregroundStyle(progress > 0.5 ? Color.white : Color.red)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-        }
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .contentShape(RoundedRectangle(cornerRadius: 12))
         .onLongPressGesture(minimumDuration: Self.holdSeconds, maximumDistance: 30, perform: {
