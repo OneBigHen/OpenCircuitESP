@@ -1504,6 +1504,48 @@ final class HealthKitWriter {
         defaults.set(prior + kcal, forKey: workoutActiveKcalKey)
     }
 
+    private static let workoutCreditedSpansDayKey = "hk.workoutCreditedSpans.day"
+    private static let workoutCreditedSpansKey    = "hk.workoutCreditedSpans.spans"
+
+    /// Record `[start, end]` of a workout whose active energy was just credited via
+    /// `recordWorkoutActiveKcal`, so the #281 motion gate can exempt it even when the workout left
+    /// no HR span rows in LocalStore for `ExerciseMinutes.recordedWorkoutIntervals` to find — a
+    /// confirmed ring-detected import, a crash-recovered orphan, or a live ring session whose HR
+    /// never locked (review-281 F1). Call this at the SAME call site as `recordWorkoutActiveKcal`,
+    /// with the same `summary.startDate`/`summary.endDate`, so the two can never drift apart.
+    /// Today-scoped like that credit — it resets when the day rolls, same lifetime as the thing it
+    /// protects.
+    static func recordWorkoutCreditedSpan(start: Date, end: Date, now: Date = Date(),
+                                          _ defaults: UserDefaults = .standard) {
+        guard end > start else { return }
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: now)
+        let storedDay = Date(timeIntervalSince1970: defaults.double(forKey: workoutCreditedSpansDayKey))
+        var spans: [[Double]] = cal.startOfDay(for: storedDay) == today
+            ? (defaults.array(forKey: workoutCreditedSpansKey) as? [[Double]] ?? []) : []
+        spans.append([start.timeIntervalSince1970, end.timeIntervalSince1970])
+        defaults.set(today.timeIntervalSince1970, forKey: workoutCreditedSpansDayKey)
+        defaults.set(spans, forKey: workoutCreditedSpansKey)
+    }
+
+    /// Today's credited workout spans (empty once the day rolls — see `recordWorkoutCreditedSpan`).
+    /// Feed this into `ExerciseMinutes.MotionEvidence.creditedWorkoutIntervals` at every TODAY-scoped
+    /// `Calories.dailyEstimate` call site (Trends' multi-day lookback already has its own, separate
+    /// exposure to this gap and is out of scope here, matching `recordWorkoutActiveKcal`'s own
+    /// today-only lifetime).
+    static func workoutCreditedSpans(day today: Date = Date(),
+                                     _ defaults: UserDefaults = .standard) -> [DateInterval] {
+        let cal = Calendar.current
+        let storedDay = Date(timeIntervalSince1970: defaults.double(forKey: workoutCreditedSpansDayKey))
+        guard cal.startOfDay(for: storedDay) == cal.startOfDay(for: today) else { return [] }
+        let raw = defaults.array(forKey: workoutCreditedSpansKey) as? [[Double]] ?? []
+        return raw.compactMap { pair in
+            guard pair.count == 2, pair[1] > pair[0] else { return nil }
+            return DateInterval(start: Date(timeIntervalSince1970: pair[0]),
+                                end: Date(timeIntervalSince1970: pair[1]))
+        }
+    }
+
     private static func workoutActiveKcalCredited(day today: Date,
                                                   _ defaults: UserDefaults = .standard) -> Double {
         let cal = Calendar.current
@@ -1750,7 +1792,8 @@ final class HealthKitWriter {
             dayStart: today,
             // #281 motion gate (off by default): the ring's own activity sessions, for the walks a
             // suspended app saw no steps for.
-            activityIntervals: RingActivityEventLedger.load().corroboratingIntervals(now: now)
+            activityIntervals: RingActivityEventLedger.load().corroboratingIntervals(now: now),
+            creditedWorkoutIntervals: Self.workoutCreditedSpans(day: today)
         )
 
         // Time-attributed path. Falls through to the single-delta path below when attribution
@@ -2013,7 +2056,8 @@ final class HealthKitWriter {
             .map { StepWindow(start: $0.start, end: $0.end, delta: $0.delta) }
         let motion = ExerciseMinutes.MotionEvidence(
             stepWindows: stepWindows,
-            activityIntervals: RingActivityEventLedger.load().corroboratingIntervals(now: now))
+            activityIntervals: RingActivityEventLedger.load().corroboratingIntervals(now: now),
+            creditedWorkoutIntervals: Self.workoutCreditedSpans(day: today))
         let totalMin = ExerciseMinutes.estimate(hrSamples: hrSamples, maxHR: maxHR,
                                                 sleepWindow: sleepWindow, motion: motion)
         let pendingMin = totalMin - writtenMin

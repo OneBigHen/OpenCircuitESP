@@ -173,10 +173,21 @@ public enum ExerciseMinutes {
         /// `corroborationLookback` tail, is corroborated outright. This is the evidence for a walk the
         /// suspended app recorded no steps for (2026-09-27).
         public let activityIntervals: [DateInterval]
+        /// Spans a workout's committed active energy was credited for via
+        /// `HealthKitWriter.recordWorkoutActiveKcal`, recorded independently of any LocalStore HR
+        /// rows (review-281 F1). Some recorded-workout paths bank that credit without ever landing
+        /// span rows — a confirmed ring-detected import (`importDetectedWorkout`), a crash-recovered
+        /// orphan (`saveRecoveredWorkout`), and a live ring session whose HR never locked — so
+        /// `recordedWorkoutIntervals(_:)` alone (which reads only LocalStore rows) misses them, and
+        /// the gate would double-subtract their energy. Today-scoped, same as the kcal credit it
+        /// travels beside.
+        public let creditedWorkoutIntervals: [DateInterval]
 
-        public init(stepWindows: [StepWindow] = [], activityIntervals: [DateInterval] = []) {
+        public init(stepWindows: [StepWindow] = [], activityIntervals: [DateInterval] = [],
+                    creditedWorkoutIntervals: [DateInterval] = []) {
             self.stepWindows = stepWindows
             self.activityIntervals = activityIntervals
+            self.creditedWorkoutIntervals = creditedWorkoutIntervals
         }
     }
 
@@ -238,7 +249,8 @@ public enum ExerciseMinutes {
                     && $0.end >= $0.start
                     && $0.end.timeIntervalSince($0.start) <= HealthAlertEvaluator.maxActivityWindow }
                 .sorted { $0.start < $1.start }
-            spans = evidence.activityIntervals + ExerciseMinutes.recordedWorkoutIntervals(hrSamples)
+            spans = evidence.activityIntervals + evidence.creditedWorkoutIntervals
+                + ExerciseMinutes.recordedWorkoutIntervals(hrSamples)
         }
 
         /// Whether motion explains elevated heart rate over `[start, end]`.

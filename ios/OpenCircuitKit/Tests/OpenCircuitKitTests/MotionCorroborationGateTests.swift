@@ -41,16 +41,20 @@ final class MotionCorroborationGateTests: XCTestCase {
     }
 
     private func attributed(_ hr: [HRSample], steps: Int, windows: [StepWindow],
-                            activity: [DateInterval] = [], gate: Bool) -> Calories.DailyEstimate {
+                            activity: [DateInterval] = [], credited: [DateInterval] = [],
+                            gate: Bool) -> Calories.DailyEstimate {
         Calories.dailyEstimate(hrSamples: hr, steps: steps, profile: profile,
                                stepWindows: windows, dayStart: day,
-                               activityIntervals: activity, corroborateMotion: gate)
+                               activityIntervals: activity, creditedWorkoutIntervals: credited,
+                               corroborateMotion: gate)
     }
 
     private func legacy(_ hr: [HRSample], steps: Int, windows: [StepWindow] = [],
-                        activity: [DateInterval] = [], gate: Bool) -> Calories.DailyEstimate {
+                        activity: [DateInterval] = [], credited: [DateInterval] = [],
+                        gate: Bool) -> Calories.DailyEstimate {
         Calories.legacyDailyEstimate(hrSamples: hr, steps: steps, profile: profile,
-                                     motion: .init(stepWindows: windows, activityIntervals: activity),
+                                     motion: .init(stepWindows: windows, activityIntervals: activity,
+                                                   creditedWorkoutIntervals: credited),
                                      corroborateMotion: gate)
     }
 
@@ -233,6 +237,37 @@ final class MotionCorroborationGateTests: XCTestCase {
         XCTAssertGreaterThan(off.elevatedMinutes, 29)
         XCTAssertEqual(attributed(hr, steps: 0, windows: [], gate: true), off)
         XCTAssertEqual(legacy(hr, steps: 0, gate: true), legacy(hr, steps: 0, gate: false))
+    }
+
+    /// review-281 F1: a workout whose kcal is credited (`HealthKitWriter.recordWorkoutActiveKcal`)
+    /// but whose readings never form LocalStore span rows — a confirmed ring-detected import, a
+    /// crash-recovered orphan, or a live ring session whose HR never locked. All three leave only
+    /// history INSTANTS (`end == start`) behind, so `recordedWorkoutIntervals` alone can't find them
+    /// and the gate would double-subtract their energy. `creditedWorkoutIntervals` is the
+    /// independent, LocalStore-row-free exemption that closes this: the workout's own window is
+    /// passed straight from the kcal-credit call site.
+    func testAWorkoutCreditedWithoutSpanRowsIsExemptThroughCreditedWorkoutIntervals() {
+        // 45 min of stationary history instants at 132 bpm, no steps, no span rows at all —
+        // simulates importDetectedWorkout/saveRecoveredWorkout/a never-locked live ring session.
+        let hr = bout(16, 0, minutes: 45, bpm: 132)
+        let creditedSpan = DateInterval(start: at(16, 0), end: at(16, 45))
+        let off = attributed(hr, steps: 0, windows: [], gate: false)
+        XCTAssertGreaterThan(off.elevatedMinutes, 44, "sanity: the bout is elevated with the gate off")
+
+        // Without the fix: no steps and no span rows, so the gate zeroes it — the exact
+        // double-subtraction F1 describes (the walk's kcal eaten to 0.0 in the reviewer's repro).
+        let goneWithoutCredit = attributed(hr, steps: 0, windows: [], gate: true)
+        XCTAssertEqual(goneWithoutCredit.activeKcal, 0,
+                       "sanity: without creditedWorkoutIntervals the stationary bout IS gated to zero")
+
+        let withCredit = attributed(hr, steps: 0, windows: [], credited: [creditedSpan], gate: true)
+        XCTAssertEqual(withCredit, off,
+                       "creditedWorkoutIntervals must restore gate-OFF output for the credited span")
+
+        // Legacy path: same property.
+        XCTAssertEqual(legacy(hr, steps: 0, gate: true).activeKcal, 0)
+        XCTAssertEqual(legacy(hr, steps: 0, credited: [creditedSpan], gate: true),
+                       legacy(hr, steps: 0, gate: false))
     }
 
     func testRecordedWorkoutIntervalsGroupSpanReadingsAndIgnoreHistoryInstants() {

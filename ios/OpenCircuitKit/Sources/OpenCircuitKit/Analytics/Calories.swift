@@ -249,10 +249,12 @@ public enum Calories {
         dayStart: Date? = nil,
         bucketSeconds: TimeInterval = energyBucketSeconds,
         activityIntervals: [DateInterval] = [],
+        creditedWorkoutIntervals: [DateInterval] = [],
         corroborateMotion: Bool = ExerciseMinutes.motionCorroborationEnabled
     ) -> DailyEstimate {
         let motion = ExerciseMinutes.MotionEvidence(stepWindows: stepWindows,
-                                                    activityIntervals: activityIntervals)
+                                                    activityIntervals: activityIntervals,
+                                                    creditedWorkoutIntervals: creditedWorkoutIntervals)
         if let dayStart, bucketSeconds > 0, steps == 0 || !stepWindows.isEmpty,
            let attributed = attributedDailyEstimate(hrSamples: hrSamples,
                                                     steps: steps,
