@@ -91,4 +91,31 @@ public enum HistoryDrainCadence {
         if inSleepWindow { return false }    // overnight-quiet: one drain at wake, not many through the night
         return isDue                         // daytime: the normal cadence
     }
+
+    /// Who asked for a drain (#280). The session's sleep window can read "awake" mid-sleep (see
+    /// `OvernightQuiet`), so automatic requests also answer to the wall-clock floor.
+    public enum Request: Sendable, Equatable {
+        /// Cadence, background wake, app-open auto-sync: held by the session window AND the clock floor.
+        case automatic
+        /// Sleep Focus turned off. It bypasses the session's (learned) window, as it always has — Focus
+        /// ending is the "sleep is over" signal — but not the clock floor: Focus can end on its own
+        /// schedule while the wearer is still asleep, and it used to drain then as if it were manual.
+        case sleepFocusEnded
+        /// Pull-to-refresh / Sync tap: never held.
+        case manual
+    }
+
+    /// The overnight-quiet gate with the clock floor folded in (#280, decision 60).
+    /// - Parameter clockQuiet: `OvernightQuiet.suppressAutomaticHistoryOpen` for now; it only ever
+    ///   adds quiet, so daytime behavior is `shouldDrain(manual:inSleepWindow:isDue:)` unchanged.
+    public static func shouldDrain(_ request: Request, inSleepWindow: Bool, clockQuiet: Bool, isDue: Bool) -> Bool {
+        switch request {
+        case .manual:
+            return true
+        case .sleepFocusEnded:
+            return !clockQuiet
+        case .automatic:
+            return shouldDrain(manual: false, inSleepWindow: inSleepWindow || clockQuiet, isDue: isDue)
+        }
+    }
 }
