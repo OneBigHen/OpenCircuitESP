@@ -52,6 +52,50 @@ final class WorkoutSessionRecoveryTests: XCTestCase {
         XCTAssertEqual(recovered.maxHR, 131)
     }
 
+    /// review-283 B3: the heartbeat keeps refreshing `lastAliveAt` (and re-deriving kcal) WHILE
+    /// PAUSED, so without `openPauseStart` a kill mid-pause would recover a workout stretching all
+    /// the way to the last heartbeat — inflating duration and kcal by however long the pause lasted.
+    /// Reproduces the review's exact repro: 300 s running, then killed 600 s into an open pause.
+    func testAnOpenPauseEndsTheRecoveredWorkoutAtThePauseNotTheLastHeartbeat() {
+        let start = t0
+        let pauseBegan = t0.addingTimeInterval(300)       // ran for 300 s
+        let killedAt = pauseBegan.addingTimeInterval(600) // then paused for 600 s before the kill
+
+        let paused = WorkoutSessionSnapshot(sport: .walkingOutdoor, startDate: start, lastAliveAt: killedAt,
+                                            hrSampleCount: 12, activeKcal: 73.5, avgHR: 104, maxHR: 131,
+                                            openPauseStart: pauseBegan)
+
+        guard case .offer(let recovered) = WorkoutSessionRecovery.decide(snapshot: paused, now: killedAt)
+        else { return XCTFail("expected an offer") }
+
+        XCTAssertEqual(recovered.end, pauseBegan, "must end at the pause, not the last heartbeat")
+        XCTAssertEqual(recovered.durationSeconds, 300, accuracy: 0.001)
+        XCTAssertNotEqual(recovered.end, killedAt)
+    }
+
+    /// A snapshot with no open pause (the common case) is completely unaffected: `openPauseStart`
+    /// defaults to nil and `end` falls back to `lastAliveAt` exactly as before this field existed.
+    func testNoOpenPauseLeavesRecoveryUnchanged() {
+        guard case .offer(let recovered) = WorkoutSessionRecovery.decide(
+            snapshot: snapshot(start: t0, alive: t0.addingTimeInterval(600)),
+            now: t0.addingTimeInterval(3600))
+        else { return XCTFail("expected an offer") }
+        XCTAssertEqual(recovered.end, t0.addingTimeInterval(600))
+    }
+
+    /// A corrupted/future-dated pause start is treated as no pause at all, falling back to
+    /// `lastAliveAt` — same discipline as the existing `endsInTheFuture` guard.
+    func testAFuturePauseStartIsIgnored() {
+        let lastAlive = t0.addingTimeInterval(600)
+        let corrupt = WorkoutSessionSnapshot(sport: .walkingOutdoor, startDate: t0, lastAliveAt: lastAlive,
+                                             hrSampleCount: 1, activeKcal: 10, avgHR: 100, maxHR: 110,
+                                             openPauseStart: lastAlive.addingTimeInterval(3600))
+        guard case .offer(let recovered) = WorkoutSessionRecovery.decide(
+            snapshot: corrupt, now: lastAlive.addingTimeInterval(60))
+        else { return XCTFail("expected an offer") }
+        XCTAssertEqual(recovered.end, lastAlive)
+    }
+
     /// No reading ever locked ⇒ no energy is carried. A recovered save must write nothing rather
     /// than an invented number (#45 honesty, carried through the crash path).
     func testNoCapturedHRCarriesNoEnergy() {

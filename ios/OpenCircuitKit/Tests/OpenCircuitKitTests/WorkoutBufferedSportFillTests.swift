@@ -66,6 +66,25 @@ final class WorkoutBufferedSportFillTests: XCTestCase {
         XCTAssertEqual(again.steps, 0)
     }
 
+    /// #283 B2: `stepRecords` must carry every record `steps` counts, each with its own end time, so
+    /// a caller can filter it by time (a workout pause) the same way it already filters `hrSamples` —
+    /// `steps` alone is a pre-summed scalar with no way to exclude part of the window.
+    func testStepRecordsMatchTheScalarTotalAndEachRecordsOwnEnd() throws {
+        let r = try records()
+        let fill = WorkoutBufferedSportFill.fill(captured: [], buffered: r, window: window(r))
+        XCTAssertEqual(fill.stepRecords.count, fill.hrSamples.count,
+                       "every HR-bearing record in this fixture also has steps")
+        XCTAssertEqual(fill.stepRecords.reduce(0) { $0 + $1.steps }, fill.steps,
+                       "stepRecords must sum to exactly the scalar total")
+        XCTAssertEqual(fill.stepRecords.map(\.end), r.map(\.endDate),
+                       "each record's own end, in the same order fill() walks them")
+
+        // Filtering stepRecords down to a sub-window must exclude exactly those records' steps.
+        let excludedEnd = r[3].endDate
+        let filtered = fill.stepRecords.filter { $0.end != excludedEnd }
+        XCTAssertEqual(filtered.reduce(0) { $0 + $1.steps }, fill.steps - r[3].steps)
+    }
+
     /// The manual workout's window overlaps every candidate built from its own records, so
     /// resolving it suppresses the "detected walk".
     func testWorkoutWindowSpanCoversItsOwnRecords() throws {

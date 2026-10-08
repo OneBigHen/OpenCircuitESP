@@ -54,6 +54,13 @@ public struct WorkoutSessionSnapshot: Codable, Equatable, Sendable {
     /// Average / maximum BPM over the readings captured up to `lastAliveAt`, or nil when none were.
     public var avgHR: Int?
     public var maxHR: Int?
+    /// When the CURRENT pause began, if the session was paused at the moment this snapshot was
+    /// written; nil otherwise (#283 B3). The ring's pause ledger lives only in memory, so without
+    /// this a crash mid-pause has no record that a pause was ever open, and recovery would offer a
+    /// span running all the way to `lastAliveAt` — which, because the heartbeat keeps writing this
+    /// snapshot while paused, includes time the workout was not running at all. When present, this
+    /// is where the recovered workout must end, not `lastAliveAt`.
+    public var openPauseStart: Date?
 
     public init(sport: WorkoutSportType,
                 startDate: Date,
@@ -61,7 +68,8 @@ public struct WorkoutSessionSnapshot: Codable, Equatable, Sendable {
                 hrSampleCount: Int,
                 activeKcal: Double? = nil,
                 avgHR: Int? = nil,
-                maxHR: Int? = nil) {
+                maxHR: Int? = nil,
+                openPauseStart: Date? = nil) {
         self.sport = sport
         self.startDate = startDate
         self.lastAliveAt = lastAliveAt
@@ -69,6 +77,7 @@ public struct WorkoutSessionSnapshot: Codable, Equatable, Sendable {
         self.activeKcal = activeKcal
         self.avgHR = avgHR
         self.maxHR = maxHR
+        self.openPauseStart = openPauseStart
     }
 
     /// JSON for the app's UserDefaults blob. Returns nil only if encoding fails, which for this
@@ -142,13 +151,18 @@ public enum WorkoutSessionRecovery {
     public static func decide(snapshot: WorkoutSessionSnapshot?,
                               now: Date = Date()) -> WorkoutRecoveryDecision {
         guard let snapshot else { return .nothingToRecover }
-        guard snapshot.lastAliveAt > snapshot.startDate else { return .discard(.noObservedSpan) }
-        guard snapshot.lastAliveAt <= now else { return .discard(.endsInTheFuture) }
+        // While paused, the heartbeat keeps refreshing `lastAliveAt` (and the snapshot's kcal) even
+        // though the workout stopped running — so the true observed end is where the pause began,
+        // not the last heartbeat (#283 B3). A pause that itself started in the future (a corrupted
+        // blob, same reasoning as the `endsInTheFuture` guard below) is treated as no pause at all.
+        let end = (snapshot.openPauseStart.map { $0 <= now ? $0 : nil } ?? nil) ?? snapshot.lastAliveAt
+        guard end > snapshot.startDate else { return .discard(.noObservedSpan) }
+        guard end <= now else { return .discard(.endsInTheFuture) }
         return .offer(RecoveredWorkout(
             sport: snapshot.sport,
             start: snapshot.startDate,
             // The observed end, NOT `now`. This is the whole point of the type.
-            end: snapshot.lastAliveAt,
+            end: end,
             hrSampleCount: snapshot.hrSampleCount,
             activeKcal: snapshot.activeKcal,
             avgHR: snapshot.avgHR,

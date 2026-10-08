@@ -522,8 +522,20 @@ public enum WorkoutBufferedSportFill {
     public struct Fill: Equatable, Sendable {
         public let hrSamples: [HRSample]
         public let steps: Int
+        /// Per-record step counts with each record's end time, so a caller that needs to exclude
+        /// steps for part of the window (a workout pause, #283 B2) can filter the same way it
+        /// already filters `hrSamples` — `steps` alone is a pre-summed scalar and can't be split.
+        /// Populated for every record `steps` counts, in the same order; filtering this and summing
+        /// `.steps` must always equal the unfiltered total.
+        public let stepRecords: [StepRecord]
         /// Cursors consumed (HR or steps), so a caller merging repeatedly never adds one twice.
         public let cursors: Set<UInt32>
+    }
+
+    /// One buffered record's step count and the end of its 10 s interval (#283 B2).
+    public struct StepRecord: Equatable, Sendable {
+        public let end: Date
+        public let steps: Int
     }
 
     public static func fill(captured: [HRSample],
@@ -533,6 +545,7 @@ public enum WorkoutBufferedSportFill {
                             liveFrameCursors: Set<UInt32> = []) -> Fill {
         var hr: [HRSample] = []
         var steps = 0
+        var stepRecords: [StepRecord] = []
         var used: Set<UInt32> = []
         let interval = HistoricalSportFrame.intervalSeconds
         for record in buffered where !alreadyMerged.contains(record.cursor) {
@@ -548,8 +561,10 @@ public enum WorkoutBufferedSportFill {
             if captured.contains(where: { $0.end >= lo && $0.end <= hi }) { continue }
             if let bpm = record.heartRate { hr.append(HRSample(bpm: bpm, start: start, end: end)) }
             steps += record.steps
+            stepRecords.append(StepRecord(end: end, steps: record.steps))
             used.insert(record.cursor)
         }
-        return Fill(hrSamples: hr.sorted { $0.start < $1.start }, steps: steps, cursors: used)
+        return Fill(hrSamples: hr.sorted { $0.start < $1.start }, steps: steps,
+                   stepRecords: stepRecords, cursors: used)
     }
 }

@@ -108,6 +108,16 @@ final class WorkoutSessionManager: NSObject {
     /// When the GPS distance last moved, for the Live Activity's current pace. Reset at every pause
     /// and resume so a pace never spans a pause.
     private var paceTracker = WorkoutPaceTracker()
+    /// `session.sportSteps` (the ring's own running `0x4e` total) at the moment the current pause
+    /// began, or nil when not paused. The ring counts steps on its own clock with no idea the app
+    /// paused, so this is how the paused portion is found: the delta between this and the ring's
+    /// total at resume (#283 B2).
+    private var pauseStepBaseline: Int?
+    /// Ring-counted steps that accrued during every pause so far this session (closed pauses already
+    /// folded in at `resume()`, the currently open one folded in at `stop()`). Subtracted from the
+    /// ring's running total so a workout's step count excludes time it was paused, the same promise
+    /// already kept for HR, distance and energy.
+    private var pausedRingSteps = 0
 
     /// Drives the workout Live Activity (Lock Screen + Dynamic Island: time / calories / BPM). Owns
     /// all ActivityKit calls so this manager stays a plain state machine. No-op when the user has
@@ -222,9 +232,18 @@ final class WorkoutSessionManager: NSObject {
     /// clock — the instant a later launch is allowed to call the workout's end. Called at start and
     /// on the session's ~10 s heartbeat, so a crash costs at most one heartbeat of duration (an
     /// under-count, which is the safe direction: we never claim time we did not observe).
+    ///
+    /// Also carries `openPauseStart` (#283 B3): without it, a crash mid-pause would have nothing
+    /// marking that the workout had stopped running, and `lastAliveAt` (still refreshed by this
+    /// same heartbeat while paused) would wrongly become the recovered end. `activeKcal` is computed
+    /// as of the RUNNING time elapsed so far, not wall-clock `now` — the same arithmetic
+    /// `currentLiveActivityState()` uses — so a paused session's snapshot stops accruing kcal the
+    /// instant it pauses (#283 B1: this heartbeat write was the second, previously wall-clock, path
+    /// into `liveActiveKcal`'s high-water mark).
     private func persistSessionSnapshot(now: Date = Date()) {
         guard let sessionStart, let agg = aggregator else { return }
         let samples = agg.collectedSamples
+        let activeAsOf = sessionStart.addingTimeInterval(runningSeconds(at: now) ?? now.timeIntervalSince(sessionStart))
         let snapshot = WorkoutSessionSnapshot(
             sport: selectedSport,
             startDate: sessionStart,
@@ -235,11 +254,12 @@ final class WorkoutSessionManager: NSObject {
             activeKcal: samples.isEmpty
                 ? nil
                 : agg.liveActiveKcal(profile: profileSnapshot ?? HealthKitWriter.storedUserProfile(),
-                                     asOf: now),
+                                     asOf: activeAsOf),
             // `currentAvgHR` (not a local mean) so a recovered save reports the same truncated
             // average the live UI and `finalize` would have shown.
             avgHR: agg.currentAvgHR,
-            maxHR: samples.map(\.bpm).max())
+            maxHR: samples.map(\.bpm).max(),
+            openPauseStart: ledger?.openPauseStart)
         guard let data = snapshot.encoded() else { return }
         UserDefaults.standard.set(data, forKey: Self.sessionSnapshotKey)
     }
@@ -350,6 +370,8 @@ final class WorkoutSessionManager: NSObject {
         ledger = WorkoutActivityLedger(start: start)
         paceTracker.reset()
         finishedActiveSeconds = nil
+        pauseStepBaseline = nil
+        pausedRingSteps = 0
         elapsedSeconds = 0
         currentHR = nil
         currentHRAt = nil
@@ -462,6 +484,7 @@ final class WorkoutSessionManager: NSObject {
         self.ledger = ledger
         paceTracker.reset()
         elapsedSeconds = ledger.activeSeconds(until: now)
+        pauseStepBaseline = session?.sportSteps
         Task { await pushLiveActivityUpdate() }
     }
 
@@ -475,6 +498,10 @@ final class WorkoutSessionManager: NSObject {
         lastLocation = nil
         paceTracker.reset()
         elapsedSeconds = ledger.activeSeconds(until: now)
+        if let baseline = pauseStepBaseline, let current = session?.sportSteps {
+            pausedRingSteps += max(0, current - baseline)
+        }
+        pauseStepBaseline = nil
         Task { await pushLiveActivityUpdate() }
     }
 
@@ -571,7 +598,13 @@ final class WorkoutSessionManager: NSObject {
         // Last chance to fold in what the ring buffered while the phone was away (records that
         // arrive after this are still suppressed from auto-detection by `resolveManualWorkout`).
         mergeBufferedSportRecords(until: Date(), force: true)
-        let liveSportSteps = carriedSportSteps + (session?.endSportSession() ?? 0)
+        // Stopped while still paused (#283 B2): no `resume()` will run to fold in this last stretch,
+        // so close it out here, the same arithmetic `resume()` uses.
+        if let baseline = pauseStepBaseline, let current = session?.sportSteps {
+            pausedRingSteps += max(0, current - baseline)
+        }
+        pauseStepBaseline = nil
+        let liveSportSteps = max(0, carriedSportSteps + (session?.endSportSession() ?? 0) - pausedRingSteps)
         let sportSteps = liveSportSteps + bufferedSteps
         session = nil
 
@@ -828,7 +861,13 @@ final class WorkoutSessionManager: NSObject {
                                                  liveFrameCursors: carriedSportFrameCursors.union(session.sportFrameCursors))
         guard !fill.cursors.isEmpty else { return }
         mergedBufferedCursors.formUnion(fill.cursors)
-        bufferedSteps += fill.steps
+        // #283 B2: a record whose steps the live counter already covers is gated above, but a
+        // record landing here can still fall partly or wholly inside a pause — the window this
+        // function is called with can span a pause/resume even when `isPaused` is false NOW (the
+        // first call after a resume still covers the time before it). Filter per-record, the same
+        // way HR already is, rather than the pre-summed `fill.steps` scalar.
+        let countedSteps = fill.stepRecords.filter { ledger?.isActive(at: $0.end, until: end) ?? true }
+        bufferedSteps += countedSteps.reduce(0) { $0 + $1.steps }
         let counted = fill.hrSamples.filter { ledger?.isActive(at: $0.end, until: end) ?? true }
         for s in counted { agg.add(sample: s) }
         hrSampleCount += counted.count
