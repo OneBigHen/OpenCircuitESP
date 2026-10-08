@@ -78,6 +78,18 @@ final class WorkoutSessionManager: NSObject {
     /// this indoor workout will STOP recording once the screen locks. Surfaced in the workout UI so
     /// the opt-in doesn't fail silently (the keep-alive needs location to hold the app alive).
     private(set) var keepAliveUnavailable = false
+    /// Whether the workout is paused (#283). Pause is LOCAL bookkeeping, exactly as the strap's
+    /// (`WorkoutActivityLedger`, #227): the ring's own sport-mode session keeps running underneath,
+    /// and while paused no HR reading is recorded, no distance accrues and the clock stands still.
+    /// No ring command exists or is sent for it.
+    var isPaused: Bool { ledger?.isPaused == true }
+    /// True while a session is running (starting or active) — what the call observer asks.
+    var isRunning: Bool {
+        switch recordingState { case .starting, .active: return true; default: return false }
+    }
+    /// The finished workout's RUNNING time (pauses left out), for the summary screen. nil until one
+    /// finishes; `WorkoutSummary.durationSeconds` stays wall-clock.
+    private(set) var finishedActiveSeconds: TimeInterval?
     /// Count of HR samples captured so far (helps UI surface "good / sparse data").
     private(set) var hrSampleCount: Int = 0
     /// VO₂ max estimate for the outdoor run `stop()` just finished, or the reason there is none
@@ -91,6 +103,11 @@ final class WorkoutSessionManager: NSObject {
 
     private var aggregator: WorkoutSessionAggregator?
     private var sessionStart: Date?
+    /// The session's time line: when the person paused and resumed (#283). Same type as the strap's.
+    private var ledger: WorkoutActivityLedger?
+    /// When the GPS distance last moved, for the Live Activity's current pace. Reset at every pause
+    /// and resume so a pace never spans a pause.
+    private var paceTracker = WorkoutPaceTracker()
 
     /// Drives the workout Live Activity (Lock Screen + Dynamic Island: time / calories / BPM). Owns
     /// all ActivityKit calls so this manager stays a plain state machine. No-op when the user has
@@ -330,6 +347,9 @@ final class WorkoutSessionManager: NSObject {
         let profile = HealthKitWriter.storedUserProfile()
         profileSnapshot = profile
         aggregator = WorkoutSessionAggregator(startDate: start, userAge: profile.age)
+        ledger = WorkoutActivityLedger(start: start)
+        paceTracker.reset()
+        finishedActiveSeconds = nil
         elapsedSeconds = 0
         currentHR = nil
         currentHRAt = nil
@@ -404,7 +424,7 @@ final class WorkoutSessionManager: NSObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self else { break }   // self-terminate if the manager went away
-                self.elapsedSeconds = self.sessionStart.map { Date().timeIntervalSince($0) } ?? self.elapsedSeconds
+                self.elapsedSeconds = self.runningSeconds(at: Date()) ?? self.elapsedSeconds
                 tick += 1
                 if tick % 10 == 0 {
                     await self.pushLiveActivityUpdate()
@@ -426,6 +446,36 @@ final class WorkoutSessionManager: NSObject {
             initial: WorkoutActivityAttributes.ContentState(
                 elapsedSeconds: 0, activeKcal: 0, bpm: nil, hrIsStale: true)
         )
+    }
+
+    /// Running time at `now`, pauses left out. nil before a session has started.
+    private func runningSeconds(at now: Date) -> TimeInterval? {
+        ledger?.activeSeconds(until: now)
+    }
+
+    /// Pause the workout (#283). Local only — see `isPaused`. A no-op unless a session is running
+    /// and not already paused.
+    func pause() {
+        guard recordingState == .active, var ledger, !ledger.isPaused else { return }
+        let now = Date()
+        ledger.pause(at: now)
+        self.ledger = ledger
+        paceTracker.reset()
+        elapsedSeconds = ledger.activeSeconds(until: now)
+        Task { await pushLiveActivityUpdate() }
+    }
+
+    /// Resume where the clock stopped. The first fix after a resume starts a new leg, so no
+    /// distance is counted across the paused stretch.
+    func resume() {
+        guard recordingState == .active, var ledger, ledger.isPaused else { return }
+        let now = Date()
+        ledger.resume(at: now)
+        self.ledger = ledger
+        lastLocation = nil
+        paceTracker.reset()
+        elapsedSeconds = ledger.activeSeconds(until: now)
+        Task { await pushLiveActivityUpdate() }
     }
 
     /// Adopt a `RingSession` that replaced ours mid-workout (a BLE drop → RingScanner reconnected and
@@ -532,7 +582,8 @@ final class WorkoutSessionManager: NSObject {
         gpsActive = false
         UIApplication.shared.isIdleTimerDisabled = false
 
-        let endDate = Date()
+        // Ended while paused: the workout ends where it stopped running (as the strap's does).
+        let endDate = ledger?.openPauseStart ?? Date()
         let profile = HealthKitWriter.storedUserProfile()
 
         guard let agg = aggregator else {
@@ -546,7 +597,7 @@ final class WorkoutSessionManager: NSObject {
         // synced-idle) now carries continuous HR directly, so the old `0x4c` backfill was empty when
         // sport streamed AND a multi-second "saving…" stall when it fell back — removed.
         let hasRoute = !routeLocations.isEmpty && selectedSport.isOutdoor
-        let summary = agg.finalize(
+        var summary = agg.finalize(
             sport: selectedSport,
             endDate: endDate,
             distanceMeters: hasRoute ? distanceMeters : nil,
@@ -554,19 +605,40 @@ final class WorkoutSessionManager: NSObject {
             profile: profile,
             steps: sportSteps > 0 ? sportSteps : nil
         )
+        // A workout that was paused: the same summary maths over the RUNNING stretches only (energy
+        // over the active duration, zones per stretch), and Health gets the pause/resume events. A
+        // workout never paused keeps `finalize` untouched, byte-identical to before (#283).
+        var pauses: [DateInterval] = []
+        var activeSeconds = summary.durationSeconds
+        if let ledger, !ledger.pauses(until: endDate).isEmpty {
+            let paused = StrapWorkoutSummaryBuilder.summarize(
+                sport: selectedSport, ledger: ledger, samples: agg.collectedSamples, end: endDate,
+                distanceMeters: hasRoute ? distanceMeters : nil, hasRoute: hasRoute, profile: profile)
+            let p = paused.summary
+            summary = WorkoutSummary(
+                sport: p.sport, startDate: p.startDate, endDate: p.endDate, avgHR: p.avgHR, maxHR: p.maxHR,
+                estimatedActiveKcal: p.estimatedActiveKcal, zoneBreakdown: p.zoneBreakdown,
+                distanceMeters: p.distanceMeters, hasRoute: p.hasRoute, hrSampleCount: p.hrSampleCount,
+                steps: sportSteps > 0 ? sportSteps : nil, usedFormulaMaxHR: p.usedFormulaMaxHR)
+            pauses = paused.pauses
+            activeSeconds = paused.activeSeconds
+        }
+        finishedActiveSeconds = activeSeconds
+        ledger = nil
 
         // Dismiss the Live Activity now (before the slower HealthKit write) so it clears as the
         // summary screen appears. Publish a final coherent state from the finalized summary.
         await liveActivity.end(final: WorkoutActivityAttributes.ContentState(
-            elapsedSeconds: summary.durationSeconds,
+            elapsedSeconds: activeSeconds,
             activeKcal: Int((summary.estimatedActiveKcal ?? 0).rounded()),
             bpm: summary.avgHR,
             hrIsStale: true))
 
         // Write to HealthKit (best-effort; gracefully silent on failure).
         let saved = await writeWorkout(summary: summary,
-                                       hrSamples: agg.collectedSamples,
-                                       routeLocations: hasRoute ? routeLocations : [])
+                                       hrSamples: agg.collectedSamples,   // none recorded while paused
+                                       routeLocations: hasRoute ? routeLocations : [],
+                                       pauses: pauses)
         if !saved { unresolve() }   // not in Health → let its records be reviewed as detected
 
         // Persist this workout's continuous HR into LocalStore — same store the ring's history
@@ -689,6 +761,7 @@ final class WorkoutSessionManager: NSObject {
         // Screen. Fire-and-forget (cancel() is synchronous); end() no-ops if none is presented.
         let finalState = currentLiveActivityState()
         Task { await liveActivity.end(final: finalState) }
+        ledger = nil
         session?.endSportSession()   // SportStop — discarded session, nothing persisted
         session?.clearManualWorkout()   // discarded: its records may be offered as detected again
         session = nil
@@ -708,6 +781,8 @@ final class WorkoutSessionManager: NSObject {
         Self.setWorkoutInProgressPersisted(false)
         Self.clearSessionSnapshot()
         recordingState = .idle
+        ledger = nil
+        finishedActiveSeconds = nil
         elapsedSeconds = 0
         currentHR = nil
         vo2MaxOutcome = nil
@@ -737,6 +812,10 @@ final class WorkoutSessionManager: NSObject {
     /// win; each record is merged at most once. Cheap no-op unless the buffer changed.
     private func mergeBufferedSportRecords(until end: Date, force: Bool = false) {
         guard let session, let agg = aggregator, let start = sessionStart, end > start else { return }
+        // Paused (#283): nothing is folded in until the person resumes, so the pause's own records
+        // are filtered below against the ledger rather than counted. (The ring's STEP total is an
+        // aggregate it counts on its own and is not split by pause.)
+        if isPaused && !force { return }
         let buffered = session.bufferedSportSamples
         guard force || buffered.count != lastBufferedRecordCount else { return }
         lastBufferedRecordCount = buffered.count
@@ -750,11 +829,10 @@ final class WorkoutSessionManager: NSObject {
         guard !fill.cursors.isEmpty else { return }
         mergedBufferedCursors.formUnion(fill.cursors)
         bufferedSteps += fill.steps
-        for s in fill.hrSamples { agg.add(sample: s) }
-        hrSampleCount += fill.hrSamples.count
-        let maxHR = max(220 - HealthKitWriter.storedUserProfile().age, 1)
-        liveZoneBreakdown = HRZoneClassifier.timeInZonesHeld(
-            hrSamples: agg.collectedSamples, maxHR: maxHR, sessionEnd: end)
+        let counted = fill.hrSamples.filter { ledger?.isActive(at: $0.end, until: end) ?? true }
+        for s in counted { agg.add(sample: s) }
+        hrSampleCount += counted.count
+        recomputeLiveZones(agg: agg, now: end)
     }
 
 
@@ -774,6 +852,7 @@ final class WorkoutSessionManager: NSObject {
         // `0x4e` sport stream OR the live-HR-poll fallback RingSession switches to when the ring never
         // streams `0x4e`. Gating on `sportSessionActive` would drop every reading after that fallback.
         guard let session, session.workoutHRActive else { return }
+        guard !isPaused else { return }   // paused: no reading is recorded (#283); resumes where it left off
         guard WorkoutHRGate.shouldRecord(liveHRAt: session.liveHRAt,
                                          sessionStart: sessionStart,
                                          lastRecordedAt: lastRecordedHRAt,
@@ -783,6 +862,8 @@ final class WorkoutSessionManager: NSObject {
             // No fresh lock this tick — gap preserved (#45). Keep currentHR; the UI ages it out.
             return
         }
+        // A lock captured inside a pause (it can land just after the resume) is not the workout's.
+        guard ledger?.isActive(at: at, until: Date()) ?? true else { return }
         lastRecordedHRAt = at
         // Attribute the ~2 s window leading up to the lock's true capture time (not "now").
         let sample = HRSample(bpm: bpm, start: at.addingTimeInterval(-2), end: at)
@@ -794,15 +875,23 @@ final class WorkoutSessionManager: NSObject {
 
         // Update live zone breakdown. Held (step-function) attribution so the live totals track the
         // real elapsed time each reading covers (~10 s cadence), not just the stamped ~2 s windows.
-        if let agg = aggregator {
-            let maxHR = max(220 - HealthKitWriter.storedUserProfile().age, 1)
-            liveZoneBreakdown = HRZoneClassifier.timeInZonesHeld(
-                hrSamples: agg.collectedSamples, maxHR: maxHR, sessionEnd: Date())
-        }
+        if let agg = aggregator { recomputeLiveZones(agg: agg, now: Date()) }
 
         // A genuinely fresh reading is a meaningful change — refresh the Live Activity's BPM (and the
         // running calorie estimate) immediately, rather than waiting for the ~10 s timer heartbeat.
         Task { await pushLiveActivityUpdate() }
+    }
+
+    /// Live zone totals. A workout never paused keeps the original held attribution untouched; one
+    /// that was paused runs it per running stretch so no reading is held across a pause (#283).
+    private func recomputeLiveZones(agg: WorkoutSessionAggregator, now: Date) {
+        let maxHR = max(220 - HealthKitWriter.storedUserProfile().age, 1)
+        if let ledger, !ledger.pauses(until: now).isEmpty {
+            liveZoneBreakdown = StrapWorkoutSummaryBuilder.zones(agg.collectedSamples, ledger: ledger, end: now, maxHR: maxHR)
+        } else {
+            liveZoneBreakdown = HRZoneClassifier.timeInZonesHeld(
+                hrSamples: agg.collectedSamples, maxHR: maxHR, sessionEnd: now)
+        }
     }
 
     // MARK: - Live Activity feed
@@ -812,15 +901,26 @@ final class WorkoutSessionManager: NSObject {
     /// (HR-only; the distance fallback is a finalize-time concern), the last GENUINE BPM, and its
     /// staleness. Never fabricates HR — `currentHR`/`currentHRIsStale` carry the #45 honesty through.
     private func currentLiveActivityState() -> WorkoutActivityAttributes.ContentState {
+        let now = Date()
+        let active = runningSeconds(at: now) ?? elapsedSeconds
+        // Energy over RUNNING time: `asOf` is the start plus the active seconds, so a paused stretch
+        // adds no calories (identical to `now` for a workout never paused).
         let kcal = aggregator?.liveActiveKcal(
             profile: profileSnapshot ?? HealthKitWriter.storedUserProfile(),
-            asOf: Date()) ?? 0
-        return WorkoutActivityAttributes.ContentState(
-            elapsedSeconds: elapsedSeconds,
-            activeKcal: Int(kcal.rounded()),
-            bpm: currentHR,
-            hrIsStale: currentHRIsStale
-        )
+            asOf: (sessionStart ?? now).addingTimeInterval(active)) ?? 0
+        // GPS figures only for an outdoor session that has a fix: indoor and no-fix workouts publish
+        // nil, and the widget then shows no distance or pace at all (#283, NO-FABRICATION).
+        let distance = selectedSport.isOutdoor && locationPurpose == .route ? distanceMeters : nil
+        let maxHR = max(220 - (profileSnapshot ?? HealthKitWriter.storedUserProfile()).age, 1)
+        return WorkoutLiveActivityController.state(
+            activeSeconds: active, activeKcal: Int(kcal.rounded()),
+            bpm: currentHR, hrIsStale: currentHRIsStale,
+            paused: isPaused, everPaused: ledger.map { !$0.pauses(until: now).isEmpty || $0.isPaused } ?? false,
+            distanceMeters: distance,
+            currentPaceSecPerKm: paceTracker.currentSecPerKm(now: now),
+            avgPaceSecPerKm: WorkoutPace.averageSecPerKm(distanceMeters: distance, activeSeconds: active),
+            hrZone: WorkoutPace.liveZone(bpm: currentHR, isStale: currentHRIsStale, maxHR: maxHR),
+            now: now)
     }
 
     /// Push the current state to the Live Activity (no-op when none is presented).
@@ -884,7 +984,8 @@ final class WorkoutSessionManager: NSObject {
     private func writeWorkout(
         summary: WorkoutSummary,
         hrSamples: [HRSample],
-        routeLocations: [CLLocation]
+        routeLocations: [CLLocation],
+        pauses: [DateInterval] = []
     ) async -> Bool {
         guard HKHealthStore.isHealthDataAvailable() else { return false }
         let activityType = Self.hkActivityType(for: summary.sport)
@@ -906,6 +1007,13 @@ final class WorkoutSessionManager: NSObject {
         } catch {
             return false   // HealthKit auth not granted or unavailable
         }
+
+        // Pause / resume events (#283), so Health's duration is the running time, as the strap's.
+        let events = pauses.flatMap { pause in
+            [HKWorkoutEvent(type: .pause, dateInterval: DateInterval(start: pause.start, duration: 0), metadata: nil),
+             HKWorkoutEvent(type: .resume, dateInterval: DateInterval(start: pause.end, duration: 0), metadata: nil)]
+        }
+        if !events.isEmpty { try? await builder.addWorkoutEvents(events) }
 
         // Add HR samples during the workout window
         if !hrSamples.isEmpty {
@@ -1057,6 +1165,9 @@ extension WorkoutSessionManager: CLLocationManagerDelegate {
             // Indoor keep-alive runs location ONLY to keep the app alive — never store its fixes
             // (no route, no distance). Only an outdoor `.route` session contributes to the map.
             guard self.locationPurpose == .route else { return }
+            // Paused (#283): fixes are dropped — no distance, no route points — while the location
+            // session keeps the app alive. The first fix after the resume starts a new leg.
+            guard !self.isPaused else { return }
             for loc in locations {
                 // Reject stale/cached fixes: CoreLocation delivers a cached last-known location as
                 // the first callback after startUpdatingLocation() — and again on each background
@@ -1071,6 +1182,7 @@ extension WorkoutSessionManager: CLLocationManagerDelegate {
                 self.lastLocation = loc
                 self.routeLocations.append(loc)
             }
+            self.paceTracker.observe(distanceMeters: self.distanceMeters, at: Date())
         }
     }
 

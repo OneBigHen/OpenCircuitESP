@@ -74,3 +74,25 @@ final class WorkoutLiveMetricsTests: XCTestCase {
         XCTAssertFalse(call.allCallsEnded(workoutRunning: false, workoutPaused: false), "ended mid-call")
     }
 }
+
+final class WorkoutPaceTrackerTests: XCTestCase {
+    private let t0 = Date(timeIntervalSince1970: 1_789_862_400)
+    private func at(_ s: TimeInterval) -> Date { t0.addingTimeInterval(s) }
+
+    func testOnlyMovementIsKeptSoPaceAgesOutWhenFixesStop() {
+        var tracker = WorkoutPaceTracker()
+        for s in stride(from: 0.0, through: 20, by: 5) { tracker.observe(distanceMeters: s * 3, at: at(s)) }
+        XCTAssertNotNil(tracker.currentSecPerKm(now: at(21)))
+        for s in stride(from: 25.0, through: 60, by: 5) { tracker.observe(distanceMeters: 60, at: at(s)) }   // no new fixes
+        XCTAssertNil(tracker.currentSecPerKm(now: at(60)))
+    }
+
+    func testResetStartsANewLeg() {
+        var tracker = WorkoutPaceTracker()
+        tracker.observe(distanceMeters: 0, at: at(0)); tracker.observe(distanceMeters: 40, at: at(10))
+        tracker.reset()
+        XCTAssertNil(tracker.currentSecPerKm(now: at(11)))
+        tracker.observe(distanceMeters: nil, at: at(12))
+        XCTAssertTrue(tracker.fixes.isEmpty)
+    }
+}

@@ -183,6 +183,9 @@ final class StrapWorkoutRecorder {
     private(set) var liveZoneBreakdown = WorkoutZoneBreakdown()
     private(set) var hrSampleCount = 0
     private(set) var ledger: WorkoutActivityLedger?
+    /// When the GPS distance last moved, for the Live Activity's current pace (#283). Reset at every
+    /// pause and resume: a pace never spans a pause.
+    @ObservationIgnored private var paceTracker = WorkoutPaceTracker()
     /// Beat-to-beat (RR) intervals the strap sent during this workout. A diagnostic: whether the Helio
     /// sends them at all is unknown (ZEPP_PROTOCOL.md §7.1), and an on-demand HRV reading needs them.
     private(set) var rrIntervalCount = 0
@@ -327,6 +330,7 @@ final class StrapWorkoutRecorder {
         currentHR = nil
         currentHRAt = nil
         liveZoneBreakdown = WorkoutZoneBreakdown()
+        paceTracker.reset()
         hrSampleCount = 0
         tickCount = 0
         vo2MaxOutcome = nil
@@ -356,6 +360,7 @@ final class StrapWorkoutRecorder {
         let now = clock()
         ledger.pause(at: now)
         self.ledger = ledger
+        paceTracker.reset()
         location.setPaused(true)
         refresh(now: now)
         persistJournal(now: now)
@@ -368,6 +373,7 @@ final class StrapWorkoutRecorder {
         let now = clock()
         ledger.resume(at: now)
         self.ledger = ledger
+        paceTracker.reset()
         location.setPaused(false)
         refresh(now: now)
         persistJournal(now: now)
@@ -405,6 +411,7 @@ final class StrapWorkoutRecorder {
     private func refresh(now: Date) {
         guard let ledger else { return }
         activeSeconds = ledger.activeSeconds(until: now)
+        if !ledger.isPaused, selectedSport.isOutdoor { paceTracker.observe(distanceMeters: location.distanceMeters, at: now) }
         liveZoneBreakdown = StrapWorkoutSummaryBuilder.zones(samples, ledger: ledger, end: now, maxHR: maxHR)
     }
 
@@ -726,10 +733,17 @@ final class StrapWorkoutRecorder {
         } ?? 0
         let active = ledger.activeSeconds(until: now)
         // The Lock Screen clock shows running time: counted up from `now − active` while running,
-        // standing still while paused.
-        await liveActivity.update(WorkoutActivityAttributes.ContentState(
-            elapsedSeconds: active, activeKcal: Int(kcal.rounded()),
-            bpm: isPaused ? nil : currentHR, hrIsStale: isPaused || currentHRIsStale,
-            clockStart: now.addingTimeInterval(-active), pausedElapsed: isPaused ? active : nil))
+        // standing still while paused. Distance / pace / zone are the same figures the screen shows
+        // (#283), built by the shared constructor the ring uses.
+        let distance = selectedSport.isOutdoor && !location.route.isEmpty ? location.distanceMeters : nil
+        await liveActivity.update(WorkoutLiveActivityController.state(
+            activeSeconds: active, activeKcal: Int(kcal.rounded()),
+            bpm: currentHR, hrIsStale: currentHRIsStale,
+            paused: isPaused, everPaused: true,
+            distanceMeters: distance,
+            currentPaceSecPerKm: paceTracker.currentSecPerKm(now: now),
+            avgPaceSecPerKm: WorkoutPace.averageSecPerKm(distanceMeters: distance, activeSeconds: active),
+            hrZone: WorkoutPace.liveZone(bpm: currentHR, isStale: currentHRIsStale, maxHR: maxHR),
+            now: now))
     }
 }

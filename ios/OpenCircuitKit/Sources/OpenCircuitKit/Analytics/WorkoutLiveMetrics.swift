@@ -96,3 +96,26 @@ public struct WorkoutCallPause: Equatable, Sendable {
         resumePromptPending = false
     }
 }
+
+/// Remembers when the cumulative GPS distance last MOVED, so "current pace" ages out when fixes stop
+/// (a tracker fed on a timer would otherwise look fresh while the distance sat still).
+public struct WorkoutPaceTracker: Equatable, Sendable {
+    public private(set) var fixes: [WorkoutDistanceFix] = []
+    private static let keepSeconds: TimeInterval = 120
+
+    public init() {}
+
+    /// Feed the cumulative distance as often as convenient; only a change is kept.
+    public mutating func observe(distanceMeters: Double?, at date: Date) {
+        guard let distanceMeters else { return }
+        if let last = fixes.last, distanceMeters <= last.cumulativeMeters { return }
+        fixes.append(WorkoutDistanceFix(at: date, cumulativeMeters: distanceMeters))
+        let cutoff = date.addingTimeInterval(-Self.keepSeconds)
+        fixes.removeAll { $0.at < cutoff }
+    }
+
+    /// Start a new leg (pause or resume): pace never spans a pause.
+    public mutating func reset() { fixes = [] }
+
+    public func currentSecPerKm(now: Date) -> Double? { WorkoutPace.currentSecPerKm(fixes: fixes, now: now) }
+}

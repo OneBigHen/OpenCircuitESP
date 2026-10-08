@@ -34,6 +34,27 @@ final class WorkoutLiveActivityController {
         ActivityAuthorizationInfo().areActivitiesEnabled
     }
 
+    /// The one place both devices' workouts build the Live Activity's state (#283): the ring's
+    /// `WorkoutSessionManager` and the strap's `StrapWorkoutRecorder` pass the same primitives, so the
+    /// shared widget cannot tell them apart and they cannot drift. `everPaused` keeps the clock on the
+    /// plain `startDate` timer for a workout that was never paused (byte-identical to before).
+    /// GPS figures arrive already nil for indoor sports / no fix and are passed through untouched;
+    /// while paused the pace and zone are dropped (nothing is being measured) and the distance stays.
+    static func state(activeSeconds: TimeInterval, activeKcal: Int, bpm: Int?, hrIsStale: Bool,
+                      paused: Bool, everPaused: Bool, distanceMeters: Double?,
+                      currentPaceSecPerKm: Double?, avgPaceSecPerKm: Double?, hrZone: Int?,
+                      now: Date) -> WorkoutActivityAttributes.ContentState {
+        WorkoutActivityAttributes.ContentState(
+            elapsedSeconds: activeSeconds, activeKcal: activeKcal,
+            bpm: paused ? nil : bpm, hrIsStale: paused || hrIsStale,
+            clockStart: everPaused || paused ? now.addingTimeInterval(-activeSeconds) : nil,
+            pausedElapsed: paused ? activeSeconds : nil,
+            distanceMeters: distanceMeters,
+            currentPaceSecPerKm: paused ? nil : currentPaceSecPerKm,
+            avgPaceSecPerKm: avgPaceSecPerKm,
+            hrZone: paused ? nil : hrZone)
+    }
+
     /// True when an activity is currently presented (used to gate updates cheaply).
     var isActive: Bool { activity != nil }
 
