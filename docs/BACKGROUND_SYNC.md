@@ -121,6 +121,15 @@ RingConn's):
   live-read skip. ⚠️ Code-complete, but the end-to-end effect (a full >5 h night draining intact in
   one morning pass, early hours included) still **NEEDS ON-DEVICE VALIDATION** per
   `HistoryDrainCadence.swift:26-27` before it is trusted as the #111/#119 fix.
+- **Clock floor under that gate (#280, decision 60):** the sleep window can read "awake" while the
+  wearer sleeps (a fresh background session before `refreshNightWindowIfNeeded`, a learned window
+  poisoned by a mis-staged night), so both drain entry points also apply `OvernightQuiet`: automatic
+  drains are held 21:00–07:00 always, and 07:00–11:00 until a walking bout is seen at or after 07:00
+  that day. The Sleep Focus-off run (`forceHistoryDrain`) still skips the learned window but answers
+  to this floor too (`RingSession.syncHistoryAfterSleepFocus`); before #280 it drained as manual.
+  Manual sync is never held. The floor gates drains only: `isInSleepWindow`'s other readers
+  (auto-measure, the keepalive's `0x07` fetch, device snapshots, the background live read) are
+  unchanged.
 - **Non-destructive container in the background (#131):** the BGTask handler never builds the
   SwiftData container via the destructive `makeContainer()` wipe-and-recover path — it reuses the
   process-wide container or the non-destructive `makeContainerOrThrow()`, so a transient open
