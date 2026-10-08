@@ -25,6 +25,14 @@ struct GoalsCardView: View {
     // Profile (for maxHR → exercise threshold, and the step/distance active-calorie estimate)
     @AppStorage("userProfile.age") private var age = 35
     @AppStorage("userProfile.weightKg") private var weightKg = 70.0
+    // #284: manual-entry date + cached latest Apple Health body mass; the newer one feeds the math.
+    @AppStorage(WeightResolver.Keys.manualSetAt) private var weightSetAtEpoch = 0.0
+    @AppStorage(WeightResolver.Keys.healthKg) private var healthWeightKg = 0.0
+    @AppStorage(WeightResolver.Keys.healthAt) private var healthWeightAtEpoch = 0.0
+    private var effectiveWeightKg: Double {
+        WeightResolver.resolve(manualKg: weightKg, manualSetAtEpoch: weightSetAtEpoch,
+                               healthKg: healthWeightKg, healthAtEpoch: healthWeightAtEpoch).kg
+    }
     @AppStorage("userProfile.heightCm") private var heightCm = 170.0
     @AppStorage("userProfile.sex") private var sexRaw = BiologicalSex.male.rawValue
 
@@ -93,7 +101,7 @@ struct GoalsCardView: View {
     /// so they re-run on new data (HR count grows, steps, profile, or last night) and never on an
     /// unrelated re-render.
     private var goalsInputsKey: String {
-        "\(todayHR.count)|\(currentSteps)|\(recentStepSamples.count)|\(age)|\(weightKg)|"
+        "\(todayHR.count)|\(currentSteps)|\(recentStepSamples.count)|\(age)|\(effectiveWeightKg)|"
         + "\(heightCm)|\(sexRaw)|\(latestSleep.first?.night.timeIntervalSince1970 ?? 0)"
     }
 
@@ -106,7 +114,7 @@ struct GoalsCardView: View {
     private var currentSteps: Int { todayDaily.first?.steps ?? 0 }
 
     private var profile: UserProfile {
-        UserProfile(age: age, weightKg: max(weightKg, 1), heightCm: max(heightCm, 1),
+        UserProfile(age: age, weightKg: max(effectiveWeightKg, 1), heightCm: max(heightCm, 1),
                     sex: BiologicalSex(rawValue: sexRaw) ?? .male)
     }
 

@@ -25,6 +25,14 @@ struct WellnessBalanceCardView: View {
     @AppStorage(GoalDefaults.activityMinutes) private var actMinGoal     = GoalDefaults.defaultActivityMinutes
     @AppStorage("userProfile.age") private var age = 35
     @AppStorage("userProfile.weightKg") private var weightKg = 70.0
+    // #284: manual-entry date + cached latest Apple Health body mass; the newer one feeds the math.
+    @AppStorage(WeightResolver.Keys.manualSetAt) private var weightSetAtEpoch = 0.0
+    @AppStorage(WeightResolver.Keys.healthKg) private var healthWeightKg = 0.0
+    @AppStorage(WeightResolver.Keys.healthAt) private var healthWeightAtEpoch = 0.0
+    private var effectiveWeightKg: Double {
+        WeightResolver.resolve(manualKg: weightKg, manualSetAtEpoch: weightSetAtEpoch,
+                               healthKg: healthWeightKg, healthAtEpoch: healthWeightAtEpoch).kg
+    }
     @AppStorage("userProfile.heightCm") private var heightCm = 170.0
     @AppStorage("userProfile.sex") private var sexRaw = BiologicalSex.male.rawValue
 
@@ -66,7 +74,7 @@ struct WellnessBalanceCardView: View {
     private var stepsGoal: Int { GoalDefaults.isWeekend() ? weekendSteps : workdaySteps }
     private var currentSteps: Int { todayDaily.first?.steps ?? 0 }
     private var profile: UserProfile {
-        UserProfile(age: age, weightKg: max(weightKg, 1), heightCm: max(heightCm, 1),
+        UserProfile(age: age, weightKg: max(effectiveWeightKg, 1), heightCm: max(heightCm, 1),
                     sex: BiologicalSex(rawValue: sexRaw) ?? .male)
     }
 
@@ -122,7 +130,7 @@ struct WellnessBalanceCardView: View {
 
     /// Recompute identity — changes only when an input to readiness changes.
     private var inputsKey: String {
-        "\(todayHR.count)|\(currentSteps)|\(recentStepSamples.count)|\(age)|\(weightKg)|\(heightCm)|\(sexRaw)|"
+        "\(todayHR.count)|\(currentSteps)|\(recentStepSamples.count)|\(age)|\(effectiveWeightKg)|\(heightCm)|\(sexRaw)|"
         + "\(latestSleep.first?.night.timeIntervalSince1970 ?? 0)|\(latestSleep.first?.sleepScore ?? 0)|"
         + "\(latestSleep.first?.stressScore ?? 0)|\(sleepCredited ? 1 : 0)|"
         + "\(stepsGoal)|\(Int(actMinGoal))|\(Int(activeKcalGoal))"

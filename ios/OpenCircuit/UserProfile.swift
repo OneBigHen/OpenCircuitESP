@@ -24,6 +24,11 @@ private enum BodyUnit: String, CaseIterable {
 struct UserProfileSettingsView: View {
     @AppStorage("userProfile.age") private var age = 35
     @AppStorage("userProfile.weightKg") private var weightKg = 70.0
+    /// When the user last edited the weight (#284), epoch seconds; 0 = never stamped. Lets a newer
+    /// Apple Health body mass take over the calorie math without ever overwriting this field.
+    @AppStorage(WeightResolver.Keys.manualSetAt) private var weightSetAtEpoch = 0.0
+    @AppStorage(WeightResolver.Keys.healthKg) private var healthWeightKg = 0.0
+    @AppStorage(WeightResolver.Keys.healthAt) private var healthWeightAtEpoch = 0.0
     @AppStorage("userProfile.heightCm") private var heightCm = 170.0
     @AppStorage("userProfile.sex") private var sexRaw = BiologicalSex.male.rawValue
 
@@ -207,6 +212,7 @@ struct UserProfileSettingsView: View {
                             Text("lb").foregroundStyle(.secondary)
                         }
                     }
+                    .onChange(of: weightKg) { _, _ in weightSetAtEpoch = Date().timeIntervalSince1970 }
                     // Seed the lb buffer from the current `weightKg` when the imperial field is
                     // (or becomes) visible — on first appear AND when the user flips the unit
                     // picker to imperial — mirroring the height ft/in seeding below (#151).
@@ -214,6 +220,9 @@ struct UserProfileSettingsView: View {
                     .onChange(of: bodyUnitRaw) { _, newRaw in
                         if newRaw == BodyUnit.imperial.rawValue { seedWeightInput() }
                     }
+                }
+                if let note = healthWeightNote {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
                 }
                 LabeledContent("Height") {
                     HStack(spacing: 4) {
@@ -799,6 +808,17 @@ struct UserProfileSettingsView: View {
     private static let lbPerKg = 2.2046226218
     private static let cmPerIn = 2.54
 
+    /// Says so when a newer Apple Health body mass is what the calorie math uses (#284); nil otherwise.
+    private var healthWeightNote: String? {
+        let r = WeightResolver.resolve(manualKg: weightKg, manualSetAtEpoch: weightSetAtEpoch,
+                                       healthKg: healthWeightKg, healthAtEpoch: healthWeightAtEpoch)
+        guard r.source == .appleHealth, let date = r.date else { return nil }
+        let shown = bodyUnit == .metric
+            ? String(format: "%.1f kg", r.kg)
+            : "\(Int((r.kg * Self.lbPerKg).rounded())) lb"
+        return "Calories use \(shown) from Apple Health (\(date.formatted(date: .abbreviated, time: .omitted))), newer than this entry."
+    }
+
     /// Seed the local lb editing field from the stored weight. Done on appear (and when the
     /// unit picker switches to imperial) so the text field holds its own state and typing
     /// isn't reset by the shared `weightKg` store — see `weightLbInput` above (#151).
@@ -808,6 +828,9 @@ struct UserProfileSettingsView: View {
 
     /// Write the local lb field back to `weightKg`, clamping to non-negative.
     private func commitWeight() {
+        // Seeding the buffer on appear also lands here; an unchanged value is not an edit, and must
+        // not stamp "last set" (#284).
+        guard Int((weightKg * Self.lbPerKg).rounded()) != max(weightLbInput, 0) else { return }
         weightKg = Double(max(weightLbInput, 0)) / Self.lbPerKg
     }
 

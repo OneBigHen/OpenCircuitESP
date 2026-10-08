@@ -63,6 +63,18 @@ final class HealthKitShareTypesTests: XCTestCase {
         XCTAssertEqual(VO2MaxHealthWriter.vo2MaxType, vo2)
     }
 
+    /// Body mass (#284) is READ through its OWN lazy request (`HealthKitWeightReader`), so it must
+    /// appear in neither half of the main request — same reasoning as `vo2Max` above.
+    func testBodyMassStaysOutOfTheMainRequest() {
+        let writer = HealthKitWriter()
+        let mass = HKQuantityType(.bodyMass)
+        XCTAssertFalse(writer.allTypes.contains(mass),
+                       "bodyMass is requested lazily by HealthKitWeightReader, never at launch")
+        XCTAssertFalse(writer.authorizationReadTypes.contains(mass),
+                       "no type may be named by both authorization requests")
+        XCTAssertEqual(HealthKitWeightReader.bodyMassType, mass)
+    }
+
     /// The read half must stay clear of the same crash class the share half is pinned against.
     func testAuthorizationReadSetContainsNoCorrelationTypes() {
         XCTAssertFalse(HealthKitWriter().authorizationReadTypes.contains { $0 is HKCorrelationType },
