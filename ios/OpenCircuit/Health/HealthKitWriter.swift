@@ -1747,7 +1747,10 @@ final class HealthKitWriter {
             stepWindows: stepSamples.map {
                 StepWindow(start: $0.start, end: $0.end, delta: $0.delta)
             },
-            dayStart: today
+            dayStart: today,
+            // #281 motion gate (off by default): the ring's own activity sessions, for the walks a
+            // suspended app saw no steps for.
+            activityIntervals: RingActivityEventLedger.load().corroboratingIntervals(now: now)
         )
 
         // Time-attributed path. Falls through to the single-delta path below when attribution
@@ -2004,8 +2007,15 @@ final class HealthKitWriter {
         }
         let hrSamples = rawSamples.map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
         let maxHR = max(220 - profile.age, 1)
+        // The same motion evidence `flushActiveCalories` hands `Calories.dailyEstimate`, so with the
+        // #281 gate on the minutes and the energy share one qualifying set.
+        let stepWindows = ((try? local.stepSamples(from: today.addingTimeInterval(-86_400), to: now)) ?? [])
+            .map { StepWindow(start: $0.start, end: $0.end, delta: $0.delta) }
+        let motion = ExerciseMinutes.MotionEvidence(
+            stepWindows: stepWindows,
+            activityIntervals: RingActivityEventLedger.load().corroboratingIntervals(now: now))
         let totalMin = ExerciseMinutes.estimate(hrSamples: hrSamples, maxHR: maxHR,
-                                                sleepWindow: sleepWindow)
+                                                sleepWindow: sleepWindow, motion: motion)
         let pendingMin = totalMin - writtenMin
         guard pendingMin >= 1.0 else {
             defaults.set(today.timeIntervalSince1970, forKey: Self.exerciseDayKey)
