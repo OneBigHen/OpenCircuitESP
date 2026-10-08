@@ -819,6 +819,18 @@ struct ContentView: View {
                     .font(.caption)
             }
             .padding(.top, 4)
+            // OpenCircuit is free with no ads or subscription — this is the one ask, placed next to
+            // the maker credit rather than anywhere it could interrupt actually using the app. Same
+            // destination as the Profile ▸ Settings ▸ About link (`UserProfileSettingsView`).
+            Link(destination: URL(string: "https://buymeacoffee.com/standardsoftware")!) {
+                HStack(spacing: 5) {
+                    Image(systemName: "cup.and.saucer.fill")
+                    Text("Support Development")
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Theme.accent)
+            }
+            .padding(.top, 10)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 8)

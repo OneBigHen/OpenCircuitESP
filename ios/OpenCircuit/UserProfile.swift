@@ -641,6 +641,9 @@ struct UserProfileSettingsView: View {
                 Link(destination: URL(string: Self.privacyPolicyURL)!) {
                     Label("Privacy Policy", systemImage: "hand.raised")
                 }
+                Link(destination: URL(string: Self.supportDevelopmentURL)!) {
+                    Label("Buy Me a Coffee", systemImage: "cup.and.saucer.fill")
+                }
                 // The same constant as onboarding's last page (#255), so the two can't drift apart.
                 Text(DeviceCopy.disclaimer + " Your data stays on your device and is written only to "
                      + "Apple Health — nothing is sent to any server.")
@@ -766,6 +769,9 @@ struct UserProfileSettingsView: View {
     /// Privacy policy (required for HealthKit). GitHub renders the markdown as a reachable page;
     /// swap for a GitHub Pages URL when one is set up (#101).
     private static let privacyPolicyURL = "https://github.com/perezjuanj/OpenCircuit/blob/master/docs/PRIVACY.md"
+    /// OpenCircuit is free with no ads or subscription (#support). Same destination as the Profile
+    /// tab footer's link (`ContentView.brandFooter`) — keep both in sync if this ever changes.
+    private static let supportDevelopmentURL = "https://buymeacoffee.com/standardsoftware"
     private var appVersion: String {
         let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
         let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
