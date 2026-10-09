@@ -6,9 +6,18 @@ import csv, hashlib, hmac, io, json, os, re, sqlite3, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from browser_auth import SESSIONS
+from health_views import overview,export_chunks
 
 DB=Path(os.getenv("RING_DB","/data/ringconn.db"))
 TOKEN=os.getenv("RING_TOKEN","")
+VIEW_TOKEN=os.getenv("RING_VIEW_TOKEN","")
+STATIC=Path(__file__).resolve().parent/'web'
+ASSETS={'/':'index.html','/index.html':'index.html','/app.css':'app.css',
+        '/app.js':'app.js','/model.mjs':'model.mjs','/sw.js':'sw.js',
+        '/app.webmanifest':'app.webmanifest','/icon-192.png':'icon-192.png',
+        '/icon-512.png':'icon-512.png','/apple-touch-icon.png':'apple-touch-icon.png'}
+CSP="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 EPOCH=1577793600
 DEVICE=re.compile(r"^(?:[A-F0-9]{2}:){5}[A-F0-9]{2}$")
 METRICS={"hr_bpm","hrv_rmssd_ms","spo2_pct","respiratory_rate","battery_pct",
@@ -208,42 +217,76 @@ def export_csv(db,device,since,limit=100000):
     return out.getvalue()
 
 class API(BaseHTTPRequestHandler):
-    def response(self,code,value,ctype="application/json"):
+    def security_headers(self):
+        self.send_header('X-Content-Type-Options','nosniff')
+        self.send_header('Referrer-Policy','no-referrer')
+        self.send_header('Content-Security-Policy',CSP)
+        self.send_header('Cache-Control','no-store')
+    def response(self,code,value,ctype="application/json",headers=None):
         b=value.encode() if isinstance(value,str) else value
         self.send_response(code)
         self.send_header("Content-Type",ctype);self.send_header("Content-Length",str(len(b)))
-        self.send_header("Cache-Control","no-store");self.end_headers()
+        self.security_headers()
+        for key,val in (headers or {}).items():self.send_header(key,val)
+        self.end_headers()
         self.wfile.write(b)
-    def authorized(self):
-        if not TOKEN or not hmac.compare_digest(self.headers.get("X-Ring-Token",""),TOKEN):
+    def authorized(self,read_only=False):
+        token=self.headers.get('X-Ring-Token','')
+        token_ok=bool(TOKEN and hmac.compare_digest(token.encode(),TOKEN.encode()))
+        if not token_ok and not (read_only and SESSIONS.valid(self.headers.get('Cookie'))):
             self.response(401,b'{"error":"unauthorized"}');return False
         return True
     def do_GET(self):
         p=urlparse(self.path)
+        if p.path in ASSETS:
+            file=STATIC/ASSETS[p.path]
+            if not file.is_file():return self.response(404,b'{"error":"asset missing"}')
+            types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8',
+                   '.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8',
+                   '.webmanifest':'application/manifest+json','.png':'image/png'}
+            return self.response(200,file.read_bytes(),types[file.suffix])
         if p.path=="/health":return self.response(200,b'{"ok":true}')
         if p.path=="/time":return self.response(200,str(int(time.time())),"text/plain")
-        if not self.authorized():return
+        if not self.authorized(read_only=True):return
         db=connect()
         try:
             if p.path=="/status":return self.response(200,json.dumps(status(db)))
-            if p.path not in ("/history","/export.csv"):
+            if p.path not in ("/history","/export.csv","/overview"):
                 return self.response(404,b'{"error":"not found"}')
             args=parse_qs(p.query)
             dev=args.get("device",[""])[0].upper();kind=args.get("metric",["hr_bpm"])[0]
             if not DEVICE.fullmatch(dev) or (p.path=="/history" and kind not in METRICS):
                 return self.response(400,b'{"error":"invalid query"}')
-            since=int(args.get("since",[str(int(time.time())-86400)])[0])
+            now=int(time.time())
+            since=int(args.get('start',args.get('since',[str(now-86400)]))[0])
+            until=int(args.get('end',args.get('until',[str(now+1)]))[0])
+            if not 0<=since<until<=now+86400:
+                raise ValueError('invalid range')
+            if p.path=='/overview':
+                if until-since>10*366*86400:raise ValueError('range too long')
+                bucket=max(1,int(args.get('bucket',['900'])[0]),(until-since+599)//600)
+                return self.response(200,json.dumps(overview(db,dev,since,until,bucket)))
             if p.path=="/export.csv":
-                return self.response(200,export_csv(db,dev,since),"text/csv; charset=utf-8")
+                self.send_response(200);self.send_header('Content-Type','text/csv; charset=utf-8')
+                self.send_header('Content-Disposition','attachment; filename="opencircuit-measurements.csv"')
+                self.send_header('Connection','close');self.security_headers();self.end_headers()
+                for chunk in export_chunks(db,dev,since,until):self.wfile.write(chunk)
+                self.close_connection=True;return
             limit=min(5000,max(1,int(args.get("limit",["1500"])[0])))
-            rows=db.execute("SELECT stamp,value FROM metrics WHERE device=? AND metric=? AND stamp>=? ORDER BY stamp DESC LIMIT ?",
-                            (dev,kind,since,limit)).fetchall()
+            cursor=args.get('before',[str(until)])[0].split(':',1)
+            before=int(cursor[0]);source=cursor[1] if len(cursor)==2 else ''
+            if source and source not in ('history','status'):raise ValueError('invalid cursor')
+            rows=db.execute("SELECT stamp,value,source FROM metrics WHERE device=? AND metric=? AND stamp>=? AND stamp<? AND (stamp<? OR (stamp=? AND source<?)) ORDER BY stamp DESC,source DESC LIMIT ?",
+                            (dev,kind,since,until,before,before,source,limit+1)).fetchall()
+            truncated=len(rows)>limit;rows=rows[:limit]
             return self.response(200,json.dumps({"device":dev,"metric":kind,"points":[
-                {"timestamp":t,"value":v} for t,v in reversed(rows)]}))
+                {"timestamp":t,"value":v,"source":source} for t,v,source in reversed(rows)],
+                'truncated':truncated,'next_before':f'{rows[-1][0]}:{rows[-1][2]}' if truncated else None}))
         except (ValueError,OverflowError):
             return self.response(400,b'{"error":"bad query"}')
         finally:db.close()
     def do_POST(self):
+        if self.path in ('/auth/login','/auth/logout'):return self.browser_auth()
         if self.path not in ("/ingest","/complete"):
             return self.response(404,b'{"error":"not found"}')
         if not self.authorized():return
@@ -265,10 +308,31 @@ class API(BaseHTTPRequestHandler):
             db.rollback()
             return self.response(400,json.dumps({"committed":False,"error":str(exc)}))
         finally:db.close()
-    def log_message(self,fmt,*args):print("[ringconn]",fmt%args,flush=True)
+    def browser_auth(self):
+        origin=self.headers.get('Origin')
+        if self.headers.get('X-OpenCircuit-UI')!='1' or (origin and urlparse(origin).netloc!=self.headers.get('Host')):
+            return self.response(403,b'{"error":"same-origin browser request required"}')
+        secure='; Secure' if os.getenv('RING_SECURE_COOKIE','1')!='0' else ''
+        if self.path=='/auth/logout':
+            SESSIONS.revoke(self.headers.get('Cookie'))
+            return self.response(200,b'{"ok":true}',headers={'Set-Cookie':'oc_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict'+secure})
+        try:
+            length=int(self.headers.get('Content-Length','0'))
+            if not 0<length<=2048:raise ValueError('length')
+            data=json.loads(self.rfile.read(length));key=data['token']
+            if not isinstance(key,str):raise ValueError('key')
+        except (ValueError,KeyError,TypeError):return self.response(400,b'{"error":"invalid login"}')
+        session,code=SESSIONS.issue(key,VIEW_TOKEN or TOKEN,self.client_address[0])
+        if code!=200:return self.response(code,b'{"error":"access key rejected or too many attempts"}')
+        return self.response(200,b'{"ok":true}',headers={'Set-Cookie':f'oc_session={session}; Path=/; Max-Age=43200; HttpOnly; SameSite=Strict'+secure})
+    def log_message(self,fmt,*args):
+        # Access logs intentionally omit query strings (device IDs and ranges).
+        print('[ringconn]',self.command,urlparse(self.path).path,flush=True)
 
 if __name__=="__main__":
     if len(TOKEN)<20 or TOKEN.startswith("CHANGE_"):
         raise SystemExit("RING_TOKEN must be a private random token of at least 20 characters")
+    if VIEW_TOKEN and (len(VIEW_TOKEN)<20 or VIEW_TOKEN.startswith('CHANGE_')):
+        raise SystemExit('RING_VIEW_TOKEN must be a private random token of at least 20 characters')
     db=connect();db.close()
     ThreadingHTTPServer((os.getenv("RING_HOST","0.0.0.0"),int(os.getenv("RING_PORT","8765"))),API).serve_forever()

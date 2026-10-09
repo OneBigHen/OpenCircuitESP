@@ -1,6 +1,7 @@
-import importlib.util,json,tempfile,time,unittest
+import importlib.util,json,tempfile,time,unittest,sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'collector'))
 spec=importlib.util.spec_from_file_location("ringcollector",ROOT/"collector"/"app.py")
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 DEVICE="F8:79:99:F7:03:AD"
