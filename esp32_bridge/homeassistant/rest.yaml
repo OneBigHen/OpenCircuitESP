@@ -10,37 +10,44 @@ rest:
       - name: RingConn Bridge Devices
         unique_id: ringconn_bridge_devices
         value_template: "{{ value_json.device_count }}"
+      - name: RingConn Sync Health
+        unique_id: ringconn_sync_health
+        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('sync_state','no_ring_seen') }}"
+      - name: RingConn Last Complete Sync
+        unique_id: ringconn_last_complete_sync
+        device_class: timestamp
+        value_template: "{% set v = ((value_json.devices.values() | list | first) or {}).get('last_complete_sync') %}{{ v | timestamp_local if v else 'unknown' }}"
       - name: RingConn Battery
         unique_id: ringconn_battery
         unit_of_measurement: "%"
         device_class: battery
-        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('battery_pct','unknown') }}"
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('battery_pct','unknown') if d.get('battery_pct_at',0) > as_timestamp(now()) - 86400 else 'unknown' }}"
       - name: RingConn Heart Rate
         unique_id: ringconn_heart_rate
         unit_of_measurement: "bpm"
         state_class: measurement
-        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('hr_bpm','unknown') }}"
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('hr_bpm','unknown') if d.get('hr_bpm_at',0) > as_timestamp(now()) - 129600 else 'unknown' }}"
       - name: RingConn HRV RMSSD
         unique_id: ringconn_hrv_rmssd
         unit_of_measurement: "ms"
         state_class: measurement
-        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('hrv_rmssd_ms','unknown') }}"
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('hrv_rmssd_ms','unknown') if d.get('hrv_rmssd_ms_at',0) > as_timestamp(now()) - 129600 else 'unknown' }}"
       - name: RingConn Blood Oxygen
         unique_id: ringconn_spo2
         unit_of_measurement: "%"
         state_class: measurement
-        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('spo2_pct','unknown') }}"
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('spo2_pct','unknown') if d.get('spo2_pct_at',0) > as_timestamp(now()) - 129600 else 'unknown' }}"
       - name: RingConn Respiratory Rate
         unique_id: ringconn_resp_rate
         unit_of_measurement: "breaths/min"
         state_class: measurement
-        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('respiratory_rate','unknown') }}"
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('respiratory_rate','unknown') if d.get('respiratory_rate_at',0) > as_timestamp(now()) - 129600 else 'unknown' }}"
       - name: RingConn Skin Temperature
         unique_id: ringconn_skin_temp
         unit_of_measurement: "°C"
         device_class: temperature
         state_class: measurement
-        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('skin_temp_c','unknown') }}"
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('skin_temp_c','unknown') if d.get('skin_temp_c_at',0) > as_timestamp(now()) - 86400 else 'unknown' }}"
       - name: RingConn Last Upload
         unique_id: ringconn_last_upload
         device_class: timestamp

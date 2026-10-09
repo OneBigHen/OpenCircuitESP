@@ -9,6 +9,7 @@ A standalone home-lab companion inside this [OpenCircuit fork](https://github.co
 - **ESP32-WROOM-32 / generic DevKit:** `esp32dev` build target (default).
 - **ESP32-C6 DevKitC-1:** `esp32c6` build target.
 - USB power, a stable 2.4 GHz Wi-Fi network, and proximity to the ring are required.
+- Both require a **minimum 4 MB flash board**; the custom partition table has one 2 MB app slot and a 1.94 MB LittleFS spool. **This layout has no OTA slot**; flash firmware via USB. Do not change the partition layout on a board holding data without backing up the spool first.
 - Both use **pioarduino's maintained Arduino 3.x PlatformIO platform**, since stock PlatformIO has lagged Arduino support for C6. Both binaries are built in GitHub Actions.
 
 ## Architecture
@@ -62,6 +63,7 @@ To discover your RingConn Gen 2's exact Bluetooth advertisement name, initially 
 - Stores every history page `0x47`/`0x4c` before acknowledging it, and stores `0x50` cursor end markers.
 - Discards optional high-volume `0x48` OSA waveforms (not yet supported).
 - After a complete upload, waits 8 hours; default normal scan/sync window is 9 AM–10 PM ET (editable).
+- Requires **both channels' persisted end markers** (or explicit empty-channel ACKs) before marking a sync successful. The collector exposes `last_complete_sync` separately from `last_upload`.
 - Stores the last successful sync in NVS to avoid aggressive reconnects after reboots.
 
 ## Home Assistant
@@ -96,3 +98,17 @@ GitHub Actions builds WROOM and C6 separately, plus host-side protocol and SQLit
 5. Power-cycle ESP32 and disconnect Wi-Fi; confirm backlog survives and eventually uploads without duplicates.
 
 No GitHub secrets or health measurements are required in source control.
+
+## Local data export and accurate history
+
+The collector keeps the **real per-epoch timestamps** (not merely the periodic 5-minute Home Assistant state changes). For your whole archive, use authenticated CSV export:
+
+```bash
+curl -H 'X-Ring-Token: YOUR_TOKEN' \
+  'http://YOUR_SERVER_LAN_IP:8765/export.csv?device=AA:BB:CC:DD:EE:FF&since=0' \
+  -o ringconn-measurements.csv
+```
+
+The `/history?device=...&metric=hr_bpm&since=...` API returns at most 5,000 chronological points (set `limit=...`). The Home Assistant REST sensors show the **latest observation**, becoming unknown when too stale (24–36h), and do not backfill all 2.5-minute historical records into HA Recorder. SQLite/CSV preserves those records for long-range analytics.
+
+**Caution:** changing the partition table on an already flashed ESP32 may erase LittleFS. Do not change the flash layout after collecting ring history without first uploading and backing it up.

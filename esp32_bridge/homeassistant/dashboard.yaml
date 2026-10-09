@@ -8,6 +8,8 @@ views:
         title: RingConn bridge
         entities:
           - sensor.ringconn_battery
+          - sensor.ringconn_last_complete_sync
+          - sensor.ringconn_sync_health
           - sensor.ringconn_last_upload
           - sensor.ringconn_bridge_devices
       - type: entities

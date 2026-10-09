@@ -225,8 +225,13 @@ bool upload(){
   http.addHeader("X-Ring-Token",COLLECTOR_TOKEN);
   http.addHeader("Content-Type","application/x-ndjson");
   int code=http.sendRequest("POST",&f,f.size());
+  String receipt=code==200?http.getString():String();
   http.end();f.close();
-  if(code==200){LittleFS.remove(SPOOL);Serial.println("Collector committed spool");return true;}
+  // An unrelated HTTP server returning 200 must never erase the flash spool.
+  bool acknowledged=code==200 &&
+    (receipt.indexOf("\"committed\": true")>=0 ||
+     receipt.indexOf("\"committed\":true")>=0);
+  if(acknowledged){LittleFS.remove(SPOOL);Serial.println("Collector committed spool");return true;}
   Serial.printf("Collector upload failed: HTTP %d; flash retained\n",code);return false;
 }
 // The collector only records a successful sync after confirming persisted

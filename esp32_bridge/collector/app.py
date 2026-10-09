@@ -2,7 +2,7 @@
 Protocol attribution: https://github.com/perezjuanj/OpenCircuit/docs/PROTOCOL.md
 Stores raw wire evidence BEFORE exposing conservatively decoded measurements.
 """
-import hashlib, hmac, json, os, re, sqlite3, time
+import csv, hashlib, hmac, io, json, os, re, sqlite3, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -183,6 +183,17 @@ def status(db):
         result[dev]=item
     return {"device_count":len(result),"devices":result}
 
+def export_csv(db,device,since,limit=100000):
+    """Authenticated, chronological, measured samples for off-platform backups."""
+    out=io.StringIO()
+    writer=csv.writer(out)
+    writer.writerow(("timestamp_utc","metric","value","source"))
+    for stamp,name,value,source in db.execute(
+        "SELECT stamp,metric,value,source FROM metrics WHERE device=? AND stamp>=? "
+        "ORDER BY stamp ASC,metric ASC LIMIT ?",(device,since,limit)):
+        writer.writerow((time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime(stamp)),name,value,source))
+    return out.getvalue()
+
 class API(BaseHTTPRequestHandler):
     def response(self,code,value,ctype="application/json"):
         b=value.encode() if isinstance(value,str) else value
@@ -202,14 +213,18 @@ class API(BaseHTTPRequestHandler):
         db=connect()
         try:
             if p.path=="/status":return self.response(200,json.dumps(status(db)))
-            if p.path!="/history":return self.response(404,b'{"error":"not found"}')
+            if p.path not in ("/history","/export.csv"):
+                return self.response(404,b'{"error":"not found"}')
             args=parse_qs(p.query)
             dev=args.get("device",[""])[0].upper();kind=args.get("metric",["hr_bpm"])[0]
-            if not DEVICE.fullmatch(dev) or kind not in METRICS:
+            if not DEVICE.fullmatch(dev) or (p.path=="/history" and kind not in METRICS):
                 return self.response(400,b'{"error":"invalid query"}')
             since=int(args.get("since",[str(int(time.time())-86400)])[0])
-            rows=db.execute("SELECT stamp,value FROM metrics WHERE device=? AND metric=? AND stamp>=? ORDER BY stamp DESC LIMIT 1500",
-                            (dev,kind,since)).fetchall()
+            if p.path=="/export.csv":
+                return self.response(200,export_csv(db,dev,since),"text/csv; charset=utf-8")
+            limit=min(5000,max(1,int(args.get("limit",["1500"])[0])))
+            rows=db.execute("SELECT stamp,value FROM metrics WHERE device=? AND metric=? AND stamp>=? ORDER BY stamp DESC LIMIT ?",
+                            (dev,kind,since,limit)).fetchall()
             return self.response(200,json.dumps({"device":dev,"metric":kind,"points":[
                 {"timestamp":t,"value":v} for t,v in reversed(rows)]}))
         except (ValueError,OverflowError):

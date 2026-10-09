@@ -103,4 +103,17 @@ class TestCollector(unittest.TestCase):
                             (DEVICE,ch,now-offset,80,b"\x50\x00\x00\x00","old-"+str(ch)))
         with self.assertRaisesRegex(ValueError,"not from same session"):
             m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3]}))
+
+    def test_csv_export_contains_samples_and_no_ring_identifier(self):
+        frame,now=sample()
+        m.ingest(self.db,self.row(frame,now))
+        csv=m.export_csv(self.db,DEVICE,now-3600)
+        self.assertIn("timestamp_utc,metric,value,source",csv)
+        self.assertIn("hr_bpm,65.0,history",csv)
+        self.assertNotIn(DEVICE,csv)
+    def test_history_count_is_retained_across_duplicate_retry(self):
+        frame,now=sample()
+        body=self.row(frame,now)
+        m.ingest(self.db,body);m.ingest(self.db,body)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM epochs").fetchone()[0],1)
 if __name__=="__main__":unittest.main()
