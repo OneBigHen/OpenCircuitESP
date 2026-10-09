@@ -229,6 +229,21 @@ bool upload(){
   if(code==200){LittleFS.remove(SPOOL);Serial.println("Collector committed spool");return true;}
   Serial.printf("Collector upload failed: HTTP %d; flash retained\n",code);return false;
 }
+// The collector only records a successful sync after confirming persisted
+// termination evidence from BOTH history channels, not merely a successful upload.
+bool confirmComplete(){
+  if(!wifi())return false;
+  HTTPClient http;
+  if(!http.begin(String(COLLECTOR_URL)+"/complete"))return false;
+  http.setTimeout(12000);
+  http.addHeader("X-Ring-Token",COLLECTOR_TOKEN);
+  http.addHeader("Content-Type","application/json");
+  String payload="{\"device\":\""+ringID+"\",\"channels\":[0,3]}";
+  int code=http.POST(payload);
+  http.end();
+  if(code!=200)Serial.printf("Completion not confirmed: HTTP %d\n",code);
+  return code==200;
+}
 bool awakeWindow(){
   time_t now=time(nullptr);tm local{};localtime_r(&now,&local);
   return local.tm_hour>=SYNC_START_HOUR&&local.tm_hour<SYNC_END_HOUR;
@@ -266,7 +281,8 @@ void loop(){
   failed=false;packetDropped=false;
   bool complete=connectAndSync();
   bool committed=upload();
-  if(complete&&committed){
+  bool confirmed=complete&&committed&&confirmComplete();
+  if(confirmed){
     lastSuccess=now;
     Preferences p;p.begin("ringbridge",false);p.putULong64("lastsync",(uint64_t)lastSuccess);p.end();
     nextAttempt=millis()+SYNC_INTERVAL_SECONDS*1000UL;
