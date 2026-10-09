@@ -1,12 +1,14 @@
 // Explicit shell allowlist. Health API responses and session credentials NEVER
 // enter CacheStorage, even while a user is signed in.
-const CACHE = "opencircuit-shell-v2";
+const CACHE = "opencircuit-shell-v3";
 const SHELL = [
   "/",
   "/index.html",
   "/app.css",
   "/app.js",
   "/model.mjs",
+  "/setup.mjs",
+  "/ring-views.mjs",
   "/app.webmanifest",
   "/icon-192.png",
   "/icon-512.png",

@@ -161,3 +161,27 @@ export function comparisonText(change, metric, temp = "C") {
     : "%";
   return `${arrow} ${amount.toFixed(absolute ? METRICS[metric].digits : 1)}${absolute ? " " : ""}${unit} versus previous period`;
 }
+
+export function nearestPoint(points, timestamp) {
+  if (!points.length) return -1;
+  let best = 0;
+  for (let n = 1; n < points.length; n++)
+    if (
+      Math.abs(points[n].timestamp - timestamp) <
+      Math.abs(points[best].timestamp - timestamp)
+    )
+      best = n;
+  return best;
+}
+
+export function chargingSummary(metric) {
+  if (!metric?.count) return "No charging states recorded.";
+  const charging = Math.round(metric.mean * metric.count);
+  const state =
+    metric.min !== metric.max
+      ? "Both states"
+      : metric.max === 1
+        ? "Charging"
+        : "Not charging";
+  return `${charging} of ${metric.count} recorded states charging (${Math.round(metric.mean * 100)}%). ${state} observed.`;
+}

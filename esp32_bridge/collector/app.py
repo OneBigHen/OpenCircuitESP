@@ -8,13 +8,15 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from browser_auth import SESSIONS
 from health_views import overview,export_chunks
+from observations import days,diagnostics
+from zoneinfo import ZoneInfoNotFoundError
 
 DB=Path(os.getenv("RING_DB","/data/ringconn.db"))
 TOKEN=os.getenv("RING_TOKEN","")
 VIEW_TOKEN=os.getenv("RING_VIEW_TOKEN","")
 STATIC=Path(__file__).resolve().parent/'web'
 ASSETS={'/':'index.html','/index.html':'index.html','/app.css':'app.css',
-        '/app.js':'app.js','/model.mjs':'model.mjs','/sw.js':'sw.js',
+        '/app.js':'app.js','/model.mjs':'model.mjs','/setup.mjs':'setup.mjs','/ring-views.mjs':'ring-views.mjs','/sw.js':'sw.js',
         '/app.webmanifest':'app.webmanifest','/icon-192.png':'icon-192.png',
         '/icon-512.png':'icon-512.png','/apple-touch-icon.png':'apple-touch-icon.png'}
 CSP="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
@@ -45,6 +47,7 @@ def connect(path=None):
     CREATE TABLE IF NOT EXISTS uploads(
       id INTEGER PRIMARY KEY, device TEXT NOT NULL, committed INTEGER NOT NULL,
       frames INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS metrics_by_device_stamp ON metrics(device,stamp);
     CREATE INDEX IF NOT EXISTS metrics_by_time ON metrics(device,metric,stamp);
     CREATE TABLE IF NOT EXISTS sync_sessions(
       device TEXT NOT NULL, completed INTEGER NOT NULL, sleep_end_seen INTEGER NOT NULL,
@@ -121,7 +124,7 @@ def parse_page(db,device,channel,data,seen):
 
 def ingest(db,body):
     if len(body)>MAX_BYTES:raise ValueError("payload too large")
-    count=0;devices=set()
+    count=0;devices={}
     for idx,line in enumerate(body.splitlines(),1):
         if not line.strip():continue
         # MAX_BYTES already bounds work. Small frames can exceed 4,000 lines
@@ -147,10 +150,10 @@ def ingest(db,body):
                    (dev,ch,seen,raw[0],raw,digest))
         if raw[0] in (0x10,0x87):parse_status(db,dev,raw,seen)
         if raw[0] in (0x47,0x4c):parse_page(db,dev,ch,raw,seen)
-        devices.add(dev);count+=1
-    for dev in devices:
+        devices[dev]=devices.get(dev,0)+1;count+=1
+    for dev,received in devices.items():
         db.execute("INSERT INTO uploads(device,committed,frames) VALUES(?,?,?)",
-                   (dev,int(time.time()),count))
+                   (dev,int(time.time()),received))
     return count
 
 def mark_complete(db,body):
@@ -251,17 +254,19 @@ class API(BaseHTTPRequestHandler):
         db=connect()
         try:
             if p.path=="/status":return self.response(200,json.dumps(status(db)))
-            if p.path not in ("/history","/export.csv","/overview"):
+            if p.path not in ("/history","/export.csv","/overview","/days","/diagnostics"):
                 return self.response(404,b'{"error":"not found"}')
             args=parse_qs(p.query)
             dev=args.get("device",[""])[0].upper();kind=args.get("metric",["hr_bpm"])[0]
             if not DEVICE.fullmatch(dev) or (p.path=="/history" and kind not in METRICS):
                 return self.response(400,b'{"error":"invalid query"}')
+            if p.path=='/diagnostics':return self.response(200,json.dumps(diagnostics(db,dev)))
             now=int(time.time())
             since=int(args.get('start',args.get('since',[str(now-86400)]))[0])
             until=int(args.get('end',args.get('until',[str(now+1)]))[0])
             if not 0<=since<until<=now+86400:
                 raise ValueError('invalid range')
+            if p.path=='/days':return self.response(200,json.dumps(days(db,dev,since,until,args.get('timezone',['UTC'])[0])))
             if p.path=='/overview':
                 if until-since>10*366*86400:raise ValueError('range too long')
                 bucket=max(1,int(args.get('bucket',['900'])[0]),(until-since+599)//600)
@@ -282,7 +287,7 @@ class API(BaseHTTPRequestHandler):
             return self.response(200,json.dumps({"device":dev,"metric":kind,"points":[
                 {"timestamp":t,"value":v,"source":source} for t,v,source in reversed(rows)],
                 'truncated':truncated,'next_before':f'{rows[-1][0]}:{rows[-1][2]}' if truncated else None}))
-        except (ValueError,OverflowError):
+        except (ValueError,OverflowError,ZoneInfoNotFoundError):
             return self.response(400,b'{"error":"bad query"}')
         finally:db.close()
     def do_POST(self):
