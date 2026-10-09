@@ -129,6 +129,8 @@ def ingest(db,body):
             raise ValueError(f"invalid device/channel/time at {idx}")
         if raw[0]!=0x50 and checksum(raw[:-1])!=raw[-1]:
             raise ValueError(f"frame checksum at {idx}")
+        if raw[0]==0x50 and (raw[1]!=0 or len(raw)<9 or (len(raw)-3)%6):
+            raise ValueError(f"invalid end marker at {idx}")
         digest=hashlib.sha256(raw).hexdigest()
         db.execute("INSERT OR IGNORE INTO frames VALUES(?,?,?,?,?,?)",
                    (dev,ch,seen,raw[0],raw,digest))
@@ -160,7 +162,9 @@ def mark_complete(db,body):
         found=db.execute(
             """SELECT MAX(seen) FROM frames
                WHERE device=? AND channel=? AND
-               (opcode=80 OR (opcode=130 AND hex(substr(raw,2,1))='FF'))""",
+               ((opcode=80 AND length(raw)>=9 AND (length(raw)-3)%6=0
+                 AND hex(substr(raw,2,1))='00')
+                OR (opcode=130 AND hex(substr(raw,2,1))='FF'))""",
             (device,channel)).fetchone()[0]
         if found is None or not now-86400<=found<=now+60:
             raise ValueError(f"missing recent end marker or empty-history ACK for channel {channel}")
@@ -261,6 +265,7 @@ class API(BaseHTTPRequestHandler):
     def log_message(self,fmt,*args):print("[ringconn]",fmt%args,flush=True)
 
 if __name__=="__main__":
-    if len(TOKEN)<20:raise SystemExit("RING_TOKEN must be at least 20 characters")
+    if len(TOKEN)<20 or TOKEN.startswith("CHANGE_"):
+        raise SystemExit("RING_TOKEN must be a private random token of at least 20 characters")
     db=connect();db.close()
     ThreadingHTTPServer((os.getenv("RING_HOST","0.0.0.0"),int(os.getenv("RING_PORT","8765"))),API).serve_forever()

@@ -18,5 +18,9 @@ int main(){
   assert(eq(open,"02000c2298c3030100",9));
   uint8_t frame[4]={0x82,0,0,0x82};
   assert(ring::validFrame(frame,4));frame[2]=1;assert(!ring::validFrame(frame,4));
+  uint8_t end[]={0x50,0,0,0x15,0x12,0,0,0,1};
+  assert(ring::validFrame(end,sizeof(end))); // event entry, no XOR trailer
+  uint8_t shortEnd[]={0x50,0,0,0x50};
+  assert(!ring::validFrame(shortEnd,sizeof(shortEnd)));
   puts("SM3 full vector + 2 Gen2 auth captures + cursor + frame checksum: PASS");
 }

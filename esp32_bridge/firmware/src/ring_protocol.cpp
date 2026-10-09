@@ -3,7 +3,12 @@
 #include <cstring>
 namespace ring {
 uint8_t xorChecksum(const uint8_t* d,size_t len) { uint8_t x=0;for(size_t i=0;i<len;i++)x^=d[i];return x; }
-bool validFrame(const uint8_t* d,size_t len) { return len>=3 && xorChecksum(d,len-1)==d[len-1]; }
+bool validFrame(const uint8_t* d,size_t len) {
+  if(len<3)return false;
+  // Cursor/event-log end report: 3-byte header, whole 6-byte entries, NO XOR.
+  if(d[0]==0x50)return d[1]==0&&len>=9&&(len-3)%6==0;
+  return xorChecksum(d,len-1)==d[len-1];
+}
 static inline uint32_t rotl(uint32_t a,unsigned n) {n&=31;return n?((a<<n)|(a>>(32-n))):a;}
 static inline uint32_t p0(uint32_t x) {return x^rotl(x,9)^rotl(x,17);}
 static inline uint32_t p1(uint32_t x) {return x^rotl(x,15)^rotl(x,23);}

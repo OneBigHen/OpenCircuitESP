@@ -106,11 +106,12 @@ bool save(const Packet &p){
   return good;
 }
 void receive(){
+  if(packetDropped)failed=true;
   if(failed)return;
   Packet p{};
-  while(xQueueReceive(inbox,&p,0)==pdTRUE){
+  while(!failed&&!packetDropped&&xQueueReceive(inbox,&p,0)==pdTRUE){
     uint8_t op=p.bytes[0];
-    if((op==0x47||op==0x4c||op==0x82||op==0x10||op==0x87)
+    if((op==0x47||op==0x4c||op==0x50||op==0x82||op==0x10||op==0x87)
        &&!ring::validFrame(p.bytes,p.length)){
       Serial.printf("Corrupt frame %02X; refusing ACK\n",op);failed=true;continue;
     }
@@ -218,7 +219,7 @@ bool connectAndSync(){
     bool night=drain(0x00);
     bool day=!failed&&client->isConnected()?drain(0x03):false;
     success=night&&day&&!failed;
-    send(STOP,sizeof(STOP));receive();
+    send(STOP,sizeof(STOP)); // STOP may return status 0x50; do not archive it
   }while(false);
   if(client){if(client->isConnected())client->disconnect();NimBLEDevice::deleteClient(client);}
   client=nullptr;writer=nullptr;scan->clearResults();

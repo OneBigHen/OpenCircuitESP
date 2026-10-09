@@ -71,7 +71,7 @@ class TestCollector(unittest.TestCase):
         now=int(time.time())
         for ch in (0,3):
             self.db.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",
-                            (DEVICE,ch,now,80,b"\x50\x00\x00\x00","marker-"+str(ch)))
+                            (DEVICE,ch,now,80,b"\x50\x00\x00\x15\x12\x00\x00\x00\x01","marker-"+str(ch)))
         stamp=m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3],"started":int(time.time())-600}))
         self.assertIsInstance(stamp,int)
         self.assertEqual(m.status(self.db)["devices"][DEVICE]["sync_state"],"healthy")
@@ -100,7 +100,7 @@ class TestCollector(unittest.TestCase):
         now=int(time.time())
         for ch,offset in ((0,0),(3,4000)):
             self.db.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",
-                            (DEVICE,ch,now-offset,80,b"\x50\x00\x00\x00","old-"+str(ch)))
+                            (DEVICE,ch,now-offset,80,b"\x50\x00\x00\x15\x12\x00\x00\x00\x01","old-"+str(ch)))
         with self.assertRaisesRegex(ValueError,"not from same session"):
             m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3],"started":int(time.time())-600}))
 
@@ -127,9 +127,25 @@ class TestCollector(unittest.TestCase):
         now=int(time.time())
         for ch,seen in ((0,now-60),(3,now)):
             self.db.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",
-                            (DEVICE,ch,seen,80,b'\x50\x00\x00\x00',str(ch)))
+                            (DEVICE,ch,seen,80,b'\x50\x00\x00\x15\x12\x00\x00\x00\x01',str(ch)))
         with self.assertRaisesRegex(ValueError,'current attempt'):
             m.mark_complete(self.db,json.dumps({'device':DEVICE,'channels':[0,3],'started':now}))
+
+    def test_short_end_marker_is_rejected(self):
+        with self.assertRaisesRegex(ValueError,'end marker'):
+            m.ingest(self.db,self.row(b'\x50\x00\x00\x50',int(time.time())))
+
+    def test_collector_refuses_example_token_at_startup(self):
+        import os,subprocess
+        env=dict(os.environ,RING_DB=str(Path(self.temp.name)/'startup.db'),
+                 RING_TOKEN='CHANGE_TO_A_LONG_RANDOM_TOKEN',RING_PORT='0')
+        try:
+            result=subprocess.run(['python3',str(ROOT/'collector'/'app.py')],
+                                  env=env,capture_output=True,timeout=3)
+        except subprocess.TimeoutExpired:
+            self.fail('collector started with the public example token')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn(b'RING_TOKEN',result.stderr)
 
 class TestLocalHTTP(unittest.TestCase):
     """Exercise the actual private collector API, including token and atomicity."""
