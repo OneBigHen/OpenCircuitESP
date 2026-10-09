@@ -135,6 +135,15 @@ class TestCollector(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'end marker'):
             m.ingest(self.db,self.row(b'\x50\x00\x00\x50',int(time.time())))
 
+    def test_legacy_and_compact_end_markers_can_complete_sync(self):
+        now=int(time.time())
+        for ch,raw in ((0,bytes.fromhex('500000120c22aae4')),
+                       (3,bytes.fromhex('500000120c22aae40c22acb5'))):
+            body=json.dumps({'device':DEVICE,'channel':ch,'seen':now,'raw':raw.hex()}).encode()
+            self.assertEqual(m.ingest(self.db,body),1)
+        self.assertIsInstance(m.mark_complete(self.db,json.dumps(
+            {'device':DEVICE,'channels':[0,3],'started':now})),int)
+
     def test_collector_refuses_example_token_at_startup(self):
         import os,subprocess
         env=dict(os.environ,RING_DB=str(Path(self.temp.name)/'startup.db'),

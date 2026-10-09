@@ -129,7 +129,9 @@ def ingest(db,body):
             raise ValueError(f"invalid device/channel/time at {idx}")
         if raw[0]!=0x50 and checksum(raw[:-1])!=raw[-1]:
             raise ValueError(f"frame checksum at {idx}")
-        if raw[0]==0x50 and (raw[1]!=0 or len(raw)<9 or (len(raw)-3)%6):
+        if raw[0]==0x50 and (raw[1]!=0 or not (
+                (len(raw)>=9 and (len(raw)-3)%6==0) or
+                (len(raw) in (8,12) and raw[2]==0))):
             raise ValueError(f"invalid end marker at {idx}")
         digest=hashlib.sha256(raw).hexdigest()
         db.execute("INSERT OR IGNORE INTO frames VALUES(?,?,?,?,?,?)",
@@ -162,7 +164,8 @@ def mark_complete(db,body):
         found=db.execute(
             """SELECT MAX(seen) FROM frames
                WHERE device=? AND channel=? AND
-               ((opcode=80 AND length(raw)>=9 AND (length(raw)-3)%6=0
+               ((opcode=80 AND ((length(raw)>=9 AND (length(raw)-3)%6=0)
+                   OR (length(raw) IN (8,12) AND hex(substr(raw,3,1))='00'))
                  AND hex(substr(raw,2,1))='00')
                 OR (opcode=130 AND hex(substr(raw,2,1))='FF'))""",
             (device,channel)).fetchone()[0]
