@@ -1,0 +1,28 @@
+title: RingConn Gen2 (local)
+views:
+  - title: RingConn
+    path: ringconn
+    icon: mdi:ring
+    cards:
+      - type: entities
+        title: RingConn bridge
+        entities:
+          - sensor.ringconn_battery
+          - sensor.ringconn_last_complete_sync
+          - sensor.ringconn_sync_health
+          - sensor.ringconn_last_upload
+          - sensor.ringconn_bridge_devices
+      - type: entities
+        title: Vitals
+        entities:
+          - sensor.ringconn_heart_rate
+          - sensor.ringconn_hrv_rmssd
+          - sensor.ringconn_blood_oxygen
+          - sensor.ringconn_respiratory_rate
+          - sensor.ringconn_skin_temperature
+      - type: history-graph
+        title: Recent values reported to Home Assistant
+        hours_to_show: 48
+        entities:
+          - sensor.ringconn_heart_rate
+          - sensor.ringconn_hrv_rmssd

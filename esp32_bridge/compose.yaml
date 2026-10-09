@@ -1,0 +1,16 @@
+services:
+  ringconn-collector:
+    build: ./collector
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      RING_DB: /data/ringconn.db
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./storage:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
