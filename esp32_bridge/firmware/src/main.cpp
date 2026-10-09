@@ -55,7 +55,11 @@ bool systemIDMac(const std::string &s,uint8_t out[6]){
   return false;
 }
 void notify(NimBLERemoteCharacteristic*,uint8_t* p,size_t len,bool){
-  if(!inbox||!len||len>512){packetDropped=true;return;}
+  // Dense 0x48 OSA bursts can flood thousands of frames after a completed
+  // history channel. We do not decode them yet: discard BEFORE queueing or
+  // they can saturate the BLE queue and turn a good history sync into failure.
+  if(len&&p&&p[0]==0x48)return;
+  if(!inbox||!p||!len||len>512){packetDropped=true;return;}
   Packet packet{};packet.length=len;memcpy(packet.bytes,p,len);
   if(xQueueSend(inbox,&packet,0)!=pdTRUE)packetDropped=true;
 }
@@ -219,6 +223,15 @@ bool upload(){
   File f=LittleFS.open(SPOOL,"r");
   if(!f)return true;
   if(!f.size()){f.close();LittleFS.remove(SPOOL);return true;}
+  // A power cut midway through an append may leave a torn final NDJSON line.
+  // Refuse to upload or overwrite that spool; recovery remains possible.
+  // A normal ACKed page always ends in a newline after its flush.
+  size_t length=f.size();
+  if(!f.seek(length-1)||f.read()!='\n'){
+    Serial.println("ALERT: torn flash spool tail; preserving data for repair");
+    f.close();return false;
+  }
+  f.seek(0);
   HTTPClient http;
   if(!http.begin(String(COLLECTOR_URL)+"/ingest")){f.close();return false;}
   http.setTimeout(60000);
