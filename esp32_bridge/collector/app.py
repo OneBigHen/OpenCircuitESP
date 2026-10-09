@@ -115,7 +115,8 @@ def ingest(db,body):
     count=0;devices=set()
     for idx,line in enumerate(body.splitlines(),1):
         if not line.strip():continue
-        if idx>4000:raise ValueError("too many lines")
+        # MAX_BYTES already bounds work. Small frames can exceed 4,000 lines
+        # inside a valid 900 KiB firmware spool; rejecting them wedges retries.
         try:
             row=json.loads(line)
             dev=str(row["device"]).upper()
@@ -146,12 +147,15 @@ def mark_complete(db,body):
     try:
         payload=json.loads(body)
         device=str(payload["device"]).upper()
+        started=int(payload["started"])
         if not DEVICE.fullmatch(device) or payload["channels"] != [0,3]:
             raise ValueError("invalid device or channel set")
     except (ValueError,KeyError,TypeError,AttributeError) as exc:
         raise ValueError("invalid completion request") from exc
     markers=[]
     now=int(time.time())
+    if not now-1800<=started<=now+60:
+        raise ValueError("invalid current attempt start time")
     for channel in (0,3):
         found=db.execute(
             """SELECT MAX(seen) FROM frames
@@ -163,6 +167,8 @@ def mark_complete(db,body):
         markers.append(found)
     if abs(markers[0]-markers[1])>1800:
         raise ValueError("channel end markers not from same session")
+    if any(found<started for found in markers):
+        raise ValueError("end marker predates current attempt")
     db.execute("INSERT OR IGNORE INTO sync_sessions VALUES(?,?,?,?)",
                (device,now,markers[0],markers[1]))
     return now

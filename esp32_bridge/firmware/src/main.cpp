@@ -6,8 +6,11 @@
 #include <NimBLEDevice.h>
 #include <sys/time.h>
 #include <time.h>
+#include <esp_partition.h>
+#include <unistd.h>
 #include "secrets.h"
 #include "ring_protocol.h"
+#include "spool_recovery.h"
 
 // RingConn Gen 2 BLE central and local flash spool. Protocol source:
 // OpenCircuit/docs/PROTOCOL.md, RingAuth.swift, RingSession.swift.
@@ -15,6 +18,7 @@
 // NOT YET HARDWARE-VALIDATED. Preserve the official app until an A/B sync works.
 namespace {
 const char *SPOOL="/pending.ndjson";
+const char *SPOOL_PATH="/littlefs/pending.ndjson";
 constexpr size_t MAX_SPOOL=900*1024;
 const uint8_t STATUS[]={0x01,0x00,0x00};
 const uint8_t FETCH[]={0x07,0x00,0x00};
@@ -32,6 +36,21 @@ uint8_t channel=0;
 uint32_t pages=0,lastPage=0,nextAttempt=0;
 bool sawEnd=false,sawEmpty=false,authReplied=false;
 time_t lastSuccess=0;
+time_t attemptStarted=0;
+
+bool spoolPartitionBlank(){
+  auto* partition=esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                          ESP_PARTITION_SUBTYPE_DATA_SPIFFS,"spiffs");
+  if(!partition)return false;
+  uint8_t buffer[512];
+  for(size_t offset=0;offset<partition->size;offset+=sizeof(buffer)){
+    size_t n=partition->size-offset;
+    if(n>sizeof(buffer))n=sizeof(buffer);
+    if(esp_partition_read(partition,offset,buffer,n)!=ESP_OK)return false;
+    for(size_t i=0;i<n;++i)if(buffer[i]!=0xff)return false;
+  }
+  return true;
+}
 
 String hexdump(const uint8_t* p,size_t n){
   constexpr char lut[]="0123456789abcdef";
@@ -75,16 +94,19 @@ bool save(const Packet &p){
     Serial.println("FLASH FULL: refusing history ACK. Old records retained.");
     return false;
   }
-  File f=LittleFS.open(SPOOL,"a");
+  FILE* f=fopen(SPOOL_PATH,"ab");
   if(!f)return false;
   String line="{\"device\":\""+ringID+"\",\"channel\":"+String((unsigned)channel)
       +",\"seen\":"+String((unsigned long)time(nullptr))
       +",\"raw\":\""+hexdump(p.bytes,p.length)+"\"}\n";
-  bool good=f.print(line)==line.length();
-  f.flush();f.close();
+  bool good=fwrite(line.c_str(),1,line.length(),f)==line.length();
+  if(fflush(f)!=0)good=false;
+  if(fsync(fileno(f))!=0)good=false;
+  if(fclose(f)!=0)good=false;
   return good;
 }
 void receive(){
+  if(failed)return;
   Packet p{};
   while(xQueueReceive(inbox,&p,0)==pdTRUE){
     uint8_t op=p.bytes[0];
@@ -107,7 +129,7 @@ void receive(){
     if(op==0x48)continue;
     // Only archive raw history, cursor reports, status and sync-ACK evidence.
     if(op==0x47||op==0x4c||op==0x50||op==0x10||op==0x87||op==0x82){
-      if(!save(p)){failed=true;continue;}
+      if(!save(p)){failed=true;break;} // no later ACK behind a torn record
     }
     if(op==0x82&&p.length>=2&&p.bytes[1]==0xff)sawEmpty=true;
     if(op==0x47||op==0x4c){
@@ -159,6 +181,7 @@ bool drain(uint8_t ch){
   Serial.println("Partial history retained for retry");return false;
 }
 bool connectAndSync(){
+  attemptStarted=time(nullptr);
   NimBLEScan *scan=NimBLEDevice::getScan();
   scan->setActiveScan(true);scan->setInterval(140);scan->setWindow(70);
   NimBLEScanResults advertisements=scan->getResults(6000);
@@ -199,6 +222,7 @@ bool connectAndSync(){
   }while(false);
   if(client){if(client->isConnected())client->disconnect();NimBLEDevice::deleteClient(client);}
   client=nullptr;writer=nullptr;scan->clearResults();
+  xQueueReset(inbox); // late notifications belong to the closed connection
   return success;
 }
 bool wifi(){
@@ -220,18 +244,12 @@ bool clockFromCollector(){
   return true;
 }
 bool upload(){
+  if(!ring::recoverSpool(SPOOL_PATH)){
+    Serial.println("ALERT: spool recovery failed; history retained");return false;
+  }
   File f=LittleFS.open(SPOOL,"r");
   if(!f)return true;
   if(!f.size()){f.close();LittleFS.remove(SPOOL);return true;}
-  // A power cut midway through an append may leave a torn final NDJSON line.
-  // Refuse to upload or overwrite that spool; recovery remains possible.
-  // A normal ACKed page always ends in a newline after its flush.
-  size_t length=f.size();
-  if(!f.seek(length-1)||f.read()!='\n'){
-    Serial.println("ALERT: torn flash spool tail; preserving data for repair");
-    f.close();return false;
-  }
-  f.seek(0);
   HTTPClient http;
   if(!http.begin(String(COLLECTOR_URL)+"/ingest")){f.close();return false;}
   http.setTimeout(60000);
@@ -256,11 +274,14 @@ bool confirmComplete(){
   http.setTimeout(12000);
   http.addHeader("X-Ring-Token",COLLECTOR_TOKEN);
   http.addHeader("Content-Type","application/json");
-  String payload="{\"device\":\""+ringID+"\",\"channels\":[0,3]}";
+  String payload="{\"device\":\""+ringID+"\",\"channels\":[0,3],\"started\":"
+      +String((unsigned long)attemptStarted)+"}";
   int code=http.POST(payload);
+  String receipt=code==200?http.getString():String();
   http.end();
   if(code!=200)Serial.printf("Completion not confirmed: HTTP %d\n",code);
-  return code==200;
+  return code==200&&(receipt.indexOf("\"confirmed\": true")>=0||
+                    receipt.indexOf("\"confirmed\":true")>=0);
 }
 bool awakeWindow(){
   time_t now=time(nullptr);tm local{};localtime_r(&now,&local);
@@ -271,12 +292,14 @@ bool awakeWindow(){
 void setup(){
   Serial.begin(115200);delay(250);
   Preferences pref;pref.begin("ringbridge",false);
-  bool previouslyFormatted=pref.getBool("fs_ok",false);
-  if(!LittleFS.begin(!previouslyFormatted)){
-    Serial.println("FATAL: spool mount failed; will not format existing history");
-    while(true)delay(1000);
+  // NVS can be cleared independently of the spool. Never use an NVS marker
+  // as permission to format. First mount; only initialize a fully erased area.
+  if(!LittleFS.begin(false)){
+    if(!spoolPartitionBlank()||!LittleFS.begin(true)){
+      Serial.println("FATAL: spool mount failed; will not format existing history");
+      while(true)delay(1000);
+    }
   }
-  if(!previouslyFormatted)pref.putBool("fs_ok",true);
   lastSuccess=(time_t)pref.getULong64("lastsync",0);
   pref.end();
   inbox=xQueueCreate(32,sizeof(Packet));

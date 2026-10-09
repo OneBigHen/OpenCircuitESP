@@ -65,14 +65,14 @@ class TestCollector(unittest.TestCase):
     def test_cannot_claim_sync_without_both_end_markers(self):
         frame,now=sample();m.ingest(self.db,self.row(frame,now))
         with self.assertRaisesRegex(ValueError,"missing recent"):
-            m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3]}))
+            m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3],"started":int(time.time())-600}))
         self.assertIsNone(m.status(self.db)["devices"][DEVICE]["last_complete_sync"])
     def test_can_mark_sync_after_both_end_markers(self):
         now=int(time.time())
         for ch in (0,3):
             self.db.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",
                             (DEVICE,ch,now,80,b"\x50\x00\x00\x00","marker-"+str(ch)))
-        stamp=m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3]}))
+        stamp=m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3],"started":int(time.time())-600}))
         self.assertIsInstance(stamp,int)
         self.assertEqual(m.status(self.db)["devices"][DEVICE]["sync_state"],"healthy")
     def test_migrates_existing_frame_unique_key(self):
@@ -95,14 +95,14 @@ class TestCollector(unittest.TestCase):
             payload=b"\x82\xff\x00\x7d"
             self.db.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",
                             (DEVICE,ch,now,130,payload,"empty-"+str(ch)))
-        self.assertIsInstance(m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3]})),int)
+        self.assertIsInstance(m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3],"started":int(time.time())-600})),int)
     def test_rejects_mismatched_marker_times(self):
         now=int(time.time())
         for ch,offset in ((0,0),(3,4000)):
             self.db.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",
                             (DEVICE,ch,now-offset,80,b"\x50\x00\x00\x00","old-"+str(ch)))
         with self.assertRaisesRegex(ValueError,"not from same session"):
-            m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3]}))
+            m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3],"started":int(time.time())-600}))
 
     def test_csv_export_contains_samples_and_no_ring_identifier(self):
         frame,now=sample()
@@ -116,6 +116,20 @@ class TestCollector(unittest.TestCase):
         body=self.row(frame,now)
         m.ingest(self.db,body);m.ingest(self.db,body)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM epochs").fetchone()[0],1)
+
+    def test_valid_spool_with_more_than_4000_frames_is_accepted(self):
+        now=int(time.time())
+        body=(self.row(b'\x82\xff\x00\x7d',now)+b'\n')*4001
+        self.assertLess(len(body),900*1024)
+        self.assertEqual(m.ingest(self.db,body),4001)
+
+    def test_completion_cannot_reuse_marker_before_attempt_started(self):
+        now=int(time.time())
+        for ch,seen in ((0,now-60),(3,now)):
+            self.db.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",
+                            (DEVICE,ch,seen,80,b'\x50\x00\x00\x00',str(ch)))
+        with self.assertRaisesRegex(ValueError,'current attempt'):
+            m.mark_complete(self.db,json.dumps({'device':DEVICE,'channels':[0,3],'started':now}))
 
 class TestLocalHTTP(unittest.TestCase):
     """Exercise the actual private collector API, including token and atomicity."""
@@ -162,13 +176,13 @@ class TestLocalHTTP(unittest.TestCase):
         self.assertEqual(first["device_count"],0)
         self.assertTrue(json.loads(self.req("/ingest",line)[1])["committed"])
         with self.assertRaises(HTTPError) as error:
-            self.req("/complete",json.dumps({"device":DEVICE,"channels":[0,3]}).encode())
+            self.req("/complete",json.dumps({"device":DEVICE,"channels":[0,3],"started":int(time.time())-600}).encode())
         self.assertEqual(error.exception.code,400)
         for channel in (0,3):
             raw=bytes((0x82,0xff,0x00,0x7d))
             body=json.dumps({"device":DEVICE,"channel":channel,"seen":now,"raw":raw.hex()}).encode()
             self.req("/ingest",body)
-        result=json.loads(self.req("/complete",json.dumps({"device":DEVICE,"channels":[0,3]}).encode())[1])
+        result=json.loads(self.req("/complete",json.dumps({"device":DEVICE,"channels":[0,3],"started":int(time.time())-600}).encode())[1])
         self.assertTrue(result["confirmed"])
         status=json.loads(self.req("/status")[1])
         self.assertEqual(status["devices"][DEVICE]["sync_state"],"healthy")

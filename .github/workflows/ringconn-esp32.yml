@@ -2,6 +2,8 @@ name: RingConn Gen2 ESP32 Bridge
 on:
   push:
     paths: ['esp32_bridge/**', '.github/workflows/ringconn-esp32.yml']
+  pull_request:
+    paths: ['esp32_bridge/**', '.github/workflows/ringconn-esp32.yml']
   workflow_dispatch:
 concurrency:
   group: ringconn-esp32-${{ github.ref }}
@@ -12,6 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: g++ -std=c++17 -Wall -Wextra -Iesp32_bridge/firmware/include esp32_bridge/firmware/src/ring_protocol.cpp esp32_bridge/tests/native_protocol_test.cpp -o /tmp/ring-test && /tmp/ring-test
+      - run: g++ -std=c++17 -Wall -Wextra -Werror -Iesp32_bridge/firmware/include esp32_bridge/firmware/src/spool_recovery.cpp esp32_bridge/tests/native_spool_test.cpp -o /tmp/spool-test && /tmp/spool-test
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -27,10 +30,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: pip install platformio
+      - run: pip install platformio==6.2.0
       - run: cp esp32_bridge/firmware/include/secrets.h.example esp32_bridge/firmware/include/secrets.h
       - run: pio run -d esp32_bridge/firmware -e ${{ matrix.board }}
+      - name: Package first-flash image and application-only update
+        working-directory: esp32_bridge/firmware/.pio/build/${{ matrix.board }}
+        run: |
+          test -s firmware.factory.bin
+          cp ../../../partitions.csv partitions.csv
+          cp ../../../../FLASHING.md FLASHING.md
+          sha256sum firmware.bin firmware.factory.bin bootloader.bin partitions.bin > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: ringconn-gen2-${{ matrix.board }}
-          path: esp32_bridge/firmware/.pio/build/${{ matrix.board }}/firmware.bin
+          if-no-files-found: error
+          path: |
+            esp32_bridge/firmware/.pio/build/${{ matrix.board }}/firmware.bin
+            esp32_bridge/firmware/.pio/build/${{ matrix.board }}/firmware.factory.bin
+            esp32_bridge/firmware/.pio/build/${{ matrix.board }}/bootloader.bin
+            esp32_bridge/firmware/.pio/build/${{ matrix.board }}/partitions.bin
+            esp32_bridge/firmware/.pio/build/${{ matrix.board }}/partitions.csv
+            esp32_bridge/firmware/.pio/build/${{ matrix.board }}/SHA256SUMS
+            esp32_bridge/firmware/.pio/build/${{ matrix.board }}/FLASHING.md
