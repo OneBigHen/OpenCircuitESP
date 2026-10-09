@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#f5f4f0" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta
+      name="description"
+      content="Your measured health, privately collected. OpenCircuit ring history and trends."
+    />
+    <title>OpenCircuit · Your health</title>
+    <link rel="manifest" href="/app.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" href="/icon-192.png" />
+    <link rel="stylesheet" href="/app.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a href="#main" class="skip-link">Skip to content</a>
+    <div class="shell">
+      <aside class="sidebar">
+        <a class="brand" href="#summary"
+          ><img src="/icon-192.png" alt="" width="36" height="36" /><span
+            >OpenCircuit<span class="brand-sub"
+              >HEALTH, CLOSE TO HOME</span
+            ></span
+          ></a
+        >
+        <nav aria-label="Main navigation" id="navigation">
+          <a href="#summary" data-tab="summary">Summary</a>
+          <a href="#browse" data-tab="browse">Browse health</a>
+          <a href="#trends" data-tab="trends">Trends</a>
+          <a href="#settings" data-tab="settings">Settings</a>
+        </nav>
+        <div class="sidebar-note">
+          Your ring.<br />Your records.<br /><strong>Your perspective.</strong>
+        </div>
+        <span class="privacy-label">Collected locally · No analytics</span>
+      </aside>
+      <div class="workspace">
+        <header class="topbar">
+          <span class="wordmark">OpenCircuit <span>Health</span></span>
+          <div class="header-actions">
+            <span id="connection" role="status">Connecting</span
+            ><button id="refresh" class="quiet" type="button">Refresh</button>
+          </div>
+        </header>
+        <div id="notice" class="notice" role="status" hidden></div>
+        <main id="main" tabindex="-1">
+          <section id="login" class="login" hidden>
+            <div class="login-art">
+              <span class="eyebrow">A PRIVATE PLACE FOR YOUR HEALTH</span>
+              <h1>A clearer view<br />of your everyday.</h1>
+              <p>
+                Your ring's measurements, collected at home.<br />Explore
+                patterns at your own pace.
+              </p>
+              <div class="orbital" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </div>
+            </div>
+            <div class="login-form">
+              <h2>Welcome to OpenCircuit</h2>
+              <p>
+                Enter your dashboard access key to open your health journal.
+              </p>
+              <form id="login-form">
+                <label for="access-key">Access key</label
+                ><input
+                  id="access-key"
+                  type="password"
+                  autocomplete="current-password"
+                  required
+                  minlength="20"
+                /><button class="primary" type="submit">
+                  Open my health journal <span aria-hidden="true">↗</span>
+                </button>
+                <p id="login-error" class="error-text" role="alert"></p>
+              </form>
+              <p class="small">
+                Your key is exchanged for a private, read-only session. It isn't
+                saved in browser storage.
+              </p>
+            </div>
+          </section>
+          <section id="app" hidden>
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow" id="heading-kicker">YOUR HEALTH JOURNAL</p>
+                <h1 id="page-title">Summary</h1>
+                <p id="page-subtitle">Small observations. A bigger picture.</p>
+              </div>
+              <div class="ring-control">
+                <label for="device">Ring</label
+                ><select id="device" aria-label="Choose ring"></select>
+              </div>
+            </div>
+            <div class="range-toolbar" id="range-toolbar">
+              <div class="segmented" role="group" aria-label="Time range">
+                <button data-range="day" aria-pressed="true">Day</button
+                ><button data-range="week" aria-pressed="false">Week</button
+                ><button data-range="month" aria-pressed="false">Month</button
+                ><button data-range="year" aria-pressed="false">Year</button
+                ><button data-range="custom" aria-pressed="false">
+                  Custom
+                </button>
+              </div>
+              <label class="date-label"
+                >Through <input type="date" id="anchor"
+              /></label>
+              <div id="custom-range" hidden>
+                <label>From <input type="date" id="custom-start" /></label
+                ><label>To <input type="date" id="custom-end" /></label
+                ><button id="apply-range" class="quiet">Apply</button>
+              </div>
+            </div>
+            <div id="view" aria-live="polite">
+              <div class="loading">Opening your journal…</div>
+            </div>
+          </section>
+        </main>
+        <footer>
+          OpenCircuit · A local view of measured data.<span
+            >Observations, with their context.</span
+          >
+        </footer>
+      </div>
+    </div>
+  </body>
+</html>

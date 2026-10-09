@@ -1,5 +1,7 @@
 # OpenCircuit
 
+This fork also includes an [ESP32 RingConn Gen 2 bridge and private health PWA](esp32_bridge/README.md), with firmware for ESP-WROOM-32 boards. The PWA shows the bridge’s decoded measurements; the native iPhone app below is a separate client.
+
 **Local-first wearables: RingConn + Amazfit Helio.** No-cloud health data for the
 **RingConn Gen 2/3 and Air** smart ring and the **Amazfit Helio Strap**: your iPhone reads the
 metrics over Bluetooth LE, decodes them on the phone, and writes them to **Apple Health**.

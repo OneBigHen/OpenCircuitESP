@@ -4,6 +4,44 @@ A standalone home-lab companion inside this [OpenCircuit fork](https://github.co
 
 **Current stage: software prototype. Gen 2 device synchronization is NOT yet hardware-tested.** Do not uninstall the RingConn phone app or erase its history before comparing several live downloads.
 
+## OpenCircuit Health PWA
+
+The collector now serves an installable health journal at `/`. It includes a
+summary, all ten decoded measurements, day/week/month/year/custom ranges,
+aggregate charts with visible gaps, previous-period comparisons, exact reading
+pagination, CSV exports, ring selection, light/dark appearance and °C/°F.
+The app uses your collector's records; it ships no demo health data.
+
+Sign in with a private `RING_VIEW_TOKEN` if set, or the collector's `RING_TOKEN`.
+An HttpOnly/SameSite cookie provides a read-only, 12-hour browser session.
+The browser never stores the access key. Signing out revokes the session and
+clears optional offline health snapshots; restarting the collector expires all
+browser sessions. Session cookies cannot ingest frames or confirm synchronization.
+
+Use a **private HTTPS origin** for phone installation and keep
+`RING_SECURE_COOKIE=1` (the default). A reverse proxy must forward the original
+Host header. Verify the login response has `Secure; HttpOnly; SameSite=Strict`
+and protect the origin from direct public access. Do not publish port 8765 to
+the internet. HTTPS secures browser transport; it does not make the ESP32's
+local HTTP upload encrypted. Keep that path on your trusted LAN/VLAN.
+
+For deliberate browser testing over a LAN HTTP address only, explicitly set
+`RING_SECURE_COOKIE=0`; phone PWA installation/offline workers require HTTPS.
+The existing ESP32/header-token APIs work independently of browser cookie mode.
+
+On iPhone, use Share → Add to Home Screen; on supported desktop/Android
+browsers use Install. The service worker caches only public app assets, never
+health APIs or credentials. Offline health snapshots are off by default and
+require consent in Settings. Clearing them or signing out removes the local
+copy. An offline sign-out clears health data immediately and queues server
+session revocation for reconnection.
+
+Missing measurements remain unavailable, old observations are labeled, and
+step buckets are not summed into daily totals. Proprietary sleep stages,
+stress/recovery scores and Apple Health read/write are not implemented by the
+PWA. RMSSD is not Apple's SDNN HRV. Apple Health integration requires native
+iOS work; physical ring acceptance remains the checklist below.
+
 ## Hardware
 
 - **ESP32-WROOM-32 / generic DevKit:** `esp32dev` build target (default).
@@ -97,6 +135,7 @@ g++ -std=c++17 -Wall -Wextra -Iesp32_bridge/firmware/include esp32_bridge/firmwa
 g++ -std=c++17 -Wall -Wextra -Werror -Iesp32_bridge/firmware/include esp32_bridge/firmware/src/spool_recovery.cpp esp32_bridge/tests/native_spool_test.cpp -o /tmp/spooltest
 /tmp/spooltest
 python3 -m unittest discover -s esp32_bridge/tests -p 'test_*.py' -v
+node --test esp32_bridge/tests/pwa_model.test.mjs
 ```
 
 GitHub Actions builds WROOM and C6 separately, plus host-side protocol and SQLite tests. Download build artifacts from the workflow once green. **CI success is not evidence that the ring has been tested over BLE.**

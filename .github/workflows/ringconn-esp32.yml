@@ -19,6 +19,10 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m unittest discover -s esp32_bridge/tests -p 'test_*.py' -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test esp32_bridge/tests/pwa_model.test.mjs
   firmware:
     runs-on: ubuntu-latest
     strategy:
