@@ -38,6 +38,8 @@ class TestHealthPWA(unittest.TestCase):
         with self.browser('/auth/logout',{},cookie):pass
         with self.assertRaises(HTTPError) as error:self.browser('/status',cookie=cookie)
         self.assertEqual(error.exception.code,401)
+        with self.assertRaises(HTTPError) as error:self.browser('/export.csv?device='+DEVICE, cookie=cookie)
+        self.assertEqual(error.exception.code,401)
     def test_cross_origin_login_rejected(self):
         with self.assertRaises(HTTPError) as error:self.browser('/auth/login',{'token':m.TOKEN},origin='https://evil.example')
         self.assertEqual(error.exception.code,403)

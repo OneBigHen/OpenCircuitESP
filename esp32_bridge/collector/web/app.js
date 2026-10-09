@@ -507,6 +507,7 @@ async function exportData() {
     return;
   }
   const bounds = range();
+  const sequence = state.sequence;
   const response = await fetch(
     "/export.csv?" +
       new URLSearchParams({
@@ -516,6 +517,10 @@ async function exportData() {
       }),
     { cache: "no-store" },
   );
+  if (response.status === 401 && sequence === state.sequence) {
+    await snapshotStore("clear").catch(() => {});
+    showLogin("Your session has ended. Sign in again.");
+  }
   if (!response.ok)
     throw new Error("Export failed. Refresh your session and try again.");
   const url = URL.createObjectURL(await response.blob());
