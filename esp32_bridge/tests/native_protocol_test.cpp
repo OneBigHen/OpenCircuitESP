@@ -1,16 +1,22 @@
 #include "ring_protocol.h"
 #include <cassert>
-#include <cstring>
 #include <cstdio>
+#include <cstring>
+static bool eq(const uint8_t* p,const char* hex,size_t n){
+  for(size_t i=0;i<n;i++){unsigned x=0;if(sscanf(hex+i*2,"%2x",&x)!=1||p[i]!=x)return false;}
+  return true;
+}
 int main(){
-  uint8_t d[32];ring::sm3((const uint8_t*)"abc",3,d);
-  const unsigned char expected[]={0x66,0xc7,0xf0,0xf4,0x62,0xee,0xed,0xd9};
-  assert(memcmp(d,expected,8)==0);
-  uint8_t f[]={0x82,0,0,0x82};
-  assert(ring::validFrame(f,4)); f[3]^=1; assert(!ring::validFrame(f,4));
-  uint8_t open[9];ring::syncOpen(ring::EPOCH+0x12345678,3,open);
-  assert(open[0]==2&&open[1]==0&&open[2]==0x12&&open[5]==0x78&&open[6]==3);
-  uint8_t mac[]={0xf8,0x79,0x99,0xf7,0x03,0xad},out[6];
-  ring::authResponse(mac,0xb0,out); assert(out[0]==1&&out[1]==1&&out[5]==0);
-  puts("RingConn protocol tests passed");
+  uint8_t digest[32];
+  ring::sm3((const uint8_t*)"abc",3,digest);
+  assert(eq(digest,"66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0",32));
+  // Two known Gen-2 SM3 challenge/response captures from upstream OpenCircuit.
+  uint8_t mac[]={0xf8,0x79,0x99,0xf7,0x03,0xad},auth[6];
+  ring::authResponse(mac,0xb0,auth);assert(eq(auth,"010131826700",6));
+  ring::authResponse(mac,0xe5,auth);assert(eq(auth,"0101520be100",6));
+  uint8_t open[9];ring::syncOpen(ring::EPOCH+0x0c2298c3,3,open);
+  assert(eq(open,"02000c2298c3030100",9));
+  uint8_t frame[4]={0x82,0,0,0x82};
+  assert(ring::validFrame(frame,4));frame[2]=1;assert(!ring::validFrame(frame,4));
+  puts("SM3 full vector + 2 Gen2 auth captures + cursor + frame checksum: PASS");
 }
