@@ -116,4 +116,60 @@ class TestCollector(unittest.TestCase):
         body=self.row(frame,now)
         m.ingest(self.db,body);m.ingest(self.db,body)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM epochs").fetchone()[0],1)
+
+class TestLocalHTTP(unittest.TestCase):
+    """Exercise the actual private collector API, including token and atomicity."""
+    def setUp(self):
+        import threading
+        self.temp=tempfile.TemporaryDirectory()
+        self.old_db,self.old_token=m.DB,m.TOKEN
+        m.DB=Path(self.temp.name)/"http.db"
+        m.TOKEN="a-secret-token-which-is-over-twenty-characters"
+        m.connect().close()
+        self.server=m.ThreadingHTTPServer(("127.0.0.1",0),m.API)
+        self.thread=threading.Thread(target=self.server.serve_forever,daemon=True)
+        self.thread.start()
+        self.base=f"http://127.0.0.1:{self.server.server_port}"
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=3)
+        m.DB,m.TOKEN=self.old_db,self.old_token
+        self.temp.cleanup()
+    def req(self,path,body=None,token=True):
+        from urllib.request import Request,urlopen
+        headers={"X-Ring-Token":m.TOKEN} if token else {}
+        if body is not None:headers["Content-Type"]="application/x-ndjson"
+        request=Request(self.base+path,data=body,headers=headers)
+        with urlopen(request,timeout=5) as response:
+            return response.status,response.read()
+    def test_unauthenticated_health_and_time_only(self):
+        from urllib.error import HTTPError
+        self.assertEqual(self.req("/health",token=False)[0],200)
+        self.assertGreater(int(self.req("/time",token=False)[1]),m.EPOCH)
+        with self.assertRaises(HTTPError) as error:
+            self.req("/status",token=False)
+        self.assertEqual(error.exception.code,401)
+    def test_atomic_batch_and_full_sync_receipt(self):
+        from urllib.error import HTTPError
+        frame,now=sample()
+        line=json.dumps({"device":DEVICE,"channel":0,"seen":now,"raw":frame.hex()}).encode()
+        bad=line[:-2]+b"xx"
+        with self.assertRaises(HTTPError) as error:
+            self.req("/ingest",line+b"\n"+bad+b"\n")
+        self.assertEqual(error.exception.code,400)
+        first=json.loads(self.req("/status")[1])
+        self.assertEqual(first["device_count"],0)
+        self.assertTrue(json.loads(self.req("/ingest",line)[1])["committed"])
+        with self.assertRaises(HTTPError) as error:
+            self.req("/complete",json.dumps({"device":DEVICE,"channels":[0,3]}).encode())
+        self.assertEqual(error.exception.code,400)
+        for channel in (0,3):
+            raw=bytes((0x82,0xff,0x00,0x7d))
+            body=json.dumps({"device":DEVICE,"channel":channel,"seen":now,"raw":raw.hex()}).encode()
+            self.req("/ingest",body)
+        result=json.loads(self.req("/complete",json.dumps({"device":DEVICE,"channels":[0,3]}).encode())[1])
+        self.assertTrue(result["confirmed"])
+        status=json.loads(self.req("/status")[1])
+        self.assertEqual(status["devices"][DEVICE]["sync_state"],"healthy")
 if __name__=="__main__":unittest.main()
