@@ -1,0 +1,47 @@
+# Merge into Home Assistant's configuration.yaml; edit collector IP.
+# Add ringconn_token: 'YOUR_TOKEN' to secrets.yaml.
+rest:
+  - resource: http://192.168.1.20:8765/status
+    scan_interval: 300
+    timeout: 15
+    headers:
+      X-Ring-Token: !secret ringconn_token
+    sensor:
+      - name: RingConn Bridge Devices
+        unique_id: ringconn_bridge_devices
+        value_template: "{{ value_json.device_count }}"
+      - name: RingConn Battery
+        unique_id: ringconn_battery
+        unit_of_measurement: "%"
+        device_class: battery
+        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('battery_pct','unknown') }}"
+      - name: RingConn Heart Rate
+        unique_id: ringconn_heart_rate
+        unit_of_measurement: "bpm"
+        state_class: measurement
+        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('hr_bpm','unknown') }}"
+      - name: RingConn HRV RMSSD
+        unique_id: ringconn_hrv_rmssd
+        unit_of_measurement: "ms"
+        state_class: measurement
+        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('hrv_rmssd_ms','unknown') }}"
+      - name: RingConn Blood Oxygen
+        unique_id: ringconn_spo2
+        unit_of_measurement: "%"
+        state_class: measurement
+        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('spo2_pct','unknown') }}"
+      - name: RingConn Respiratory Rate
+        unique_id: ringconn_resp_rate
+        unit_of_measurement: "breaths/min"
+        state_class: measurement
+        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('respiratory_rate','unknown') }}"
+      - name: RingConn Skin Temperature
+        unique_id: ringconn_skin_temp
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('skin_temp_c','unknown') }}"
+      - name: RingConn Last Upload
+        unique_id: ringconn_last_upload
+        device_class: timestamp
+        value_template: "{% set ts = ((value_json.devices.values() | list | first) or {}).get('last_upload') %}{{ ts | timestamp_local if ts else 'unknown' }}"

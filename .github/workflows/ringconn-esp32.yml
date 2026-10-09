@@ -1,0 +1,35 @@
+name: RingConn Gen2 ESP32 Bridge
+on:
+  push:
+    paths: ['esp32_bridge/**', '.github/workflows/ringconn-esp32.yml']
+  pull_request:
+    paths: ['esp32_bridge/**', '.github/workflows/ringconn-esp32.yml']
+  workflow_dispatch:
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: g++ -std=c++17 -Wall -Wextra -Iesp32_bridge/firmware/include esp32_bridge/firmware/src/ring_protocol.cpp esp32_bridge/tests/native_protocol_test.cpp -o /tmp/ring-test && /tmp/ring-test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m unittest discover -s esp32_bridge/tests -p 'test_*.py' -v
+  firmware:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [esp32dev, esp32c6]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install platformio
+      - run: cp esp32_bridge/firmware/include/secrets.h.example esp32_bridge/firmware/include/secrets.h
+      - run: pio run -d esp32_bridge/firmware -e ${{ matrix.board }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ringconn-gen2-${{ matrix.board }}
+          path: esp32_bridge/firmware/.pio/build/${{ matrix.board }}/firmware.bin
