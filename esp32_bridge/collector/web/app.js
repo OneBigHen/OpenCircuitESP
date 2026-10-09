@@ -10,6 +10,7 @@ import {
   chargingSummary,
 } from "./model.mjs";
 import { buildConfig } from "./setup.mjs";
+import { clearExpiredSession } from "./session-view.mjs";
 import {
   html,
   dailyView,
@@ -99,8 +100,12 @@ async function api(path, body) {
       path !== "/auth/login" &&
       sequence === state.sequence
     ) {
-      await snapshotStore("clear").catch(() => {});
-      showLogin(error.message);
+      await clearExpiredSession(
+        sequence,
+        () => state.sequence,
+        () => snapshotStore("clear").catch(() => {}),
+        () => showLogin(error.message),
+      );
     }
     throw error;
   }
@@ -692,8 +697,12 @@ async function exportData() {
     { cache: "no-store" },
   );
   if (response.status === 401 && sequence === state.sequence) {
-    await snapshotStore("clear").catch(() => {});
-    showLogin("Your session has ended. Sign in again.");
+    await clearExpiredSession(
+      sequence,
+      () => state.sequence,
+      () => snapshotStore("clear").catch(() => {}),
+      () => showLogin("Your session has ended. Sign in again."),
+    );
   }
   if (!response.ok)
     throw new Error("Export failed. Refresh your session and try again.");

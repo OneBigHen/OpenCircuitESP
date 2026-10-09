@@ -161,3 +161,29 @@ test("charging aggregates count states without inventing duration", async () => 
     "0 of 2 recorded states charging (0%). Not charging observed.",
   );
 });
+test("an old asynchronous session cleanup cannot hide a newer signed-in view", async () => {
+  const { clearExpiredSession } = await import(
+    "../collector/web/session-view.mjs"
+  );
+  let sequence = 1,
+    hidden = false,
+    release;
+  const cleanup = new Promise((resolve) => (release = resolve));
+  const operation = clearExpiredSession(
+    1,
+    () => sequence,
+    () => cleanup,
+    () => (hidden = true),
+  );
+  sequence = 2;
+  release();
+  await operation;
+  assert.equal(hidden, false);
+  await clearExpiredSession(
+    2,
+    () => sequence,
+    async () => {},
+    () => (hidden = true),
+  );
+  assert.equal(hidden, true);
+});

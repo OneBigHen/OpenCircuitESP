@@ -16,7 +16,7 @@ TOKEN=os.getenv("RING_TOKEN","")
 VIEW_TOKEN=os.getenv("RING_VIEW_TOKEN","")
 STATIC=Path(__file__).resolve().parent/'web'
 ASSETS={'/':'index.html','/index.html':'index.html','/app.css':'app.css',
-        '/app.js':'app.js','/model.mjs':'model.mjs','/setup.mjs':'setup.mjs','/ring-views.mjs':'ring-views.mjs','/sw.js':'sw.js',
+        '/app.js':'app.js','/model.mjs':'model.mjs','/setup.mjs':'setup.mjs','/ring-views.mjs':'ring-views.mjs','/session-view.mjs':'session-view.mjs','/sw.js':'sw.js',
         '/app.webmanifest':'app.webmanifest','/icon-192.png':'icon-192.png',
         '/icon-512.png':'icon-512.png','/apple-touch-icon.png':'apple-touch-icon.png'}
 CSP="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
