@@ -55,4 +55,37 @@ class TestCollector(unittest.TestCase):
     def test_time_wrap(self):
         seen=m.EPOCH+0x01200010
         self.assertEqual(m.timestamp_from_counter(0xfffff0,seen),m.EPOCH+0x00fffff0)
+
+    def test_same_status_frame_at_different_times_is_preserved(self):
+        s=descriptor();now=int(time.time())
+        m.ingest(self.db,self.row(s,now))
+        m.ingest(self.db,self.row(s,now+1))
+        self.assertEqual(m.status(self.db)["devices"][DEVICE]["frame_count"],2)
+        self.assertEqual(m.status(self.db)["devices"][DEVICE]["last_frame"],now+1)
+    def test_cannot_claim_sync_without_both_end_markers(self):
+        frame,now=sample();m.ingest(self.db,self.row(frame,now))
+        with self.assertRaisesRegex(ValueError,"missing recent"):
+            m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3]}))
+        self.assertIsNone(m.status(self.db)["devices"][DEVICE]["last_complete_sync"])
+    def test_can_mark_sync_after_both_end_markers(self):
+        now=int(time.time())
+        for ch in (0,3):
+            self.db.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",
+                            (DEVICE,ch,now,80,b"\x50\x00\x00\x00","marker-"+str(ch)))
+        stamp=m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3]}))
+        self.assertIsInstance(stamp,int)
+        self.assertEqual(m.status(self.db)["devices"][DEVICE]["sync_state"],"healthy")
+    def test_migrates_existing_frame_unique_key(self):
+        self.db.close()
+        path=Path(self.temp.name)/"old.db"
+        import sqlite3
+        db=sqlite3.connect(path)
+        db.execute("""CREATE TABLE frames(device TEXT,channel INTEGER,seen INTEGER,
+                   opcode INTEGER,raw BLOB,digest TEXT,UNIQUE(device,channel,digest))""")
+        db.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",(DEVICE,0,123,135,b"abc","hash"))
+        db.commit();db.close()
+        migrated=m.connect(path)
+        migrated.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",(DEVICE,0,124,135,b"abc","hash"))
+        self.assertEqual(migrated.execute("SELECT COUNT(*) FROM frames").fetchone()[0],2)
+        migrated.close()
 if __name__=="__main__":unittest.main()

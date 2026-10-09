@@ -24,7 +24,7 @@ def connect(path=None):
     CREATE TABLE IF NOT EXISTS frames(
       device TEXT NOT NULL, channel INTEGER NOT NULL, seen INTEGER NOT NULL,
       opcode INTEGER NOT NULL, raw BLOB NOT NULL, digest TEXT NOT NULL,
-      UNIQUE(device,channel,digest));
+      UNIQUE(device,channel,seen,digest));
     CREATE TABLE IF NOT EXISTS epochs(
       device TEXT NOT NULL, channel INTEGER NOT NULL, kind TEXT NOT NULL,
       counter INTEGER NOT NULL, stamp INTEGER NOT NULL, subtype INTEGER, raw BLOB NOT NULL,
@@ -37,7 +37,25 @@ def connect(path=None):
       id INTEGER PRIMARY KEY, device TEXT NOT NULL, committed INTEGER NOT NULL,
       frames INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS metrics_by_time ON metrics(device,metric,stamp);
+    CREATE TABLE IF NOT EXISTS sync_sessions(
+      device TEXT NOT NULL, completed INTEGER NOT NULL, sleep_end_seen INTEGER NOT NULL,
+      day_end_seen INTEGER NOT NULL, PRIMARY KEY(device,completed));
     """)
+    # Preserve data from earlier prototype databases: repeated identical status
+    # frames at different times must not disappear from the timeline.
+    prior=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='frames'").fetchone()
+    if prior and "UNIQUE(device,channel,digest)" in prior[0].replace(" ", ""):
+        db.executescript("""
+        BEGIN IMMEDIATE;
+        ALTER TABLE frames RENAME TO frames_before_timestamp_key;
+        CREATE TABLE frames(
+          device TEXT NOT NULL, channel INTEGER NOT NULL, seen INTEGER NOT NULL,
+          opcode INTEGER NOT NULL, raw BLOB NOT NULL, digest TEXT NOT NULL,
+          UNIQUE(device,channel,seen,digest));
+        INSERT OR IGNORE INTO frames SELECT * FROM frames_before_timestamp_key;
+        DROP TABLE frames_before_timestamp_key;
+        COMMIT;
+        """)
     return db
 
 def checksum(data):
@@ -121,6 +139,32 @@ def ingest(db,body):
                    (dev,int(time.time()),count))
     return count
 
+def mark_complete(db,body):
+    """Confirm BOTH history channels have recent persisted end markers.
+    A frame upload alone never proves a full sync happened.
+    """
+    try:
+        payload=json.loads(body)
+        device=str(payload["device"]).upper()
+        if not DEVICE.fullmatch(device) or payload["channels"] != [0,3]:
+            raise ValueError("invalid device or channel set")
+    except (ValueError,KeyError,TypeError,AttributeError) as exc:
+        raise ValueError("invalid completion request") from exc
+    markers=[]
+    now=int(time.time())
+    for channel in (0,3):
+        found=db.execute(
+            "SELECT MAX(seen) FROM frames WHERE device=? AND channel=? AND opcode=80",
+            (device,channel)).fetchone()[0]
+        if found is None or not now-86400<=found<=now+60:
+            raise ValueError(f"missing recent 0x50 marker for channel {channel}")
+        markers.append(found)
+    if abs(markers[0]-markers[1])>1800:
+        raise ValueError("channel end markers not from same session")
+    db.execute("INSERT OR IGNORE INTO sync_sessions VALUES(?,?,?,?)",
+               (device,now,markers[0],markers[1]))
+    return now
+
 def status(db):
     result={}
     for dev,when in db.execute("SELECT device,MAX(seen) FROM frames GROUP BY device"):
@@ -130,6 +174,10 @@ def status(db):
         item["frame_count"]=db.execute("SELECT COUNT(*) FROM frames WHERE device=?",(dev,)).fetchone()[0]
         item["epoch_count"]=db.execute("SELECT COUNT(*) FROM epochs WHERE device=? AND kind='activity'",(dev,)).fetchone()[0]
         item["last_upload"]=db.execute("SELECT MAX(committed) FROM uploads WHERE device=?",(dev,)).fetchone()[0]
+        complete=db.execute("SELECT MAX(completed) FROM sync_sessions WHERE device=?",(dev,)).fetchone()[0]
+        item["last_complete_sync"]=complete
+        item["sync_state"]="healthy" if complete and (int(time.time())-complete)<36*3600 else "stale_or_never"
+        item["last_frame_age_seconds"]=max(0,int(time.time())-when)
         result[dev]=item
     return {"device_count":len(result),"devices":result}
 
@@ -166,14 +214,20 @@ class API(BaseHTTPRequestHandler):
             return self.response(400,b'{"error":"bad query"}')
         finally:db.close()
     def do_POST(self):
-        if self.path!="/ingest":return self.response(404,b'{"error":"not found"}')
+        if self.path not in ("/ingest","/complete"):
+            return self.response(404,b'{"error":"not found"}')
         if not self.authorized():return
         try:n=int(self.headers.get("Content-Length","-1"))
         except ValueError:n=-1
-        if n<0 or n>MAX_BYTES:return self.response(413,b'{"error":"payload too large"}')
+        if n<0 or n>(4096 if self.path=="/complete" else MAX_BYTES):
+            return self.response(413,b'{"error":"payload too large"}')
         body=self.rfile.read(n);db=connect()
         try:
             db.execute("BEGIN IMMEDIATE")
+            if self.path=="/complete":
+                timestamp=mark_complete(db,body)
+                db.commit()
+                return self.response(200,json.dumps({"confirmed":True,"completed":timestamp}))
             count=ingest(db,body)
             db.commit() # HTTP 200 is returned ONLY after this commit.
             return self.response(200,json.dumps({"committed":True,"received":count}))
