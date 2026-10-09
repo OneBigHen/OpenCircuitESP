@@ -154,10 +154,12 @@ def mark_complete(db,body):
     now=int(time.time())
     for channel in (0,3):
         found=db.execute(
-            "SELECT MAX(seen) FROM frames WHERE device=? AND channel=? AND opcode=80",
+            """SELECT MAX(seen) FROM frames
+               WHERE device=? AND channel=? AND
+               (opcode=80 OR (opcode=130 AND hex(substr(raw,2,1))='FF'))""",
             (device,channel)).fetchone()[0]
         if found is None or not now-86400<=found<=now+60:
-            raise ValueError(f"missing recent 0x50 marker for channel {channel}")
+            raise ValueError(f"missing recent end marker or empty-history ACK for channel {channel}")
         markers.append(found)
     if abs(markers[0]-markers[1])>1800:
         raise ValueError("channel end markers not from same session")

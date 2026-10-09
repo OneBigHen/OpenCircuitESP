@@ -88,4 +88,19 @@ class TestCollector(unittest.TestCase):
         migrated.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",(DEVICE,0,124,135,b"abc","hash"))
         self.assertEqual(migrated.execute("SELECT COUNT(*) FROM frames").fetchone()[0],2)
         migrated.close()
+
+    def test_empty_channel_ack_counts_as_end_evidence(self):
+        now=int(time.time())
+        for ch in (0,3):
+            payload=b"\x82\xff\x00\x7d"
+            self.db.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",
+                            (DEVICE,ch,now,130,payload,"empty-"+str(ch)))
+        self.assertIsInstance(m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3]})),int)
+    def test_rejects_mismatched_marker_times(self):
+        now=int(time.time())
+        for ch,offset in ((0,0),(3,4000)):
+            self.db.execute("INSERT INTO frames VALUES(?,?,?,?,?,?)",
+                            (DEVICE,ch,now-offset,80,b"\x50\x00\x00\x00","old-"+str(ch)))
+        with self.assertRaisesRegex(ValueError,"not from same session"):
+            m.mark_complete(self.db,json.dumps({"device":DEVICE,"channels":[0,3]}))
 if __name__=="__main__":unittest.main()

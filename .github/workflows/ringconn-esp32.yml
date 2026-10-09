@@ -2,9 +2,10 @@ name: RingConn Gen2 ESP32 Bridge
 on:
   push:
     paths: ['esp32_bridge/**', '.github/workflows/ringconn-esp32.yml']
-  pull_request:
-    paths: ['esp32_bridge/**', '.github/workflows/ringconn-esp32.yml']
   workflow_dispatch:
+concurrency:
+  group: ringconn-esp32-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   native:
     runs-on: ubuntu-latest
