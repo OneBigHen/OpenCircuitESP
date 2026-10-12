@@ -28,6 +28,7 @@ METRICS={"hr_bpm","hrv_rmssd_ms","spo2_pct","respiratory_rate","battery_pct",
 MAX_BYTES=2*1024*1024
 DIAG=DB.parent/"diag.log"
 DIAG_CAP=64*1024
+CONTACT=[0]  # last time the ESP32 bridge reached us (/time poll or an authenticated upload)
 
 def connect(path=None):
     path=Path(path or DB)
@@ -214,7 +215,7 @@ def status(db):
         item["sync_state"]="healthy" if complete and (int(time.time())-complete)<36*3600 else "stale_or_never"
         item["last_frame_age_seconds"]=max(0,int(time.time())-when)
         result[dev]=item
-    return {"device_count":len(result),"devices":result}
+    return {"device_count":len(result),"devices":result,"bridge_last_contact":CONTACT[0] or None}
 
 def export_csv(db,device,since,limit=100000):
     """Authenticated, chronological, measured samples for off-platform backups."""
@@ -268,7 +269,9 @@ class API(BaseHTTPRequestHandler):
         if p.path=="/diag":
             if not self.authorized(read_only=True):return
             return self.response(200,DIAG.read_bytes() if DIAG.exists() else b"no diagnostics yet\n","text/plain; charset=utf-8")
-        if p.path=="/time":return self.response(200,str(int(time.time())),"text/plain")
+        if p.path=="/time":
+            CONTACT[0]=int(time.time())
+            return self.response(200,str(int(time.time())),"text/plain")
         if not self.authorized(read_only=True):return
         db=connect()
         try:
@@ -325,6 +328,7 @@ class API(BaseHTTPRequestHandler):
         if self.path not in ("/ingest","/complete"):
             return self.response(404,b'{"error":"not found"}')
         if not self.authorized():return
+        CONTACT[0]=int(time.time())
         try:n=int(self.headers.get("Content-Length","-1"))
         except ValueError:n=-1
         if n<0 or n>(4096 if self.path=="/complete" else MAX_BYTES):

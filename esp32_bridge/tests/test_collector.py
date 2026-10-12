@@ -212,6 +212,13 @@ class TestLocalHTTP(unittest.TestCase):
                 urlopen(Request(self.base+"/status",headers={"X-Ring-Token":"wrong"}),timeout=5)
             self.assertEqual(error.exception.code,401)
         finally:m.HA_TOKEN=old
+    def test_bridge_heartbeat_follows_time_polls(self):
+        import json as j
+        m.CONTACT[0]=0
+        self.assertIsNone(j.loads(self.req("/status")[1])["bridge_last_contact"])
+        self.req("/time",token=False)
+        contact=j.loads(self.req("/status")[1])["bridge_last_contact"]
+        self.assertLessEqual(abs(contact-int(time.time())),2)
     def test_atomic_batch_and_full_sync_receipt(self):
         from urllib.error import HTTPError
         frame,now=sample()

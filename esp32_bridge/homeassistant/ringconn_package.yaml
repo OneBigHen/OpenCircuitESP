@@ -14,8 +14,13 @@ rest:
         icon: mdi:ring
         value_template: >-
           {% set d = ((value_json.devices.values() | list | first) or {}) %}
-          {% set age = as_timestamp(now()) - d.get('in_case_at', 0) %}
-          {{ 'unknown' if age > 600 else ('in_case' if d.get('in_case', 0) | int(0) == 1 else 'out_of_case') }}
+          {% set quiet = as_timestamp(now()) - (value_json.get('bridge_last_contact') or 0) %}
+          {# The last status the ring reported stays true while the ring is silent in its closed case.
+             In the case = docked (descriptor byte 17) OR on the charger (state byte 0x04); the case is the only charger.
+             Only 'unknown' when the ESP32 bridge itself has not reached the collector for 5 minutes. #}
+          {% if not d.get('in_case_at') or quiet > 300 %}unknown
+          {% elif d.get('in_case', 0) | int(0) == 1 or d.get('charging', 0) | int(0) == 1 %}in_case
+          {% else %}out_of_case{% endif %}
       - name: RingConn Bridge Devices
         unique_id: ringconn_bridge_devices
         value_template: "{{ value_json.device_count }}"
