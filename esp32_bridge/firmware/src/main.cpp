@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include "secrets.h"
 #include "ring_protocol.h"
 #include "spool_recovery.h"
@@ -21,7 +22,7 @@
 namespace {
 // Diagnostics: every log line goes to USB serial AND a RAM buffer that is POSTed
 // to the collector (/diag), so the bridge can be debugged over Wi-Fi alone.
-const char *FW_VERSION="diag-2";
+const char *FW_VERSION="diag-4";
 char dbuf[4096];size_t dlen=0;
 void dappend(const char*line){
   size_t n=strlen(line);
@@ -35,6 +36,10 @@ void dlogf(const char*fmt,...){
   size_t n=strlen(tmp);while(n&&(tmp[n-1]=='\n'||tmp[n-1]=='\r'))tmp[--n]=0;
   dlog(tmp);
 }
+// Active collector base URL; flips to COLLECTOR_URL_FALLBACK (if defined) when the primary stops answering.
+String collectorUrl=COLLECTOR_URL;
+constexpr uint32_t MAINTENANCE_RESTART_MS=7UL*24UL*3600UL*1000UL; // weekly, only while idle
+constexpr uint32_t WATCHDOG_MS=600UL*1000UL; // longest legitimate blocking step is a ~420 s two-channel drain
 const char *SPOOL="/pending.ndjson";
 const char *SPOOL_PATH="/littlefs/pending.ndjson";
 constexpr size_t MAX_SPOOL=900*1024;
@@ -42,9 +47,12 @@ const uint8_t STATUS[]={0x01,0x00,0x00};
 const uint8_t FETCH[]={0x07,0x00,0x00};
 const uint8_t STOP[]={0xd0,0x00,0x00};
 constexpr uint32_t RETRY_MS=20UL*1000UL;
-// Between full history syncs, read the ring's live status descriptor this often so
-// charging-case events (in case / out of case) reach the collector within about a minute.
-constexpr uint32_t STATUS_POLL_MS=60UL*1000UL;
+// Between full history syncs the bridge HOLDS one authenticated BLE link open and asks the
+// ring for its status descriptor over it every HOLD_ASK_MS (one 3-byte write; far cheaper for
+// the ring's battery than reconnecting). Charging-case events reach the collector in seconds.
+// While the link is held the phone app cannot connect to the ring.
+constexpr uint32_t HOLD_ASK_MS=15UL*1000UL;
+constexpr uint32_t REACQUIRE_MS=10UL*1000UL; // retry cadence when the ring is out of reach
 struct Packet { uint16_t length; uint8_t bytes[512]; };
 QueueHandle_t inbox=nullptr;
 NimBLEClient* client=nullptr;
@@ -56,7 +64,8 @@ String ringID;
 uint8_t channel=0;
 uint32_t pages=0,lastPage=0,nextAttempt=0;
 bool sawEnd=false,sawEmpty=false,authReplied=false,gotStatus=false;
-bool ringSeenLast=true;
+bool ringSeenLast=true,holding=false;
+uint32_t lastAsk=0;
 time_t lastSuccess=0;
 time_t attemptStarted=0;
 
@@ -204,7 +213,7 @@ bool drain(uint8_t ch){
   }
   dlog("Partial history retained for retry");return false;
 }
-bool connectAndSync(bool statusOnly=false){
+bool connectAndSync(bool statusOnly=false,bool keepOpen=false){
   attemptStarted=time(nullptr);
   NimBLEScan *scan=NimBLEDevice::getScan();
   scan->setActiveScan(true);scan->setInterval(140);scan->setWindow(70);
@@ -259,10 +268,17 @@ bool connectAndSync(bool statusOnly=false){
     success=night&&day&&!failed;
     send(STOP,sizeof(STOP)); // STOP may return status 0x50; do not archive it
   }while(false);
+  if(statusOnly&&keepOpen&&success)return true; // link stays open for holdTick()
   if(client){if(client->isConnected())client->disconnect();NimBLEDevice::deleteClient(client);}
   client=nullptr;writer=nullptr;scan->clearResults();
   xQueueReset(inbox); // late notifications belong to the closed connection
   return success;
+}
+void dropLink(){
+  if(client){if(client->isConnected())client->disconnect();NimBLEDevice::deleteClient(client);}
+  client=nullptr;writer=nullptr;holding=false;
+  NimBLEDevice::getScan()->clearResults();
+  xQueueReset(inbox);
 }
 bool wifi(){
   if(WiFi.status()==WL_CONNECTED)return true;
@@ -271,9 +287,9 @@ bool wifi(){
   while(WiFi.status()!=WL_CONNECTED&&millis()-t<12000)delay(250);
   return WiFi.status()==WL_CONNECTED;
 }
-bool clockFromCollector(){
+bool fetchTime(const String &base){
   HTTPClient http;
-  if(!http.begin(String(COLLECTOR_URL)+"/time"))return false;
+  if(!http.begin(base+"/time"))return false;
   http.setTimeout(7000);
   int status=http.GET();
   if(status!=200){http.end();return false;}
@@ -281,6 +297,14 @@ bool clockFromCollector(){
   if(current<1760000000LL)return false;
   struct timeval value{};value.tv_sec=current;settimeofday(&value,nullptr);
   return true;
+}
+bool clockFromCollector(){
+  if(fetchTime(collectorUrl))return true;
+#ifdef COLLECTOR_URL_FALLBACK
+  String other=collectorUrl==String(COLLECTOR_URL)?String(COLLECTOR_URL_FALLBACK):String(COLLECTOR_URL);
+  if(fetchTime(other)){collectorUrl=other;dlogf("Collector switched to %s\n",other.c_str());return true;}
+#endif
+  return false;
 }
 bool upload(){
   if(!ring::recoverSpool(SPOOL_PATH)){
@@ -290,7 +314,7 @@ bool upload(){
   if(!f)return true;
   if(!f.size()){f.close();LittleFS.remove(SPOOL);return true;}
   HTTPClient http;
-  if(!http.begin(String(COLLECTOR_URL)+"/ingest")){f.close();return false;}
+  if(!http.begin(collectorUrl+"/ingest")){f.close();return false;}
   http.setTimeout(60000);
   http.addHeader("X-Ring-Token",COLLECTOR_TOKEN);
   http.addHeader("Content-Type","application/x-ndjson");
@@ -309,7 +333,7 @@ bool upload(){
 bool confirmComplete(){
   if(!wifi())return false;
   HTTPClient http;
-  if(!http.begin(String(COLLECTOR_URL)+"/complete"))return false;
+  if(!http.begin(collectorUrl+"/complete"))return false;
   http.setTimeout(12000);
   http.addHeader("X-Ring-Token",COLLECTOR_TOKEN);
   http.addHeader("Content-Type","application/json");
@@ -322,10 +346,23 @@ bool confirmComplete(){
   return code==200&&(receipt.indexOf("\"confirmed\": true")>=0||
                     receipt.indexOf("\"confirmed\":true")>=0);
 }
+void holdTick(){
+  if(failed||packetDropped||!client||!client->isConnected()){
+    dlog("Ring link dropped");dropLink();failed=false;packetDropped=false;
+    nextAttempt=millis()+2000;return;
+  }
+  time_t now=time(nullptr);
+  if(lastSuccess&&now-lastSuccess>=(time_t)SYNC_INTERVAL_SECONDS){
+    dlog("Full sync due; releasing held link");dropLink();nextAttempt=0;return;
+  }
+  if(gotStatus){gotStatus=false;if(wifi()&&!upload())clockFromCollector();}
+  if(millis()-lastAsk>=HOLD_ASK_MS){lastAsk=millis();if(!send(STOP,sizeof(STOP)))failed=true;}
+  delay(50);
+}
 void diagPost(){
   if(WiFi.status()!=WL_CONNECTED||!dlen)return;
   HTTPClient http;
-  if(!http.begin(String(COLLECTOR_URL)+"/diag"))return;
+  if(!http.begin(collectorUrl+"/diag"))return;
   http.setTimeout(6000);
   http.addHeader("X-Ring-Token",COLLECTOR_TOKEN);
   http.addHeader("Content-Type","text/plain");
@@ -362,10 +399,15 @@ void setup(){
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
   NimBLEDevice::setMTU(517);
   setenv("TZ",LOCAL_TIMEZONE,1);tzset();
+  esp_task_wdt_config_t wdt={};wdt.timeout_ms=WATCHDOG_MS;wdt.idle_core_mask=0;wdt.trigger_panic=true;
+  if(esp_task_wdt_reconfigure(&wdt)!=ESP_OK)esp_task_wdt_init(&wdt);
+  esp_task_wdt_add(nullptr);
   dlog("RingConn Gen2 bridge ready; serial lists nearby BLE names");
 }
 void cycle(){
   receive();
+  if(holding){holdTick();return;}
+  if(millis()>MAINTENANCE_RESTART_MS){dlog("Weekly maintenance restart");diagPost();delay(300);ESP.restart();}
   if((int32_t)(millis()-nextAttempt)<0){delay(1000);return;}
   nextAttempt=millis()+RETRY_MS;
   if(!wifi()||!clockFromCollector()){dlog("Collector offline/time unavailable");return;}
@@ -373,9 +415,9 @@ void cycle(){
   time_t now=time(nullptr);
   if(!awakeWindow())return;
   if(lastSuccess&&now-lastSuccess<(time_t)SYNC_INTERVAL_SECONDS){
-    nextAttempt=millis()+STATUS_POLL_MS;
+    nextAttempt=millis()+REACQUIRE_MS;
     failed=false;packetDropped=false;
-    if(connectAndSync(true))upload();
+    if(connectAndSync(true,true)){holding=true;lastAsk=millis();dlog("Holding ring link; status every 15 s");upload();}
     return;
   }
   failed=false;packetDropped=false;
@@ -385,8 +427,8 @@ void cycle(){
   if(confirmed){
     lastSuccess=now;
     Preferences p;p.begin("ringbridge",false);p.putULong64("lastsync",(uint64_t)lastSuccess);p.end();
-    nextAttempt=millis()+STATUS_POLL_MS;
+    nextAttempt=millis()+REACQUIRE_MS;
     dlog("Gen2 sleep + daytime channels synchronized");
   }else dlog("Partial/failed drain: queued flash pages retained; retry later");
 }
-void loop(){cycle();diagPost();}
+void loop(){esp_task_wdt_reset();cycle();diagPost();}

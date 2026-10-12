@@ -1,0 +1,7 @@
+[Unit]
+Description=RingConn archive backup
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/srv/ringbridge/backup.sh /srv/ringbridge
