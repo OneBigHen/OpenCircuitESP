@@ -1,0 +1,229 @@
+# RingConn ring + charging case -> Home Assistant (drop in as packages/ringconn.yaml).
+# Collector runs on docker-dev (192.168.1.40:8765). Add this line to HA's secrets.yaml:
+#   ringconn_ha_token: <the collector's RING_HA_TOKEN from esp32_bridge/.env>
+# That key is read-only (GET only): it cannot ingest, confirm syncs or write diagnostics.
+rest:
+  - resource: http://192.168.1.40:8765/status
+    scan_interval: 30
+    timeout: 10
+    headers:
+      X-Ring-Token: !secret ringconn_ha_token
+    sensor:
+      - name: RingConn Ring State
+        unique_id: ringconn_ring_state
+        icon: mdi:ring
+        value_template: >-
+          {% set d = ((value_json.devices.values() | list | first) or {}) %}
+          {% set age = as_timestamp(now()) - d.get('in_case_at', 0) %}
+          {{ 'unknown' if age > 600 else ('in_case' if d.get('in_case', 0) | int(0) == 1 else 'out_of_case') }}
+      - name: RingConn Bridge Devices
+        unique_id: ringconn_bridge_devices
+        value_template: "{{ value_json.device_count }}"
+      - name: RingConn Sync Health
+        unique_id: ringconn_sync_health
+        value_template: "{{ ((value_json.devices.values() | list | first) or {}).get('sync_state','no_ring_seen') }}"
+      - name: RingConn Last Complete Sync
+        unique_id: ringconn_last_complete_sync
+        device_class: timestamp
+        value_template: "{% set v = ((value_json.devices.values() | list | first) or {}).get('last_complete_sync') %}{{ v | timestamp_local if v else 'unknown' }}"
+      - name: RingConn Last Upload
+        unique_id: ringconn_last_upload
+        device_class: timestamp
+        value_template: "{% set ts = ((value_json.devices.values() | list | first) or {}).get('last_upload') %}{{ ts | timestamp_local if ts else 'unknown' }}"
+      - name: RingConn Last Frame Age
+        unique_id: ringconn_last_frame_age
+        unit_of_measurement: "s"
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('last_frame_age_seconds','unknown') }}"
+      - name: RingConn Battery
+        unique_id: ringconn_battery
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('battery_pct','unknown') if d.get('battery_pct_at',0) > as_timestamp(now()) - 86400 else 'unknown' }}"
+      - name: RingConn Battery Voltage
+        unique_id: ringconn_battery_voltage
+        unit_of_measurement: "mV"
+        device_class: voltage
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('battery_mv','unknown') if d.get('battery_mv_at',0) > as_timestamp(now()) - 86400 else 'unknown' }}"
+      - name: RingConn Case Battery
+        unique_id: ringconn_case_battery
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('case_battery_pct','unknown') if d.get('case_battery_pct_at',0) > as_timestamp(now()) - 604800 else 'unknown' }}"
+      - name: RingConn Charging
+        unique_id: ringconn_charging
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ 'unknown' if d.get('charging_at',0) < as_timestamp(now()) - 3600 else ('charging' if d.get('charging',0) | int(0) == 1 else 'not charging') }}"
+      - name: RingConn Heart Rate
+        unique_id: ringconn_heart_rate
+        unit_of_measurement: "bpm"
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('hr_bpm','unknown') if d.get('hr_bpm_at',0) > as_timestamp(now()) - 129600 else 'unknown' }}"
+      - name: RingConn HRV RMSSD
+        unique_id: ringconn_hrv_rmssd
+        unit_of_measurement: "ms"
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('hrv_rmssd_ms','unknown') if d.get('hrv_rmssd_ms_at',0) > as_timestamp(now()) - 129600 else 'unknown' }}"
+      - name: RingConn Blood Oxygen
+        unique_id: ringconn_spo2
+        unit_of_measurement: "%"
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('spo2_pct','unknown') if d.get('spo2_pct_at',0) > as_timestamp(now()) - 129600 else 'unknown' }}"
+      - name: RingConn Respiratory Rate
+        unique_id: ringconn_resp_rate
+        unit_of_measurement: "breaths/min"
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('respiratory_rate','unknown') if d.get('respiratory_rate_at',0) > as_timestamp(now()) - 129600 else 'unknown' }}"
+      - name: RingConn Skin Temperature
+        unique_id: ringconn_skin_temp
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('skin_temp_c','unknown') if d.get('skin_temp_c_at',0) > as_timestamp(now()) - 86400 else 'unknown' }}"
+      - name: RingConn Steps 15-min Bucket
+        unique_id: ringconn_steps_bucket
+        unit_of_measurement: "steps"
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('quarter_hour_steps','unknown') if d.get('quarter_hour_steps_at',0) > as_timestamp(now()) - 86400 else 'unknown' }}"
+
+template:
+  - binary_sensor:
+      - name: RingConn In Charging Case
+        unique_id: ringconn_in_charging_case
+        icon: mdi:ring
+        state: "{{ is_state('sensor.ringconn_ring_state', 'in_case') }}"
+        availability: "{{ states('sensor.ringconn_ring_state') not in ['unknown', 'unavailable'] }}"
+
+lovelace:
+  dashboards:
+    ring-health:
+      mode: yaml
+      title: RingConn
+      icon: mdi:ring
+      filename: ringconn-dashboard.yaml
+      show_in_sidebar: true
+
+input_boolean:
+  ringconn_automations_enabled:
+    name: RingConn bedtime and morning automations
+    icon: mdi:toggle-switch
+    initial: true
+  ringconn_bedtime_active:
+    name: Zac bedtime mode
+    icon: mdi:bed
+  ringconn_day_started:
+    name: Zac day started
+    icon: mdi:weather-sunset-up
+
+automation:
+  - id: ringconn_bedtime_ring_in_case
+    alias: RingConn - ring in case at night, prep house for bed
+    description: When Zac's ring goes into its charging case in the evening or overnight, turn off the indoor house lights and switch on bedtime mode.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.ringconn_ring_state
+        to: in_case
+        not_from: unavailable
+        for: "00:00:30"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ringconn_automations_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.ringconn_bedtime_active
+        state: "off"
+      - condition: or
+        conditions:
+          - condition: time
+            after: "20:00:00"
+          - condition: time
+            before: "04:00:00"
+    actions:
+      - action: light.turn_off
+        target:
+          entity_id:
+            - light.kitchen_lights
+            - light.living_room_kitchen_lights
+            - light.dining_room_lights
+            - light.living_room_dining_room_lights
+            - light.bar_lights
+            - light.ambient_lights
+            - light.first_floor_lights
+            - light.fridge_lights
+            - light.stove_lights
+            - light.range_light
+            - light.laundry_room_lights
+            - light.coat_room_light
+            - light.living_room_ceiling_fan_light
+            - light.hallway_lights
+            - light.hallway_light_1
+            - light.hallway_light_2
+            - light.hallway_light_3
+            - light.hallway_light_4
+            - light.stair_light_1
+            - light.stair_light_2
+            - light.stair_light_3
+            - light.movie_room
+            - light.basement_light_1
+            - light.basement_light_2
+            - light.office_led
+            - light.master_bedroom_led
+            - light.ceiling_light_light
+            - light.ceiling_fan_2
+            - light.lamp
+            - light.tv_light_18
+            - light.monitor_lights_18
+        data:
+          transition: 2
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.ringconn_bedtime_active
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.ringconn_day_started
+      - action: logbook.log
+        data:
+          name: RingConn
+          message: Ring is in its case, so the indoor lights were turned off and bedtime mode started.
+          entity_id: input_boolean.ringconn_bedtime_active
+
+  - id: ringconn_morning_ring_out_of_case
+    alias: RingConn - ring out of case, the day has started
+    description: When Zac takes the ring out of its case in the morning, mark the day as started and end bedtime mode.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.ringconn_ring_state
+        from: in_case
+        to: out_of_case
+        for: "00:00:30"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ringconn_automations_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.ringconn_day_started
+        state: "off"
+      - condition: or
+        conditions:
+          - condition: state
+            entity_id: input_boolean.ringconn_bedtime_active
+            state: "on"
+          - condition: time
+            after: "04:00:00"
+            before: "11:00:00"
+    actions:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.ringconn_bedtime_active
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.ringconn_day_started
+      - action: logbook.log
+        data:
+          name: RingConn
+          message: Ring is out of its case, so the day has started.
+          entity_id: input_boolean.ringconn_day_started

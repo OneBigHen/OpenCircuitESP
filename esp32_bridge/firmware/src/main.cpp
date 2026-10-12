@@ -8,6 +8,8 @@
 #include <time.h>
 #include <esp_partition.h>
 #include <unistd.h>
+#include <stdarg.h>
+#include <esp_system.h>
 #include "secrets.h"
 #include "ring_protocol.h"
 #include "spool_recovery.h"
@@ -17,13 +19,32 @@
 // Never ACK a history page until its bytes are durably written to flash.
 // NOT YET HARDWARE-VALIDATED. Preserve the official app until an A/B sync works.
 namespace {
+// Diagnostics: every log line goes to USB serial AND a RAM buffer that is POSTed
+// to the collector (/diag), so the bridge can be debugged over Wi-Fi alone.
+const char *FW_VERSION="diag-2";
+char dbuf[4096];size_t dlen=0;
+void dappend(const char*line){
+  size_t n=strlen(line);
+  if(n>200)n=200;
+  if(dlen+n+1>=sizeof(dbuf)){size_t keep=sizeof(dbuf)/2;memmove(dbuf,dbuf+dlen-keep,keep);dlen=keep;}
+  memcpy(dbuf+dlen,line,n);dlen+=n;dbuf[dlen++]='\n';dbuf[dlen]=0;
+}
+void dlog(const char*line){Serial.println(line);dappend(line);}
+void dlogf(const char*fmt,...){
+  char tmp[220];va_list ap;va_start(ap,fmt);vsnprintf(tmp,sizeof(tmp),fmt,ap);va_end(ap);
+  size_t n=strlen(tmp);while(n&&(tmp[n-1]=='\n'||tmp[n-1]=='\r'))tmp[--n]=0;
+  dlog(tmp);
+}
 const char *SPOOL="/pending.ndjson";
 const char *SPOOL_PATH="/littlefs/pending.ndjson";
 constexpr size_t MAX_SPOOL=900*1024;
 const uint8_t STATUS[]={0x01,0x00,0x00};
 const uint8_t FETCH[]={0x07,0x00,0x00};
 const uint8_t STOP[]={0xd0,0x00,0x00};
-constexpr uint32_t RETRY_MS=15UL*60UL*1000UL;
+constexpr uint32_t RETRY_MS=20UL*1000UL;
+// Between full history syncs, read the ring's live status descriptor this often so
+// charging-case events (in case / out of case) reach the collector within about a minute.
+constexpr uint32_t STATUS_POLL_MS=60UL*1000UL;
 struct Packet { uint16_t length; uint8_t bytes[512]; };
 QueueHandle_t inbox=nullptr;
 NimBLEClient* client=nullptr;
@@ -34,7 +55,8 @@ uint8_t ringMAC[6]={};
 String ringID;
 uint8_t channel=0;
 uint32_t pages=0,lastPage=0,nextAttempt=0;
-bool sawEnd=false,sawEmpty=false,authReplied=false;
+bool sawEnd=false,sawEmpty=false,authReplied=false,gotStatus=false;
+bool ringSeenLast=true;
 time_t lastSuccess=0;
 time_t attemptStarted=0;
 
@@ -91,7 +113,7 @@ bool save(const Packet &p){
   if(r)r.close();
   size_t needed=p.length*2+145;
   if(existing+needed>=MAX_SPOOL||LittleFS.totalBytes()-LittleFS.usedBytes()<needed+4096){
-    Serial.println("FLASH FULL: refusing history ACK. Old records retained.");
+    dlog("FLASH FULL: refusing history ACK. Old records retained.");
     return false;
   }
   FILE* f=fopen(SPOOL_PATH,"ab");
@@ -113,7 +135,7 @@ void receive(){
     uint8_t op=p.bytes[0];
     if((op==0x47||op==0x4c||op==0x50||op==0x82||op==0x10||op==0x87)
        &&!ring::validFrame(p.bytes,p.length)){
-      Serial.printf("Corrupt frame %02X; refusing ACK\n",op);failed=true;continue;
+      dlogf("Corrupt frame %02X; refusing ACK\n",op);failed=true;continue;
     }
     if(op==0x81&&p.length>=3&&p.bytes[1]==0x00){
       uint8_t reply[6];ring::authResponse(ringMAC,p.bytes[2],reply);
@@ -126,6 +148,7 @@ void receive(){
       if(!send(ack,sizeof(ack)))failed=true;
       continue;
     }
+    if(op==0x10||op==0x87)gotStatus=true;
     // OSA 0x48 flood is not captured here; requires dedicated high-volume transport.
     if(op==0x48)continue;
     // Only archive raw history, cursor reports, status and sync-ACK evidence.
@@ -137,7 +160,7 @@ void receive(){
       ++pages;lastPage=millis();
       const uint8_t ack[]={uint8_t(op==0x47?0xc7:0xcc),0,0};
       if(!send(ack,sizeof(ack)))failed=true;
-      else Serial.printf("Saved + ACKed %02X page %lu\n",op,(unsigned long)pages);
+      else dlogf("Saved + ACKed %02X page %lu\n",op,(unsigned long)pages);
     }
     if(op==0x50)sawEnd=true; // 0x50 deliberately has no XOR
   }
@@ -153,7 +176,7 @@ bool authenticate(){
     if(authReplied){delay(300);return true;}
     delay(20);
   }
-  Serial.println("No SM3 challenge");return false;
+  dlog("No SM3 challenge");return false;
 }
 bool drain(uint8_t ch){
   channel=ch;pages=0;sawEnd=sawEmpty=false;lastPage=millis();
@@ -162,12 +185,12 @@ bool drain(uint8_t ch){
   if(!send(cmd,sizeof(cmd)))return false;
   delay(300);receive();
   if(failed||!send(FETCH,sizeof(FETCH)))return false;
-  Serial.printf("Opened history channel %02X\n",ch);
+  dlogf("Opened history channel %02X\n",ch);
   uint32_t began=millis(),lastNudge=0;int nudges=0;
   while(millis()-began<200000UL){
     receive();
     if(failed||!client->isConnected())return false;
-    if(sawEnd){Serial.printf("History %02X complete (%lu pages)\n",ch,(unsigned long)pages);return true;}
+    if(sawEnd){dlogf("History %02X complete (%lu pages)\n",ch,(unsigned long)pages);return true;}
     if(sawEmpty&&!pages&&millis()-lastPage>4000)return true;
     if(!pages&&millis()-began>12000)return false;
     if(pages&&millis()-lastPage>5000){
@@ -179,43 +202,58 @@ bool drain(uint8_t ch){
     }
     delay(15);
   }
-  Serial.println("Partial history retained for retry");return false;
+  dlog("Partial history retained for retry");return false;
 }
-bool connectAndSync(){
+bool connectAndSync(bool statusOnly=false){
   attemptStarted=time(nullptr);
   NimBLEScan *scan=NimBLEDevice::getScan();
   scan->setActiveScan(true);scan->setInterval(140);scan->setWindow(70);
   NimBLEScanResults advertisements=scan->getResults(6000);
   const NimBLEAdvertisedDevice* target=nullptr;
+  int unnamed=0;
   for(int i=0;i<advertisements.getCount();++i){
     auto* d=advertisements.getDevice(i);
-    Serial.printf("Nearby BLE: %s [%s]\n",d->getName().c_str(),d->getAddress().toString().c_str());
-    if(d->getName()==std::string(RING_NAME)){target=d;break;}
+    if(d->getName().empty()){++unnamed;continue;}
+    if(!statusOnly)dlogf("Nearby BLE: %s [%s] rssi %d\n",d->getName().c_str(),d->getAddress().toString().c_str(),d->getRSSI());
+    if(d->getName()==std::string(RING_NAME)||d->getName().rfind("RingConn Gen2",0)==0){target=d;break;}
   }
+  if(!target&&(!statusOnly||ringSeenLast))dlogf("Scan: %d devices (%d unnamed), no RingConn\n",(int)advertisements.getCount(),unnamed);
+  if(statusOnly)ringSeenLast=target!=nullptr;
   if(!target){scan->clearResults();return false;}
   client=NimBLEDevice::createClient();
   bool success=false;
   do{
-    if(!client||!client->connect(target)){Serial.println("BLE connect failed");break;}
-    if(!client->secureConnection()){Serial.println("BLE bond failed");break;}
+    if(!client||!client->connect(target)){dlog("BLE connect failed");break;}
+    if(!client->secureConnection()){dlog("BLE bond failed");break;}
     auto* dis=client->getService(NimBLEUUID((uint16_t)0x180a));
     auto* sys=dis?dis->getCharacteristic(NimBLEUUID((uint16_t)0x2a23)):nullptr;
-    if(!sys){Serial.println("System ID missing");break;}
+    if(!sys){dlog("System ID missing");break;}
     auto sid=sys->readValue();
     std::string raw(reinterpret_cast<const char*>(sid.data()),sid.size());
-    if(!systemIDMac(raw,ringMAC)){Serial.println("Invalid System ID");break;}
+    if(!systemIDMac(raw,ringMAC)){dlog("Invalid System ID");break;}
     ringID=macText(ringMAC);
     if(strlen(RING_MAC)>0&&ringID!=String(RING_MAC)){
-      Serial.println("Configured Ring MAC mismatch; refusing connection");break;
+      dlog("Configured Ring MAC mismatch; refusing connection");break;
     }
     auto* svc=client->getService(ring::SERVICE_UUID);
-    if(!svc){Serial.println("RingConn service not found");break;}
+    if(!svc){dlog("RingConn service not found");break;}
     writer=svc->getCharacteristic(ring::WRITE_UUID);
     auto* receiver=svc->getCharacteristic(ring::NOTIFY_UUID);
     if(!writer||!receiver||!receiver->canNotify()||!receiver->subscribe(true,notify)){
-      Serial.println("Notify/write characteristic unavailable");break;
+      dlog("Notify/write characteristic unavailable");break;
     }
-    Serial.println("BLE notifications subscribed; starting authenticated drain");
+    if(statusOnly){
+      gotStatus=false;
+      if(!authenticate())break;
+      if(!send(STOP,sizeof(STOP)))break; // d0 00 00 makes the ring answer with a status descriptor
+      uint32_t asked=millis();
+      while(!gotStatus&&!failed&&client->isConnected()&&millis()-asked<6000){receive();delay(20);}
+      receive();
+      success=gotStatus&&!failed;
+      if(!success)dlog("Status poll: no descriptor");
+      break;
+    }
+    dlog("BLE notifications subscribed; starting authenticated drain");
     bool night=drain(0x00);
     bool day=!failed&&client->isConnected()?drain(0x03):false;
     success=night&&day&&!failed;
@@ -246,7 +284,7 @@ bool clockFromCollector(){
 }
 bool upload(){
   if(!ring::recoverSpool(SPOOL_PATH)){
-    Serial.println("ALERT: spool recovery failed; history retained");return false;
+    dlog("ALERT: spool recovery failed; history retained");return false;
   }
   File f=LittleFS.open(SPOOL,"r");
   if(!f)return true;
@@ -263,8 +301,8 @@ bool upload(){
   bool acknowledged=code==200 &&
     (receipt.indexOf("\"committed\": true")>=0 ||
      receipt.indexOf("\"committed\":true")>=0);
-  if(acknowledged){LittleFS.remove(SPOOL);Serial.println("Collector committed spool");return true;}
-  Serial.printf("Collector upload failed: HTTP %d; flash retained\n",code);return false;
+  if(acknowledged){LittleFS.remove(SPOOL);dlog("Collector committed spool");return true;}
+  dlogf("Collector upload failed: HTTP %d; flash retained\n",code);return false;
 }
 // The collector only records a successful sync after confirming persisted
 // termination evidence from BOTH history channels, not merely a successful upload.
@@ -280,9 +318,23 @@ bool confirmComplete(){
   int code=http.POST(payload);
   String receipt=code==200?http.getString():String();
   http.end();
-  if(code!=200)Serial.printf("Completion not confirmed: HTTP %d\n",code);
+  if(code!=200)dlogf("Completion not confirmed: HTTP %d\n",code);
   return code==200&&(receipt.indexOf("\"confirmed\": true")>=0||
                     receipt.indexOf("\"confirmed\":true")>=0);
+}
+void diagPost(){
+  if(WiFi.status()!=WL_CONNECTED||!dlen)return;
+  HTTPClient http;
+  if(!http.begin(String(COLLECTOR_URL)+"/diag"))return;
+  http.setTimeout(6000);
+  http.addHeader("X-Ring-Token",COLLECTOR_TOKEN);
+  http.addHeader("Content-Type","text/plain");
+  char head[200];
+  snprintf(head,sizeof(head),"fw=%s up=%lus heap=%u rssi=%d reset=%d\n",FW_VERSION,
+           (unsigned long)(millis()/1000),(unsigned)ESP.getFreeHeap(),(int)WiFi.RSSI(),(int)esp_reset_reason());
+  String body=String(head)+dbuf;
+  int code=http.POST(body);http.end();
+  if(code==200){dlen=0;dbuf[0]=0;}
 }
 bool awakeWindow(){
   time_t now=time(nullptr);tm local{};localtime_r(&now,&local);
@@ -297,29 +349,35 @@ void setup(){
   // as permission to format. First mount; only initialize a fully erased area.
   if(!LittleFS.begin(false)){
     if(!spoolPartitionBlank()||!LittleFS.begin(true)){
-      Serial.println("FATAL: spool mount failed; will not format existing history");
+      dlog("FATAL: spool mount failed; will not format existing history");
       while(true)delay(1000);
     }
   }
   lastSuccess=(time_t)pref.getULong64("lastsync",0);
   pref.end();
   inbox=xQueueCreate(32,sizeof(Packet));
-  if(!inbox){Serial.println("FATAL: BLE queue alloc");while(true)delay(1000);}
+  if(!inbox){dlog("FATAL: BLE queue alloc");while(true)delay(1000);}
   NimBLEDevice::init("RingConn Gen2 Local Bridge");
   NimBLEDevice::setSecurityAuth(true,false,true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
   NimBLEDevice::setMTU(517);
   setenv("TZ",LOCAL_TIMEZONE,1);tzset();
-  Serial.println("RingConn Gen2 bridge ready; serial lists nearby BLE names");
+  dlog("RingConn Gen2 bridge ready; serial lists nearby BLE names");
 }
-void loop(){
+void cycle(){
   receive();
   if((int32_t)(millis()-nextAttempt)<0){delay(1000);return;}
   nextAttempt=millis()+RETRY_MS;
-  if(!wifi()||!clockFromCollector()){Serial.println("Collector offline/time unavailable");return;}
+  if(!wifi()||!clockFromCollector()){dlog("Collector offline/time unavailable");return;}
   if(!upload())return; // never accumulate unbounded ACKed records
   time_t now=time(nullptr);
-  if(!awakeWindow()||(lastSuccess&&now-lastSuccess<(time_t)SYNC_INTERVAL_SECONDS))return;
+  if(!awakeWindow())return;
+  if(lastSuccess&&now-lastSuccess<(time_t)SYNC_INTERVAL_SECONDS){
+    nextAttempt=millis()+STATUS_POLL_MS;
+    failed=false;packetDropped=false;
+    if(connectAndSync(true))upload();
+    return;
+  }
   failed=false;packetDropped=false;
   bool complete=connectAndSync();
   bool committed=upload();
@@ -327,7 +385,8 @@ void loop(){
   if(confirmed){
     lastSuccess=now;
     Preferences p;p.begin("ringbridge",false);p.putULong64("lastsync",(uint64_t)lastSuccess);p.end();
-    nextAttempt=millis()+SYNC_INTERVAL_SECONDS*1000UL;
-    Serial.println("Gen2 sleep + daytime channels synchronized");
-  }else Serial.println("Partial/failed drain: queued flash pages retained; retry later");
+    nextAttempt=millis()+STATUS_POLL_MS;
+    dlog("Gen2 sleep + daytime channels synchronized");
+  }else dlog("Partial/failed drain: queued flash pages retained; retry later");
 }
+void loop(){cycle();diagPost();}

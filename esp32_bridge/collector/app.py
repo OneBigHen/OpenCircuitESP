@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfoNotFoundError
 DB=Path(os.getenv("RING_DB","/data/ringconn.db"))
 TOKEN=os.getenv("RING_TOKEN","")
 VIEW_TOKEN=os.getenv("RING_VIEW_TOKEN","")
+HA_TOKEN=os.getenv("RING_HA_TOKEN","")  # read-only API key for Home Assistant REST sensors
 STATIC=Path(__file__).resolve().parent/'web'
 ASSETS={'/':'index.html','/index.html':'index.html','/app.css':'app.css',
         '/app.js':'app.js','/model.mjs':'model.mjs','/setup.mjs':'setup.mjs','/ring-views.mjs':'ring-views.mjs','/session-view.mjs':'session-view.mjs','/sw.js':'sw.js',
@@ -25,6 +26,8 @@ DEVICE=re.compile(r"^(?:[A-F0-9]{2}:){5}[A-F0-9]{2}$")
 METRICS={"hr_bpm","hrv_rmssd_ms","spo2_pct","respiratory_rate","battery_pct",
          "battery_mv","skin_temp_c","case_battery_pct","quarter_hour_steps","charging"}
 MAX_BYTES=2*1024*1024
+DIAG=DB.parent/"diag.log"
+DIAG_CAP=64*1024
 
 def connect(path=None):
     path=Path(path or DB)
@@ -198,6 +201,11 @@ def status(db):
         item={"device":dev,"last_frame":when}
         for key,t,v in db.execute("SELECT metric,stamp,value FROM metrics WHERE device=? ORDER BY stamp DESC",(dev,)):
             if key not in item:item[key]=v;item[key+"_at"]=t
+        # Latest live descriptor (0x10/0x87): byte 17 is 0xff when the ring is out of its charging case.
+        row=db.execute("SELECT seen,raw FROM frames WHERE device=? AND opcode IN (16,135) ORDER BY seen DESC,rowid DESC LIMIT 1",(dev,)).fetchone()
+        if row:
+            raw=bytes.fromhex(row[1]) if isinstance(row[1],str) else bytes(row[1])
+            if len(raw)>=19:item["in_case"]=int(raw[17]!=255);item["in_case_at"]=row[0]
         item["frame_count"]=db.execute("SELECT COUNT(*) FROM frames WHERE device=?",(dev,)).fetchone()[0]
         item["epoch_count"]=db.execute("SELECT COUNT(*) FROM epochs WHERE device=? AND kind='activity'",(dev,)).fetchone()[0]
         item["last_upload"]=db.execute("SELECT MAX(committed) FROM uploads WHERE device=?",(dev,)).fetchone()[0]
@@ -236,6 +244,8 @@ class API(BaseHTTPRequestHandler):
     def authorized(self,read_only=False):
         token=self.headers.get('X-Ring-Token','')
         token_ok=bool(TOKEN and hmac.compare_digest(token.encode(),TOKEN.encode()))
+        if read_only and not token_ok and HA_TOKEN:
+            token_ok=hmac.compare_digest(token.encode(),HA_TOKEN.encode())
         if not token_ok and not (read_only and SESSIONS.valid(self.headers.get('Cookie'))):
             self.response(401,b'{"error":"unauthorized"}');return False
         return True
@@ -249,6 +259,15 @@ class API(BaseHTTPRequestHandler):
                    '.webmanifest':'application/manifest+json','.png':'image/png'}
             return self.response(200,file.read_bytes(),types[file.suffix])
         if p.path=="/health":return self.response(200,b'{"ok":true}')
+        if p.path=="/firmware.bin":
+            key=parse_qs(p.query).get("key",[""])[0]
+            fw=DB.parent/"firmware.bin"
+            if not (TOKEN and hmac.compare_digest(key.encode(),TOKEN.encode())) or not fw.is_file():
+                return self.response(404,b'{"error":"not found"}')
+            return self.response(200,fw.read_bytes(),"application/octet-stream",{"Content-Disposition":'attachment; filename="ring-bridge-0x10000.bin"'})
+        if p.path=="/diag":
+            if not self.authorized(read_only=True):return
+            return self.response(200,DIAG.read_bytes() if DIAG.exists() else b"no diagnostics yet\n","text/plain; charset=utf-8")
         if p.path=="/time":return self.response(200,str(int(time.time())),"text/plain")
         if not self.authorized(read_only=True):return
         db=connect()
@@ -292,6 +311,17 @@ class API(BaseHTTPRequestHandler):
         finally:db.close()
     def do_POST(self):
         if self.path in ('/auth/login','/auth/logout'):return self.browser_auth()
+        if self.path=="/diag":
+            if not self.authorized():return
+            n=int(self.headers.get("Content-Length","0") or 0)
+            if not 0<n<=8192:return self.response(413,b'{"error":"bad size"}')
+            text=self.rfile.read(n).decode("utf-8","replace").replace("\r","")
+            stamp=time.strftime("%Y-%m-%d %H:%M:%S",time.localtime())
+            lines=text.split("\n");block="".join(f"{stamp} {'| ' if i else '## '}{l}\n" for i,l in enumerate(lines) if l)
+            old=DIAG.read_bytes() if DIAG.exists() else b""
+            DIAG.parent.mkdir(parents=True,exist_ok=True)
+            DIAG.write_bytes((old+block.encode())[-DIAG_CAP:])
+            return self.response(200,b'{"ok":true}')
         if self.path not in ("/ingest","/complete"):
             return self.response(404,b'{"error":"not found"}')
         if not self.authorized():return
@@ -339,5 +369,7 @@ if __name__=="__main__":
         raise SystemExit("RING_TOKEN must be a private random token of at least 20 characters")
     if VIEW_TOKEN and (len(VIEW_TOKEN)<20 or VIEW_TOKEN.startswith('CHANGE_')):
         raise SystemExit('RING_VIEW_TOKEN must be a private random token of at least 20 characters')
+    if HA_TOKEN and (len(HA_TOKEN)<20 or HA_TOKEN.startswith('CHANGE_') or HA_TOKEN in (TOKEN,VIEW_TOKEN)):
+        raise SystemExit('RING_HA_TOKEN must be its own private random token of at least 20 characters')
     db=connect();db.close()
     ThreadingHTTPServer((os.getenv("RING_HOST","0.0.0.0"),int(os.getenv("RING_PORT","8765"))),API).serve_forever()

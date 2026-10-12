@@ -73,6 +73,7 @@ When the collector is unavailable, the ESP32 preserves ACKed history in flash an
 cd esp32_bridge
 cp .env.example .env
 # Put a long random token in RING_TOKEN (e.g. openssl rand -hex 32).
+# Optional: RING_HA_TOKEN = a different random key that can only read (for Home Assistant).
 docker compose up -d --build
 curl http://YOUR_SERVER_LAN_IP:8765/health
 curl -H 'X-Ring-Token: YOUR_TOKEN' http://YOUR_SERVER_LAN_IP:8765/status
@@ -115,6 +116,24 @@ To discover your RingConn Gen 2's exact Bluetooth advertisement name, initially 
 - Stores the last successful sync in NVS to avoid aggressive reconnects after reboots.
 
 ## Home Assistant
+
+**Recommended:** install `homeassistant/ringconn_package.yaml` as `packages/ringconn.yaml` and
+`homeassistant/ringconn_dashboard.yaml` as `ringconn-dashboard.yaml` in HA's config folder
+(HA must load `packages:`). It adds 16 sensors (ring state, batteries, vitals, sync health), helper
+switches, a RingConn dashboard and two automations: ring goes into its charging case in the evening or
+overnight -> indoor lights off and bedtime mode on; ring comes out of the case -> day started.
+
+HA authenticates with a **separate read-only key**: set `RING_HA_TOKEN` in `.env` (random, 20+ chars,
+different from the other keys; it can only GET) and add `ringconn_ha_token: <that value>` to HA's
+`secrets.yaml`. Restart the collector after changing `.env`.
+
+Live ring/case state: between full history syncs the ESP32 reads the ring's status descriptor about
+once a minute (`STATUS_POLL_MS`), so `in_case`, charging and battery reach `/status` within a minute or two.
+`/status` reports `in_case` (1 when descriptor byte 17 is not `0xff`) with `in_case_at`. If the ring is
+unreachable (for example a closed case out of Bluetooth range) the state turns `unknown` after 10 minutes
+and the automations do not fire.
+
+The older single-file template below still works on its own.
 
 Merge the example `homeassistant/rest.yaml` into your `configuration.yaml` (one top-level `rest:` block), replace the host IP and set `ringconn_token` in `secrets.yaml`. Use `homeassistant/dashboard.yaml` as a starting dashboard.
 

@@ -1,0 +1,143 @@
+# RingConn dashboard (installed as /config/ringconn-dashboard.yaml, registered by packages/ringconn.yaml).
+title: RingConn
+views:
+  - title: RingConn
+    path: ringconn
+    icon: mdi:ring
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Ring and case
+            icon: mdi:ring
+          - type: tile
+            entity: sensor.ringconn_ring_state
+            name: Ring
+            icon: mdi:ring
+            vertical: true
+          - type: tile
+            entity: sensor.ringconn_battery
+            name: Ring battery
+            vertical: true
+          - type: tile
+            entity: sensor.ringconn_case_battery
+            name: Case battery
+            vertical: true
+          - type: tile
+            entity: sensor.ringconn_charging
+            name: Ring charging
+            vertical: true
+          - type: tile
+            entity: sensor.ringconn_battery_voltage
+            name: Ring voltage
+            vertical: true
+          - type: tile
+            entity: sensor.ringconn_sync_health
+            name: Sync health
+            vertical: true
+      - type: grid
+        cards:
+          - type: heading
+            heading: Latest readings
+            icon: mdi:heart-pulse
+          - type: tile
+            entity: sensor.ringconn_heart_rate
+            name: Heart rate
+            vertical: true
+          - type: tile
+            entity: sensor.ringconn_blood_oxygen
+            name: Blood oxygen
+            vertical: true
+          - type: tile
+            entity: sensor.ringconn_hrv_rmssd
+            name: HRV (RMSSD)
+            vertical: true
+          - type: tile
+            entity: sensor.ringconn_respiratory_rate
+            name: Breathing
+            vertical: true
+          - type: tile
+            entity: sensor.ringconn_skin_temperature
+            name: Skin temperature
+            vertical: true
+          - type: tile
+            entity: sensor.ringconn_steps_15_min_bucket
+            name: Steps (15 min)
+            vertical: true
+      - type: grid
+        cards:
+          - type: heading
+            heading: Bedtime and morning
+            icon: mdi:bed
+          - type: entities
+            entities:
+              - entity: input_boolean.ringconn_automations_enabled
+                name: Ring automations on
+              - entity: input_boolean.ringconn_bedtime_active
+                name: Bedtime mode
+              - entity: input_boolean.ringconn_day_started
+                name: Day started
+              - entity: automation.ringconn_ring_in_case_at_night_prep_house_for_bed
+                name: Ring in case at night
+              - entity: automation.ringconn_ring_out_of_case_the_day_has_started
+                name: Ring out of case
+          - type: logbook
+            target:
+              entity_id:
+                - input_boolean.ringconn_bedtime_active
+                - input_boolean.ringconn_day_started
+            hours_to_show: 72
+  - title: Trends
+    path: trends
+    icon: mdi:chart-line
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Heart
+            icon: mdi:heart-pulse
+          - type: history-graph
+            hours_to_show: 24
+            entities:
+              - entity: sensor.ringconn_heart_rate
+              - entity: sensor.ringconn_hrv_rmssd
+          - type: history-graph
+            hours_to_show: 24
+            entities:
+              - entity: sensor.ringconn_blood_oxygen
+              - entity: sensor.ringconn_respiratory_rate
+      - type: grid
+        cards:
+          - type: heading
+            heading: Body and batteries
+            icon: mdi:thermometer
+          - type: history-graph
+            hours_to_show: 24
+            entities:
+              - entity: sensor.ringconn_skin_temperature
+          - type: history-graph
+            hours_to_show: 48
+            entities:
+              - entity: sensor.ringconn_battery
+              - entity: sensor.ringconn_case_battery
+      - type: grid
+        cards:
+          - type: heading
+            heading: Collector health
+            icon: mdi:server
+          - type: entities
+            entities:
+              - entity: sensor.ringconn_last_complete_sync
+                name: Last full sync
+              - entity: sensor.ringconn_last_upload
+                name: Last upload
+              - entity: sensor.ringconn_last_frame_age
+                name: Seconds since last ring frame
+          - type: markdown
+            content: >-
+              Full history, daily views, charts, CSV export and setup are in the
+              [RingConn health page](http://192.168.1.40:8765/) on the collector.
