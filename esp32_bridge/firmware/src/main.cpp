@@ -22,7 +22,7 @@
 namespace {
 // Diagnostics: every log line goes to USB serial AND a RAM buffer that is POSTed
 // to the collector (/diag), so the bridge can be debugged over Wi-Fi alone.
-const char *FW_VERSION="diag-8b";
+const char *FW_VERSION="diag-9";
 char dbuf[4096];size_t dlen=0;
 void dappend(const char*line){
   size_t n=strlen(line);
@@ -51,7 +51,7 @@ constexpr uint32_t RETRY_MS=20UL*1000UL;
 // ring for its status descriptor over it every HOLD_ASK_MS (one 3-byte write; far cheaper for
 // the ring's battery than reconnecting). Charging-case events reach the collector in seconds.
 // While the link is held the phone app cannot connect to the ring.
-constexpr uint32_t HOLD_ASK_MS=15UL*1000UL;
+constexpr uint32_t HOLD_ASK_MS=30UL*1000UL;
 constexpr uint32_t REACQUIRE_MS=10UL*1000UL; // retry cadence when the ring is out of reach
 struct Packet { uint16_t length; uint8_t bytes[512]; };
 QueueHandle_t inbox=nullptr;
@@ -200,12 +200,12 @@ bool drain(uint8_t ch){
   if(!send(cmd,sizeof(cmd)))return false;
   delay(300);receive();
   if(failed||!send(FETCH,sizeof(FETCH)))return false;
-  dlogf("Opened history channel %02X\n",ch);
+  if(!holding)dlogf("Opened history channel %02X\n",ch);
   uint32_t began=millis(),lastNudge=0;int nudges=0;
   while(millis()-began<200000UL){
     receive();
     if(failed||!client->isConnected())return false;
-    if(sawEnd){dlogf("History %02X complete (%lu pages)\n",ch,(unsigned long)pages);return true;}
+    if(sawEnd){if(pages||!holding)dlogf("History %02X complete (%lu pages)\n",ch,(unsigned long)pages);return true;}
     if(sawEmpty&&!pages&&millis()-lastPage>4000)return true;
     if(!pages&&millis()-began>12000)return false;
     if(pages&&millis()-lastPage>5000){
@@ -298,6 +298,7 @@ void armConnect(){
   }
   connEvent=false;
   if(client->connect(NimBLEAddress(ringAddr,ringAddrType),true,true,true)){armed=true;armedAt=millis();++armedCount;}
+  else if(client->getLastError()==BLE_HS_EALREADY){armed=true;armedAt=millis();} // still connecting
   else{++armFail;lastArmErr=client->getLastError();}
 }
 void ringSummary(){
@@ -308,6 +309,14 @@ void ringSummary(){
     dlogf("Ring (5 min): address not learned yet; %lu ring adverts, %lu other adverts\n",(unsigned long)n,(unsigned long)all);
   }else dlogf("Ring (5 min): listening continuously for %s, connected %lu time(s); %lu listen windows, %lu ran out, %lu could not start (err %d)\n",ringAddr.c_str(),(unsigned long)linkedCount,(unsigned long)armedCount,(unsigned long)timeouts,(unsigned long)armFail,lastArmErr);
   armedCount=linkedCount=armFail=timeouts=0;
+}
+bool pollStatus(){
+  gotStatus=false;
+  bool drained=drain(0x03);
+  send(STOP,sizeof(STOP));
+  uint32_t t=millis();while(!failed&&client&&client->isConnected()&&millis()-t<300){receive();delay(20);}
+  (void)drained;
+  return gotStatus&&!failed;
 }
 bool connectAndSync(bool statusOnly=false,bool keepOpen=false){
   attemptStarted=time(nullptr);
@@ -337,13 +346,9 @@ bool connectAndSync(bool statusOnly=false,bool keepOpen=false){
       dlog("Notify/write characteristic unavailable");break;
     }
     if(statusOnly){
-      gotStatus=false;
-      if(!authenticate())break;
-      if(!send(STOP,sizeof(STOP)))break; // d0 00 00 makes the ring answer with a status descriptor
-      uint32_t asked=millis();
-      while(!gotStatus&&!failed&&client->isConnected()&&millis()-asked<6000){receive();delay(20);}
-      receive();
-      success=gotStatus&&!failed;
+      // STOP alone gets no status reply. Opening the daytime channel does: the ring answers
+      // 82 (cursor), 87 (status descriptor: battery/charging), any new pages, then 50 (end).
+      success=pollStatus();
       if(!success)dlog("Status poll: no descriptor");
       break;
     }
@@ -440,8 +445,11 @@ void holdTick(){
   if(lastSuccess&&now-lastSuccess>=(time_t)SYNC_INTERVAL_SECONDS){
     dlog("Full sync due; releasing held link");dropLink();nextAttempt=0;return;
   }
-  if(gotStatus){gotStatus=false;if(wifi()&&!upload())clockFromCollector();}
-  if(millis()-lastAsk>=HOLD_ASK_MS){lastAsk=millis();if(!send(STOP,sizeof(STOP)))failed=true;}
+  if(millis()-lastAsk>=HOLD_ASK_MS){
+    lastAsk=millis();
+    if(pollStatus()){if(wifi()&&!upload())clockFromCollector();}
+    else if(client&&client->isConnected()&&!failed)dlog("Held link: status poll got no descriptor");
+  }
   delay(50);
 }
 void diagPost(){
@@ -520,7 +528,7 @@ void cycle(){
   time_t now=time(nullptr);
   failed=false;packetDropped=false;
   if(lastSuccess&&now-lastSuccess<(time_t)SYNC_INTERVAL_SECONDS){
-    if(connectAndSync(true,true)){holding=true;lastAsk=millis();dlog("Holding ring link; status every 15 s");if(wifi())upload();}
+    if(connectAndSync(true,true)){holding=true;lastAsk=millis();dlog("Holding ring link; status every 30 s");if(wifi())upload();}
     return;
   }
   bool complete=connectAndSync();
