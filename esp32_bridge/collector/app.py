@@ -27,7 +27,7 @@ METRICS={"hr_bpm","hrv_rmssd_ms","spo2_pct","respiratory_rate","battery_pct",
          "battery_mv","skin_temp_c","case_battery_pct","quarter_hour_steps","charging"}
 MAX_BYTES=2*1024*1024
 DIAG=DB.parent/"diag.log"
-DIAG_CAP=64*1024
+DIAG_CAP=512*1024
 CONTACT=[0]  # last time the ESP32 bridge reached us (/time poll or an authenticated upload)
 
 def connect(path=None):

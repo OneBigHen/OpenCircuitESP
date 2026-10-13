@@ -22,7 +22,7 @@
 namespace {
 // Diagnostics: every log line goes to USB serial AND a RAM buffer that is POSTed
 // to the collector (/diag), so the bridge can be debugged over Wi-Fi alone.
-const char *FW_VERSION="diag-4";
+const char *FW_VERSION="diag-6";
 char dbuf[4096];size_t dlen=0;
 void dappend(const char*line){
   size_t n=strlen(line);
@@ -65,6 +65,13 @@ uint8_t channel=0;
 uint32_t pages=0,lastPage=0,nextAttempt=0;
 bool sawEnd=false,sawEmpty=false,authReplied=false,gotStatus=false;
 bool ringSeenLast=true,holding=false;
+uint32_t scanTotal=0,scanSeen=0,lastSummary=0,nearbyEvery=0;
+int bestRssi=-127;
+// The ring's BLE address, learned from the first advert that matched and kept in NVS.
+// A worn ring at range rarely delivers the scan response that carries its NAME, so
+// matching by name alone missed it for hours. With the address known we connect
+// directly: the radio listens 100% of the time for ANY advert from that address.
+std::string ringAddr;uint8_t ringAddrType=0;
 uint32_t lastAsk=0;
 time_t lastSuccess=0;
 time_t attemptStarted=0;
@@ -213,26 +220,78 @@ bool drain(uint8_t ch){
   }
   dlog("Partial history retained for retry");return false;
 }
+bool isRing(const NimBLEAdvertisedDevice* d){
+  const std::string &n=d->getName();
+  if(!n.empty()&&(n==std::string(RING_NAME)||n.rfind("RingConn Gen2",0)==0))return true;
+  if(d->isAdvertisingService(NimBLEUUID(ring::SERVICE_UUID)))return true;
+  std::string a=d->getAddress().toString();
+  return (strlen(RING_MAC)&&strcasecmp(a.c_str(),RING_MAC)==0)||(!ringAddr.empty()&&a==ringAddr);
+}
+void rememberRing(const NimBLEAdvertisedDevice* d){
+  std::string a=d->getAddress().toString();uint8_t t=d->getAddressType();
+  if(a==ringAddr&&t==ringAddrType)return;
+  ringAddr=a;ringAddrType=t;
+  Preferences p;p.begin("ringbridge",false);p.putString("addr",a.c_str());p.putUChar("atype",t);p.end();
+  dlogf("Learned ring address %s (type %u)\n",a.c_str(),(unsigned)t);
+}
+void noteRing(bool seen,int rssi){
+  ++scanTotal;if(seen){++scanSeen;if(rssi>bestRssi)bestRssi=rssi;}
+}
+void ringSummary(){
+  if(millis()-lastSummary<5UL*60UL*1000UL)return;
+  lastSummary=millis();
+  if(scanSeen)dlogf("Ring search (5 min): reached %lu of %lu tries, best signal %d dBm\n",(unsigned long)scanSeen,(unsigned long)scanTotal,bestRssi);
+  else dlogf("Ring search (5 min): not reached in %lu tries\n",(unsigned long)scanTotal);
+  scanTotal=scanSeen=0;bestRssi=-127;
+}
+// Direct connect to the remembered address; succeeds on whichever advert the ring sends first.
+bool connectKnown(){
+  if(ringAddr.empty())return false;
+  client=NimBLEDevice::createClient();
+  if(!client)return false;
+  client->setConnectionParams(24,48,0,600); // 6 s supervision timeout: ride out a hand briefly blocking the ring
+  client->setConnectTimeout(9000);
+  if(client->connect(NimBLEAddress(ringAddr,ringAddrType))){noteRing(true,client->getRssi());return true;}
+  NimBLEDevice::deleteClient(client);client=nullptr;
+  return false;
+}
 bool connectAndSync(bool statusOnly=false,bool keepOpen=false){
   attemptStarted=time(nullptr);
   NimBLEScan *scan=NimBLEDevice::getScan();
-  scan->setActiveScan(true);scan->setInterval(140);scan->setWindow(70);
-  NimBLEScanResults advertisements=scan->getResults(6000);
+  bool linked=connectKnown();
+  if(linked)dlogf("Ring connected directly, signal %d dBm\n",client->getRssi());
   const NimBLEAdvertisedDevice* target=nullptr;
-  int unnamed=0;
-  for(int i=0;i<advertisements.getCount();++i){
-    auto* d=advertisements.getDevice(i);
-    if(d->getName().empty()){++unnamed;continue;}
-    if(!statusOnly)dlogf("Nearby BLE: %s [%s] rssi %d\n",d->getName().c_str(),d->getAddress().toString().c_str(),d->getRSSI());
-    if(d->getName()==std::string(RING_NAME)||d->getName().rfind("RingConn Gen2",0)==0){target=d;break;}
+  if(!linked){
+    // Full-duty active scan (window == interval) so short ring adverts are not missed.
+    scan->setActiveScan(true);scan->setInterval(100);scan->setWindow(100);
+    NimBLEScanResults advertisements=scan->getResults(6000);
+    int unnamed=0;
+    bool listNearby=(nearbyEvery++%15)==0; // list neighbours occasionally, not every scan, so diag history lasts
+    for(int i=0;i<advertisements.getCount();++i){
+      auto* d=advertisements.getDevice(i);
+      if(isRing(d)){target=d;break;}
+      if(d->getName().empty()){++unnamed;continue;}
+      if(listNearby)dlogf("Nearby BLE: %s [%s] rssi %d\n",d->getName().c_str(),d->getAddress().toString().c_str(),d->getRSSI());
+    }
+    noteRing(target!=nullptr,target?target->getRSSI():-127);
+    if(!target){
+      if(listNearby)dlogf("Scan: %d devices (%d unnamed), no RingConn\n",(int)advertisements.getCount(),unnamed);
+      ringSeenLast=false;scan->clearResults();return false;
+    }
+    dlogf("Ring advert: %s [%s] signal %d dBm\n",target->getName().empty()?"(no name)":target->getName().c_str(),
+          target->getAddress().toString().c_str(),target->getRSSI());
+    rememberRing(target);
+    client=NimBLEDevice::createClient();
+    if(client){client->setConnectionParams(24,48,0,600);client->setConnectTimeout(9000);}
+    for(int attempt=0;client&&attempt<3&&!linked;++attempt){
+      linked=client->connect(target);
+      if(!linked){dlogf("BLE connect attempt %d failed (err %d)\n",attempt+1,client->getLastError());delay(300);}
+    }
   }
-  if(!target&&(!statusOnly||ringSeenLast))dlogf("Scan: %d devices (%d unnamed), no RingConn\n",(int)advertisements.getCount(),unnamed);
-  if(statusOnly)ringSeenLast=target!=nullptr;
-  if(!target){scan->clearResults();return false;}
-  client=NimBLEDevice::createClient();
+  ringSeenLast=linked;
   bool success=false;
   do{
-    if(!client||!client->connect(target)){dlog("BLE connect failed");break;}
+    if(!client||!linked){dlog("BLE connect failed");break;}
     if(!client->secureConnection()){dlog("BLE bond failed");break;}
     auto* dis=client->getService(NimBLEUUID((uint16_t)0x180a));
     auto* sys=dis?dis->getCharacteristic(NimBLEUUID((uint16_t)0x2a23)):nullptr;
@@ -398,6 +457,8 @@ void setup(){
   NimBLEDevice::setSecurityAuth(true,false,true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
   NimBLEDevice::setMTU(517);
+  NimBLEDevice::setPower(9); // max TX power: a ring's tiny antenna needs every dB on the link
+  {Preferences p;p.begin("ringbridge",true);ringAddr=p.getString("addr","").c_str();ringAddrType=p.getUChar("atype",0);p.end();}
   setenv("TZ",LOCAL_TIMEZONE,1);tzset();
   esp_task_wdt_config_t wdt={};wdt.timeout_ms=WATCHDOG_MS;wdt.idle_core_mask=0;wdt.trigger_panic=true;
   if(esp_task_wdt_reconfigure(&wdt)!=ESP_OK)esp_task_wdt_init(&wdt);
@@ -418,6 +479,7 @@ void cycle(){
     nextAttempt=millis()+REACQUIRE_MS;
     failed=false;packetDropped=false;
     if(connectAndSync(true,true)){holding=true;lastAsk=millis();dlog("Holding ring link; status every 15 s");upload();}
+    ringSummary();
     return;
   }
   failed=false;packetDropped=false;
@@ -429,6 +491,7 @@ void cycle(){
     Preferences p;p.begin("ringbridge",false);p.putULong64("lastsync",(uint64_t)lastSuccess);p.end();
     nextAttempt=millis()+REACQUIRE_MS;
     dlog("Gen2 sleep + daytime channels synchronized");
-  }else dlog("Partial/failed drain: queued flash pages retained; retry later");
+  }else if(ringSeenLast)dlog("Partial/failed drain: queued flash pages retained; retry later");
+  ringSummary();
 }
 void loop(){esp_task_wdt_reset();cycle();diagPost();}
