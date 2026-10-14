@@ -22,7 +22,7 @@
 namespace {
 // Diagnostics: every log line goes to USB serial AND a RAM buffer that is POSTed
 // to the collector (/diag), so the bridge can be debugged over Wi-Fi alone.
-const char *FW_VERSION="diag-13";
+const char *FW_VERSION="diag-15";
 char dbuf[4096];size_t dlen=0;
 void dappend(const char*line){
   size_t n=strlen(line);
@@ -46,6 +46,10 @@ constexpr size_t MAX_SPOOL=900*1024;
 const uint8_t STATUS[]={0x01,0x00,0x00};
 const uint8_t FETCH[]={0x07,0x00,0x00};
 const uint8_t STOP[]={0xd0,0x00,0x00};
+// OpenCircuit BLE_INVESTIGATION_LOG §7: the ring drops a link after ~30-40 s unless it gets
+// `95 00 00` (reply 0x15, not archived); held links here died at ~40 s even at -72 dBm.
+const uint8_t PING[]={0x95,0x00,0x00};
+constexpr uint32_t PING_MS=8UL*1000UL;
 constexpr uint32_t RETRY_MS=20UL*1000UL;
 // Between full history syncs the bridge HOLDS one authenticated BLE link open. Following the
 // OpenCircuit iOS app's idle keepalive (RingSession.startKeepalive): a `07 00 00` fetch every
@@ -92,7 +96,7 @@ uint32_t lastSummary=0;
 std::string ringAddr;uint8_t ringAddrType=0;
 uint32_t lastAsk=0,lastDayOpen=0,lastClock=0;
 bool linkAuthed=false,draining=false,ringCharging=false;
-uint32_t heldSince=0,holdOffUntil=0;
+uint32_t heldSince=0,holdOffUntil=0,lastPing=0;
 time_t lastSuccess=0;
 time_t attemptStarted=0;
 
@@ -378,7 +382,12 @@ bool connectAndSync(bool statusOnly=false,bool keepOpen=false){
   do{
     if(!client||!linked){dlog("BLE connect failed");break;}
     if(!client->secureConnection()){dlog("BLE bond failed");break;}
-    // The System ID (auth key input) never changes: read it once per boot, not per link.
+    // The System ID (auth key input) never changes: read it once ever and keep it in NVS
+    // (a weak first link often failed discovery or returned an empty read).
+    if(ringID.isEmpty()){
+      Preferences p;p.begin("ringbridge",true);size_t n=p.getBytes("sysmac",ringMAC,6);p.end();
+      if(n==6)ringID=macText(ringMAC);
+    }
     if(ringID.isEmpty()){
       auto* dis=client->getService(NimBLEUUID((uint16_t)0x180a));
       auto* sys=dis?dis->getCharacteristic(NimBLEUUID((uint16_t)0x2a23)):nullptr;
@@ -387,6 +396,7 @@ bool connectAndSync(bool statusOnly=false,bool keepOpen=false){
       std::string raw(reinterpret_cast<const char*>(sid.data()),sid.size());
       if(!systemIDMac(raw,ringMAC)){dlogf("Invalid System ID (%u bytes)\n",(unsigned)raw.size());break;}
       ringID=macText(ringMAC);
+      Preferences p;p.begin("ringbridge",false);p.putBytes("sysmac",ringMAC,6);p.end();
     }
     if(strlen(RING_MAC)>0&&ringID!=String(RING_MAC)){
       dlog("Configured Ring MAC mismatch; refusing connection");break;
@@ -499,7 +509,8 @@ bool fullSyncDue(time_t now){
 void holdTick(){
   if(failed||packetDropped||!client||!client->isConnected()){
     // reason 0x208 = supervision timeout (radio), 0x213 = the ring closed the link
-    dlogf("Ring link dropped after %lus (reason 0x%X)\n",(unsigned long)((millis()-heldSince)/1000),(unsigned)discReason);
+    dlogf("Ring link dropped after %lus (reason 0x%X%s)\n",(unsigned long)((millis()-heldSince)/1000),(unsigned)discReason,
+          client&&client->isConnected()?(packetDropped?", queue overflow":", command not acknowledged"):"");
     dropLink();failed=false;packetDropped=false;
     holdOffUntil=millis()+(ringCharging?2000UL:REDIAL_BACKOFF_MS);return;
   }
@@ -508,6 +519,7 @@ void holdTick(){
     dlog(ringCharging?"Ring charging and sync due; releasing held link":"Full sync due; releasing held link");
     dropLink();nextAttempt=0;return;
   }
+  if(millis()-lastPing>=PING_MS){lastPing=millis();if(!send(PING,sizeof(PING)))failed=true;}
   if(millis()-lastAsk>=(ringCharging?KEEPALIVE_MS:WORN_STATUS_MS)){
     lastAsk=millis();
     if(pollStatus()&&wifi()){if(millis()-lastClock>=CLOCK_REFRESH_MS)clockFromCollector();upload();}
