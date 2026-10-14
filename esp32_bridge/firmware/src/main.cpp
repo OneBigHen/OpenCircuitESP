@@ -22,7 +22,7 @@
 namespace {
 // Diagnostics: every log line goes to USB serial AND a RAM buffer that is POSTed
 // to the collector (/diag), so the bridge can be debugged over Wi-Fi alone.
-const char *FW_VERSION="diag-9";
+const char *FW_VERSION="diag-10";
 char dbuf[4096];size_t dlen=0;
 void dappend(const char*line){
   size_t n=strlen(line);
@@ -47,11 +47,23 @@ const uint8_t STATUS[]={0x01,0x00,0x00};
 const uint8_t FETCH[]={0x07,0x00,0x00};
 const uint8_t STOP[]={0xd0,0x00,0x00};
 constexpr uint32_t RETRY_MS=20UL*1000UL;
-// Between full history syncs the bridge HOLDS one authenticated BLE link open and asks the
-// ring for its status descriptor over it every HOLD_ASK_MS (one 3-byte write; far cheaper for
-// the ring's battery than reconnecting). Charging-case events reach the collector in seconds.
+// Between full history syncs the bridge HOLDS one authenticated BLE link open. Following the
+// OpenCircuit iOS app's idle keepalive (RingSession.startKeepalive): by day a `07 00 00` fetch
+// every HOLD_ASK_MS returns the 0x10/0x87 status descriptor (battery/charging); in between, and
+// all night, a `D0 00 00` status query every KEEPALIVE_MS keeps the link warm. Neither walks the
+// ring's single history resume pointer, which opening a channel does: OpenCircuit measured that
+// frequent overnight opens make the ring stop handing off sleep history (PROTOCOL.md §3).
 // While the link is held the phone app cannot connect to the ring.
-constexpr uint32_t HOLD_ASK_MS=30UL*1000UL;
+constexpr uint32_t HOLD_ASK_MS=60UL*1000UL;
+constexpr uint32_t KEEPALIVE_MS=15UL*1000UL;   // ring drops an idle link after ~30-40 s
+constexpr uint32_t DAY_REOPEN_MS=10UL*60UL*1000UL; // fallback channel-03 open for a descriptor
+constexpr uint32_t CLOCK_REFRESH_MS=3600UL*1000UL;
+#ifndef SLEEP_START_HOUR
+#define SLEEP_START_HOUR 23  // no history drains in this window: one big drain after waking
+#endif
+#ifndef SLEEP_END_HOUR
+#define SLEEP_END_HOUR 8
+#endif
 constexpr uint32_t REACQUIRE_MS=10UL*1000UL; // retry cadence when the ring is out of reach
 struct Packet { uint16_t length; uint8_t bytes[512]; };
 QueueHandle_t inbox=nullptr;
@@ -71,7 +83,8 @@ uint32_t lastSummary=0;
 // matching by name alone missed it for hours. With the address known we connect
 // directly: the radio listens 100% of the time for ANY advert from that address.
 std::string ringAddr;uint8_t ringAddrType=0;
-uint32_t lastAsk=0;
+uint32_t lastAsk=0,lastKeep=0,lastDayOpen=0,lastClock=0;
+bool linkAuthed=false,draining=false;
 time_t lastSuccess=0;
 time_t attemptStarted=0;
 
@@ -167,7 +180,7 @@ void receive(){
     // OSA 0x48 flood is not captured here; requires dedicated high-volume transport.
     if(op==0x48)continue;
     // Only archive raw history, cursor reports, status and sync-ACK evidence.
-    if(op==0x47||op==0x4c||op==0x50||op==0x10||op==0x87||op==0x82){
+    if(op==0x47||op==0x4c||op==0x10||op==0x87||(draining&&(op==0x50||op==0x82))){
       if(!save(p)){failed=true;break;} // no later ACK behind a torn record
     }
     if(op==0x82&&p.length>=2&&p.bytes[1]==0xff)sawEmpty=true;
@@ -193,7 +206,9 @@ bool authenticate(){
   }
   dlog("No SM3 challenge");return false;
 }
-bool drain(uint8_t ch){
+bool drainChannel(uint8_t ch);
+bool drain(uint8_t ch){draining=true;bool ok=drainChannel(ch);draining=false;return ok;}
+bool drainChannel(uint8_t ch){
   channel=ch;pages=0;sawEnd=sawEmpty=false;lastPage=millis();
   if(!authenticate())return false;
   uint8_t cmd[9];ring::syncOpen((uint64_t)time(nullptr),ch,cmd);
@@ -286,7 +301,7 @@ class RingClientEvents:public NimBLEClientCallbacks{
   void onConnectFail(NimBLEClient*,int reason) override{connOk=false;connReason=reason;connEvent=true;}
 } clientEvents;
 void armConnect(){
-  if(armed||ringAddr.empty())return;
+  if(armed||connEvent||ringAddr.empty()||(client&&client->isConnected()))return;
   if(!client){
     client=NimBLEDevice::createClient();
     if(!client)return;
@@ -310,16 +325,41 @@ void ringSummary(){
   }else dlogf("Ring (5 min): listening continuously for %s, connected %lu time(s); %lu listen windows, %lu ran out, %lu could not start (err %d)\n",ringAddr.c_str(),(unsigned long)linkedCount,(unsigned long)armedCount,(unsigned long)timeouts,(unsigned long)armFail,lastArmErr);
   armedCount=linkedCount=armFail=timeouts=0;
 }
+bool sleepWindow(){
+  time_t now=time(nullptr);if(now<1760000000LL)return false;
+  tm local{};localtime_r(&now,&local);int h=local.tm_hour;
+  return SLEEP_START_HOUR>SLEEP_END_HOUR?(h>=SLEEP_START_HOUR||h<SLEEP_END_HOUR)
+                                        :(h>=SLEEP_START_HOUR&&h<SLEEP_END_HOUR);
+}
+// Status over the held link without touching the history pointer (see HOLD_ASK_MS). Returns
+// false only if the link itself failed; gotStatus says whether a descriptor arrived.
 bool pollStatus(){
-  gotStatus=false;
-  bool drained=drain(0x03);
-  send(STOP,sizeof(STOP));
-  uint32_t t=millis();while(!failed&&client&&client->isConnected()&&millis()-t<300){receive();delay(20);}
-  (void)drained;
-  return gotStatus&&!failed;
+  gotStatus=false;sawEnd=false;
+  if(!linkAuthed){if(!authenticate())return false;linkAuthed=true;}
+  bool night=sleepWindow();
+  if(!send(night?STOP:FETCH,3))return false;
+  uint32_t t=millis();
+  while(!failed&&client&&client->isConnected()&&millis()-t<4000&&!gotStatus){receive();delay(20);}
+  // Daytime fallback, at most every 10 min: opening channel 03 always yields 87 (diag-9).
+  if(!gotStatus&&!night&&!failed&&client&&client->isConnected()
+     &&(!lastDayOpen||millis()-lastDayOpen>=DAY_REOPEN_MS)){
+    lastDayOpen=millis();drain(0x03);send(STOP,sizeof(STOP));
+    uint32_t u=millis();while(!failed&&client&&client->isConnected()&&millis()-u<300){receive();delay(20);}
+  }
+  return !failed&&client&&client->isConnected();
+}
+// The ESP32 shares one 2.4 GHz radio: an armed connect listens 100% of the time and starved
+// Wi-Fi (diag posts reached the collector up to 26 min late). Pause it for network bursts;
+// the main loop re-arms it straight after.
+void pauseArmed(){
+  if(!armed||!client||client->isConnected())return;
+  client->cancelConnect();
+  uint32_t t=millis();while(!connEvent&&millis()-t<300)delay(5);
+  if(connEvent&&connOk){armed=false;return;} // ring linked in the same instant: let cycle() take it
+  connEvent=false;armed=false;
 }
 bool connectAndSync(bool statusOnly=false,bool keepOpen=false){
-  attemptStarted=time(nullptr);
+  attemptStarted=time(nullptr);linkAuthed=false;
   NimBLEScan *scan=NimBLEDevice::getScan();
   bool linked=client&&client->isConnected();
   if(linked){++linkedCount;dlogf("Ring connected, signal %d dBm\n",client->getRssi());}
@@ -349,7 +389,8 @@ bool connectAndSync(bool statusOnly=false,bool keepOpen=false){
       // STOP alone gets no status reply. Opening the daytime channel does: the ring answers
       // 82 (cursor), 87 (status descriptor: battery/charging), any new pages, then 50 (end).
       success=pollStatus();
-      if(!success)dlog("Status poll: no descriptor");
+      if(!success)dlog("Status poll: link failed");
+      else if(!gotStatus)dlog("Status poll: no descriptor yet; holding link");
       break;
     }
     dlog("BLE notifications subscribed; starting authenticated drain");
@@ -366,7 +407,7 @@ bool connectAndSync(bool statusOnly=false,bool keepOpen=false){
 }
 void dropLink(){
   if(client){if(client->isConnected())client->disconnect();NimBLEDevice::deleteClient(client);}
-  client=nullptr;writer=nullptr;holding=false;
+  client=nullptr;writer=nullptr;holding=false;linkAuthed=false;armed=false;
   NimBLEDevice::getScan()->clearResults();
   xQueueReset(inbox);
 }
@@ -389,10 +430,10 @@ bool fetchTime(const String &base){
   return true;
 }
 bool clockFromCollector(){
-  if(fetchTime(collectorUrl))return true;
+  if(fetchTime(collectorUrl)){lastClock=millis();return true;}
 #ifdef COLLECTOR_URL_FALLBACK
   String other=collectorUrl==String(COLLECTOR_URL)?String(COLLECTOR_URL_FALLBACK):String(COLLECTOR_URL);
-  if(fetchTime(other)){collectorUrl=other;dlogf("Collector switched to %s\n",other.c_str());return true;}
+  if(fetchTime(other)){lastClock=millis();collectorUrl=other;dlogf("Collector switched to %s\n",other.c_str());return true;}
 #endif
   return false;
 }
@@ -442,13 +483,14 @@ void holdTick(){
     nextAttempt=millis()+2000;return;
   }
   time_t now=time(nullptr);
-  if(lastSuccess&&now-lastSuccess>=(time_t)SYNC_INTERVAL_SECONDS){
+  if(lastSuccess&&now-lastSuccess>=(time_t)SYNC_INTERVAL_SECONDS&&!sleepWindow()){
     dlog("Full sync due; releasing held link");dropLink();nextAttempt=0;return;
   }
   if(millis()-lastAsk>=HOLD_ASK_MS){
-    lastAsk=millis();
-    if(pollStatus()){if(wifi()&&!upload())clockFromCollector();}
-    else if(client&&client->isConnected()&&!failed)dlog("Held link: status poll got no descriptor");
+    lastAsk=lastKeep=millis();
+    if(pollStatus()&&wifi()){if(millis()-lastClock>=CLOCK_REFRESH_MS)clockFromCollector();upload();}
+  }else if(millis()-lastKeep>=KEEPALIVE_MS){
+    lastKeep=millis();send(STOP,sizeof(STOP)); // keep warm; reply 0x50 is not archived
   }
   delay(50);
 }
@@ -503,8 +545,12 @@ uint32_t nextHousekeeping=0;
 void housekeeping(){
   if((int32_t)(millis()-nextHousekeeping)<0)return;
   nextHousekeeping=millis()+RETRY_MS;
-  if(!wifi()||!clockFromCollector())dlog("Collector offline/time unavailable");
+  bool clockDue=!lastClock||millis()-lastClock>=CLOCK_REFRESH_MS||time(nullptr)<1760000000LL;
+  if(!clockDue&&!dlen&&!LittleFS.exists(SPOOL))return; // nothing to send: keep listening
+  pauseArmed();
+  if(!wifi()||(clockDue&&!clockFromCollector()))dlog("Collector offline/time unavailable");
   else upload();
+  diagPost();
 }
 void cycle(){
   receive();
@@ -527,8 +573,9 @@ void cycle(){
   if(!awakeWindow()){dropLink();return;}
   time_t now=time(nullptr);
   failed=false;packetDropped=false;
-  if(lastSuccess&&now-lastSuccess<(time_t)SYNC_INTERVAL_SECONDS){
-    if(connectAndSync(true,true)){holding=true;lastAsk=millis();dlog("Holding ring link; status every 30 s");if(wifi())upload();}
+  // Overnight the sleep history is left untouched on the ring and drained once after waking.
+  if(lastSuccess&&(now-lastSuccess<(time_t)SYNC_INTERVAL_SECONDS||sleepWindow())){
+    if(connectAndSync(true,true)){holding=true;lastAsk=millis();dlog("Holding ring link; keepalive 15 s, status 60 s");if(wifi())upload();}
     return;
   }
   bool complete=connectAndSync();
@@ -540,4 +587,4 @@ void cycle(){
     dlog("Gen2 sleep + daytime channels synchronized");
   }else dlog("Partial/failed drain: queued flash pages retained; retry later");
 }
-void loop(){esp_task_wdt_reset();cycle();diagPost();}
+void loop(){esp_task_wdt_reset();cycle();if(holding||!armed)diagPost();}
