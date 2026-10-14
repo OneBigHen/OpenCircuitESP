@@ -100,6 +100,19 @@ template:
         icon: mdi:ring
         state: "{{ is_state('sensor.ringconn_ring_state', 'in_case') }}"
         availability: "{{ states('sensor.ringconn_ring_state') not in ['unknown', 'unavailable'] }}"
+  - sensor:
+      - name: RingConn Ring Location
+        unique_id: ringconn_ring_location
+        icon: mdi:map-marker-radius
+        # bedside_case: last status says in the case/charging (the case lives on the bedside table).
+        # bedside: the bedroom listener (bedroom-ring-listener ESPHome device, if installed) hears it.
+        # living_room: the living-room bridge got a frame from the ring in the last 5 minutes.
+        state: >-
+          {% set age = states('sensor.ringconn_last_frame_age') | int(99999) %}
+          {% if is_state('binary_sensor.ringconn_in_charging_case', 'on') %}bedside_case
+          {% elif is_state('binary_sensor.bedroom_ring_listener_ring_at_bedside', 'on') %}bedside
+          {% elif age < 300 %}living_room
+          {% else %}out_of_range{% endif %}
 
 lovelace:
   dashboards:

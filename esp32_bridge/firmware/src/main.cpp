@@ -22,7 +22,7 @@
 namespace {
 // Diagnostics: every log line goes to USB serial AND a RAM buffer that is POSTed
 // to the collector (/diag), so the bridge can be debugged over Wi-Fi alone.
-const char *FW_VERSION="diag-10";
+const char *FW_VERSION="diag-13";
 char dbuf[4096];size_t dlen=0;
 void dappend(const char*line){
   size_t n=strlen(line);
@@ -48,18 +48,25 @@ const uint8_t FETCH[]={0x07,0x00,0x00};
 const uint8_t STOP[]={0xd0,0x00,0x00};
 constexpr uint32_t RETRY_MS=20UL*1000UL;
 // Between full history syncs the bridge HOLDS one authenticated BLE link open. Following the
-// OpenCircuit iOS app's idle keepalive (RingSession.startKeepalive): by day a `07 00 00` fetch
-// every HOLD_ASK_MS returns the 0x10/0x87 status descriptor (battery/charging); in between, and
-// all night, a `D0 00 00` status query every KEEPALIVE_MS keeps the link warm. Neither walks the
+// OpenCircuit iOS app's idle keepalive (RingSession.startKeepalive): a `07 00 00` fetch every
+// KEEPALIVE_MS returns the 0x10/0x87 status descriptor (battery/charging) and keeps the link
+// alive; inside the sleep window a `D0 00 00` status query is used instead. Neither walks the
 // ring's single history resume pointer, which opening a channel does: OpenCircuit measured that
 // frequent overnight opens make the ring stop handing off sleep history (PROTOCOL.md §3).
 // While the link is held the phone app cannot connect to the ring.
-constexpr uint32_t HOLD_ASK_MS=60UL*1000UL;
-constexpr uint32_t KEEPALIVE_MS=15UL*1000UL;   // ring drops an idle link after ~30-40 s
+// diag-10 held links died at ~37 s with only D0 between fetches, matching OpenCircuit's
+// "ring drops after ~30-40 s" note, so the keepalive itself is now the 07 fetch.
+constexpr uint32_t KEEPALIVE_MS=20UL*1000UL;      // status cadence on the charger
+constexpr uint32_t WORN_STATUS_MS=60UL*1000UL;    // off the charger: spare the ring's battery
+// diag-11: every held-link drop was 0x208 (supervision timeout = radio fade, not the ring
+// hanging up). Each re-link costs the ring an encryption + auth handshake, so after a drop
+// while off the charger wait before listening again.
+constexpr uint32_t REDIAL_BACKOFF_MS=60UL*1000UL;
+constexpr uint32_t CHARGING_SYNC_SECONDS=2UL*3600UL; // on the charger a full drain costs the ring nothing
 constexpr uint32_t DAY_REOPEN_MS=10UL*60UL*1000UL; // fallback channel-03 open for a descriptor
 constexpr uint32_t CLOCK_REFRESH_MS=3600UL*1000UL;
 #ifndef SLEEP_START_HOUR
-#define SLEEP_START_HOUR 23  // no history drains in this window: one big drain after waking
+#define SLEEP_START_HOUR 23  // no history drains in this window: one big drain after waking (equal = off)
 #endif
 #ifndef SLEEP_END_HOUR
 #define SLEEP_END_HOUR 8
@@ -83,8 +90,9 @@ uint32_t lastSummary=0;
 // matching by name alone missed it for hours. With the address known we connect
 // directly: the radio listens 100% of the time for ANY advert from that address.
 std::string ringAddr;uint8_t ringAddrType=0;
-uint32_t lastAsk=0,lastKeep=0,lastDayOpen=0,lastClock=0;
-bool linkAuthed=false,draining=false;
+uint32_t lastAsk=0,lastDayOpen=0,lastClock=0;
+bool linkAuthed=false,draining=false,ringCharging=false;
+uint32_t heldSince=0,holdOffUntil=0;
 time_t lastSuccess=0;
 time_t attemptStarted=0;
 
@@ -176,7 +184,7 @@ void receive(){
       if(!send(ack,sizeof(ack)))failed=true;
       continue;
     }
-    if(op==0x10||op==0x87)gotStatus=true;
+    if(op==0x10||op==0x87){gotStatus=true;if(p.length>=19)ringCharging=p.bytes[2]==4;}
     // OSA 0x48 flood is not captured here; requires dedicated high-volume transport.
     if(op==0x48)continue;
     // Only archive raw history, cursor reports, status and sync-ACK evidence.
@@ -294,14 +302,16 @@ void rememberHeard(){
 // connecting (too late), the bridge keeps an asynchronous connect to the ring's address
 // armed at all times: the controller listens 100% of the time and answers the very first
 // advert. Wi-Fi housekeeping carries on meanwhile. Once linked, the link is held.
-volatile bool connEvent=false,connOk=false;volatile int connReason=0;
+volatile bool connEvent=false,connOk=false;volatile int connReason=0,discReason=0;
 bool armed=false;uint32_t armedCount=0,linkedCount=0,armedAt=0,armFail=0,timeouts=0;int lastArmErr=0;
 class RingClientEvents:public NimBLEClientCallbacks{
   void onConnect(NimBLEClient*) override{connOk=true;connEvent=true;}
   void onConnectFail(NimBLEClient*,int reason) override{connOk=false;connReason=reason;connEvent=true;}
+  void onDisconnect(NimBLEClient*,int reason) override{discReason=reason;}
 } clientEvents;
 void armConnect(){
   if(armed||connEvent||ringAddr.empty()||(client&&client->isConnected()))return;
+  if((int32_t)(millis()-holdOffUntil)<0)return;
   if(!client){
     client=NimBLEDevice::createClient();
     if(!client)return;
@@ -312,7 +322,7 @@ void armConnect(){
     client->setConnectTimeout(60000);
   }
   connEvent=false;
-  if(client->connect(NimBLEAddress(ringAddr,ringAddrType),true,true,true)){armed=true;armedAt=millis();++armedCount;}
+  if(client->connect(NimBLEAddress(ringAddr,ringAddrType),false,true,true)){armed=true;armedAt=millis();++armedCount;}
   else if(client->getLastError()==BLE_HS_EALREADY){armed=true;armedAt=millis();} // still connecting
   else{++armFail;lastArmErr=client->getLastError();}
 }
@@ -331,7 +341,7 @@ bool sleepWindow(){
   return SLEEP_START_HOUR>SLEEP_END_HOUR?(h>=SLEEP_START_HOUR||h<SLEEP_END_HOUR)
                                         :(h>=SLEEP_START_HOUR&&h<SLEEP_END_HOUR);
 }
-// Status over the held link without touching the history pointer (see HOLD_ASK_MS). Returns
+// Status over the held link without touching the history pointer (see KEEPALIVE_MS). Returns
 // false only if the link itself failed; gotStatus says whether a descriptor arrived.
 bool pollStatus(){
   gotStatus=false;sawEnd=false;
@@ -368,13 +378,16 @@ bool connectAndSync(bool statusOnly=false,bool keepOpen=false){
   do{
     if(!client||!linked){dlog("BLE connect failed");break;}
     if(!client->secureConnection()){dlog("BLE bond failed");break;}
-    auto* dis=client->getService(NimBLEUUID((uint16_t)0x180a));
-    auto* sys=dis?dis->getCharacteristic(NimBLEUUID((uint16_t)0x2a23)):nullptr;
-    if(!sys){dlog("System ID missing");break;}
-    auto sid=sys->readValue();
-    std::string raw(reinterpret_cast<const char*>(sid.data()),sid.size());
-    if(!systemIDMac(raw,ringMAC)){dlog("Invalid System ID");break;}
-    ringID=macText(ringMAC);
+    // The System ID (auth key input) never changes: read it once per boot, not per link.
+    if(ringID.isEmpty()){
+      auto* dis=client->getService(NimBLEUUID((uint16_t)0x180a));
+      auto* sys=dis?dis->getCharacteristic(NimBLEUUID((uint16_t)0x2a23)):nullptr;
+      if(!sys){dlog("System ID missing");break;}
+      auto sid=sys->readValue();
+      std::string raw(reinterpret_cast<const char*>(sid.data()),sid.size());
+      if(!systemIDMac(raw,ringMAC)){dlogf("Invalid System ID (%u bytes)\n",(unsigned)raw.size());break;}
+      ringID=macText(ringMAC);
+    }
     if(strlen(RING_MAC)>0&&ringID!=String(RING_MAC)){
       dlog("Configured Ring MAC mismatch; refusing connection");break;
     }
@@ -400,14 +413,15 @@ bool connectAndSync(bool statusOnly=false,bool keepOpen=false){
     send(STOP,sizeof(STOP)); // STOP may return status 0x50; do not archive it
   }while(false);
   if(statusOnly&&keepOpen&&success)return true; // link stays open for holdTick()
-  if(client){if(client->isConnected())client->disconnect();NimBLEDevice::deleteClient(client);}
-  client=nullptr;writer=nullptr;scan->clearResults();
+  // The client (and its cached GATT table) is kept: the next link skips service discovery.
+  if(client&&client->isConnected())client->disconnect();
+  writer=nullptr;scan->clearResults();
   xQueueReset(inbox); // late notifications belong to the closed connection
   return success;
 }
 void dropLink(){
-  if(client){if(client->isConnected())client->disconnect();NimBLEDevice::deleteClient(client);}
-  client=nullptr;writer=nullptr;holding=false;linkAuthed=false;armed=false;
+  if(client&&client->isConnected())client->disconnect();
+  writer=nullptr;holding=false;linkAuthed=false;armed=false;
   NimBLEDevice::getScan()->clearResults();
   xQueueReset(inbox);
 }
@@ -477,20 +491,26 @@ bool confirmComplete(){
   return code==200&&(receipt.indexOf("\"confirmed\": true")>=0||
                     receipt.indexOf("\"confirmed\":true")>=0);
 }
+bool fullSyncDue(time_t now){
+  if(!lastSuccess)return true;
+  time_t every=ringCharging?(time_t)CHARGING_SYNC_SECONDS:(time_t)SYNC_INTERVAL_SECONDS;
+  return now-lastSuccess>=every&&!sleepWindow();
+}
 void holdTick(){
   if(failed||packetDropped||!client||!client->isConnected()){
-    dlog("Ring link dropped");dropLink();failed=false;packetDropped=false;
-    nextAttempt=millis()+2000;return;
+    // reason 0x208 = supervision timeout (radio), 0x213 = the ring closed the link
+    dlogf("Ring link dropped after %lus (reason 0x%X)\n",(unsigned long)((millis()-heldSince)/1000),(unsigned)discReason);
+    dropLink();failed=false;packetDropped=false;
+    holdOffUntil=millis()+(ringCharging?2000UL:REDIAL_BACKOFF_MS);return;
   }
   time_t now=time(nullptr);
-  if(lastSuccess&&now-lastSuccess>=(time_t)SYNC_INTERVAL_SECONDS&&!sleepWindow()){
-    dlog("Full sync due; releasing held link");dropLink();nextAttempt=0;return;
+  if(fullSyncDue(now)){
+    dlog(ringCharging?"Ring charging and sync due; releasing held link":"Full sync due; releasing held link");
+    dropLink();nextAttempt=0;return;
   }
-  if(millis()-lastAsk>=HOLD_ASK_MS){
-    lastAsk=lastKeep=millis();
+  if(millis()-lastAsk>=(ringCharging?KEEPALIVE_MS:WORN_STATUS_MS)){
+    lastAsk=millis();
     if(pollStatus()&&wifi()){if(millis()-lastClock>=CLOCK_REFRESH_MS)clockFromCollector();upload();}
-  }else if(millis()-lastKeep>=KEEPALIVE_MS){
-    lastKeep=millis();send(STOP,sizeof(STOP)); // keep warm; reply 0x50 is not archived
   }
   delay(50);
 }
@@ -574,8 +594,15 @@ void cycle(){
   time_t now=time(nullptr);
   failed=false;packetDropped=false;
   // Overnight the sleep history is left untouched on the ring and drained once after waking.
-  if(lastSuccess&&(now-lastSuccess<(time_t)SYNC_INTERVAL_SECONDS||sleepWindow())){
-    if(connectAndSync(true,true)){holding=true;lastAsk=millis();dlog("Holding ring link; keepalive 15 s, status 60 s");if(wifi())upload();}
+  if(!fullSyncDue(now)){
+    if(connectAndSync(true,true)){
+      holding=true;lastAsk=heldSince=millis();discReason=0;
+      // Held link: 100-200 ms interval, ring may skip 4 events. ~10x fewer radio wake-ups
+      // for the ring than the 15-30 ms used to drain history quickly.
+      client->updateConnParams(80,160,4,2000);
+      dlogf("Holding ring link (%s); status every %lu s\n",ringCharging?"charging":"off charger",(unsigned long)((ringCharging?KEEPALIVE_MS:WORN_STATUS_MS)/1000));
+      if(wifi())upload();
+    }
     return;
   }
   bool complete=connectAndSync();

@@ -1,0 +1,48 @@
+# Bedside ring listener: a plain ESP32 (Wi-Fi) next to the charging case.
+# It only LISTENS for the ring's Bluetooth adverts (passive scan, never connects),
+# so it costs the ring no battery. First flash over USB (ESPHome Web), then every
+# update is wireless from the ESPHome Device Builder add-on.
+# Home Assistant entity used by sensor.ringconn_ring_location:
+#   binary_sensor.bedroom_ring_listener_ring_at_bedside
+substitutions:
+  ring_mac: "F8:79:99:C0:CB:30"
+
+esphome:
+  name: bedroom-ring-listener
+  friendly_name: Bedroom Ring Listener
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+api:
+  encryption:
+    key: !secret bedroom_ring_listener_api_key
+ota:
+  - platform: esphome
+    password: !secret bedroom_ring_listener_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: false     # passive: no scan requests sent to the ring
+    interval: 320ms
+    window: 300ms     # leave Wi-Fi some airtime
+
+binary_sensor:
+  # A disconnected ring advertises only about every 100 s, so allow a long timeout.
+  - platform: ble_presence
+    mac_address: ${ring_mac}
+    name: "Ring at bedside"
+    min_rssi: -85dB   # tune after a night of RSSI data so the living room doesn't count
+    timeout: 6min
+
+sensor:
+  - platform: ble_rssi
+    mac_address: ${ring_mac}
+    name: "Ring signal"
