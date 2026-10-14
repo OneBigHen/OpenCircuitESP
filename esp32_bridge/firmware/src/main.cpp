@@ -22,7 +22,7 @@
 namespace {
 // Diagnostics: every log line goes to USB serial AND a RAM buffer that is POSTed
 // to the collector (/diag), so the bridge can be debugged over Wi-Fi alone.
-const char *FW_VERSION="diag-15";
+const char *FW_VERSION="diag-16";
 char dbuf[4096];size_t dlen=0;
 void dappend(const char*line){
   size_t n=strlen(line);
@@ -66,6 +66,14 @@ constexpr uint32_t WORN_STATUS_MS=60UL*1000UL;    // off the charger: spare the 
 // hanging up). Each re-link costs the ring an encryption + auth handshake, so after a drop
 // while off the charger wait before listening again.
 constexpr uint32_t REDIAL_BACKOFF_MS=60UL*1000UL;
+// A link at the edge of range costs the ring retransmissions and dies within a minute anyway.
+// Below WEAK_RSSI (off the charger): take one status reading, let go, and come back in
+// WEAK_RETRY_MS. While released the ring advertises, so the house's ESPHome listeners
+// (Bermuda) can place it in a room.
+constexpr int WEAK_RSSI=-92;
+constexpr uint32_t WEAK_RETRY_MS=2UL*60UL*1000UL;
+// Daytime history slice on a held link, as OpenCircuit's HistoryDrainCadence day arm (1 h).
+constexpr uint32_t DAY_DRAIN_MS=60UL*60UL*1000UL;
 constexpr uint32_t CHARGING_SYNC_SECONDS=2UL*3600UL; // on the charger a full drain costs the ring nothing
 constexpr uint32_t DAY_REOPEN_MS=10UL*60UL*1000UL; // fallback channel-03 open for a descriptor
 constexpr uint32_t CLOCK_REFRESH_MS=3600UL*1000UL;
@@ -519,6 +527,11 @@ void holdTick(){
     dlog(ringCharging?"Ring charging and sync due; releasing held link":"Full sync due; releasing held link");
     dropLink();nextAttempt=0;return;
   }
+  if(!sleepWindow()&&(!lastDayOpen||millis()-lastDayOpen>=DAY_DRAIN_MS)){
+    lastDayOpen=millis();
+    if(drain(0x03)&&wifi())upload();
+    send(STOP,sizeof(STOP));
+  }
   if(millis()-lastPing>=PING_MS){lastPing=millis();if(!send(PING,sizeof(PING)))failed=true;}
   if(millis()-lastAsk>=(ringCharging?KEEPALIVE_MS:WORN_STATUS_MS)){
     lastAsk=millis();
@@ -608,6 +621,12 @@ void cycle(){
   // Overnight the sleep history is left untouched on the ring and drained once after waking.
   if(!fullSyncDue(now)){
     if(connectAndSync(true,true)){
+      int rssi=client->getRssi();
+      if(!ringCharging&&rssi<WEAK_RSSI){
+        dlogf("Weak link %d dBm: status taken, releasing for %lu s\n",rssi,(unsigned long)(WEAK_RETRY_MS/1000));
+        if(wifi())upload();
+        dropLink();holdOffUntil=millis()+WEAK_RETRY_MS;return;
+      }
       holding=true;lastAsk=heldSince=millis();discReason=0;
       // Held link: 100-200 ms interval, ring may skip 4 events. ~10x fewer radio wake-ups
       // for the ring than the 15-30 ms used to drain history quickly.

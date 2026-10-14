@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ringconn-card harness</title><link rel="icon" href="data:,">
+<style>
+  body{margin:0;font-family:"Plus Jakarta Sans","DM Sans",system-ui,sans-serif;background:var(--page-bg);color:var(--primary-text-color)}
+  body.light{--page-bg:hsl(36 18% 90%);--primary-text-color:hsl(220 20% 14%);--secondary-text-color:hsl(220 10% 36%);--card-background-color:hsl(40 25% 97%);--divider-color:hsl(30 10% 78%)}
+  body.dark{--page-bg:hsl(220 18% 7%);--primary-text-color:hsl(40 20% 92%);--secondary-text-color:hsl(220 10% 70%);--card-background-color:hsl(220 16% 13%);--divider-color:hsl(220 12% 26%)}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;padding:10px 12px;font-size:13px;border-bottom:1px solid var(--divider-color)}
+  .bar button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid var(--divider-color);background:transparent;color:inherit;cursor:pointer}
+  .bar button[aria-pressed=true]{background:var(--primary-text-color);color:var(--page-bg)}
+  #stage{margin:12px auto;padding:0 12px}
+</style></head>
+<body class="light">
+<div class="bar" role="toolbar" aria-label="Harness controls">
+  <button data-state="full" aria-pressed="true">Full data</button>
+  <button data-state="sparse" aria-pressed="false">Sparse data</button>
+  <button data-theme="light" aria-pressed="true">Light</button>
+  <button data-theme="dark" aria-pressed="false">Dark</button>
+  <button data-w="420" aria-pressed="false">420 px</button>
+  <button data-w="1200" aria-pressed="false">1200 px</button>
+  <button data-w="" aria-pressed="true">Fluid</button>
+</div>
+<div id="stage"></div>
+<script>
+// Freeze "now" at 3 minutes after the sample was generated so output is deterministic.
+const SAMPLE_NOW = 1791951659 + 180;
+const _now = Date.now; Date.now = () => SAMPLE_NOW * 1000;
+</script>
+<script src="ringconn-card.js"></script>
+<script>
+(async () => {
+  const sample = await (await fetch('sample_ha_payload.json')).json();
+  const iso = (t) => new Date(t * 1000).toISOString();
+  const ent = (id, state, attrs = {}, t = SAMPLE_NOW - 120) => ({ entity_id: id, state: String(state), attributes: attrs, last_updated: iso(t), last_changed: iso(t) });
+
+  const full = () => ({ states: {
+    'sensor.ringconn_dashboard': ent('sensor.ringconn_dashboard', sample.generated_at, sample),
+    'sensor.ringconn_ring_state': ent('sensor.ringconn_ring_state', 'out_of_case'),
+    'sensor.ringconn_ring_location': ent('sensor.ringconn_ring_location', 'living_room'),
+    'sensor.ringconn_ring_area': ent('sensor.ringconn_ring_area', 'living_room'),
+  }, config: { time_zone: 'America/New_York' } });
+
+  const sparse = () => {
+    const p = JSON.parse(JSON.stringify(sample));
+    delete p.latest.hr_bpm; delete p.series_24h.hr_bpm;
+    delete p.series_24h.respiratory_rate; delete p.latest.respiratory_rate;
+    p.series_24h.hrv_rmssd_ms = p.series_24h.hrv_rmssd_ms.slice(0, 2);
+    p.latest.charging = { v: 1, t: p.latest.charging.t, src: 'status' };
+    p.latest.battery_pct = { v: 96, t: p.latest.battery_pct.t, src: 'status' };
+    p.latest.skin_temp_c = { v: 24.1, t: p.latest.skin_temp_c.t, src: 'status' };
+    p.battery_drain_pct_per_h = null;
+    p.days = p.days.map((d) => { const c = { ...d }; delete c.hr_bpm; return c; });
+    p.bridge.links = p.bridge.links.slice(-4);
+    return { states: {
+      'sensor.ringconn_dashboard': ent('sensor.ringconn_dashboard', p.generated_at, p),
+      'sensor.ringconn_ring_state': ent('sensor.ringconn_ring_state', 'in_case'),
+      'sensor.ringconn_ring_location': ent('sensor.ringconn_ring_location', 'bedside_case'),
+    }, config: { time_zone: 'America/New_York' } };
+  };
+
+  const stage = document.getElementById('stage');
+  const card = document.createElement('ringconn-card');
+  card.setConfig({ type: 'custom:ringconn-card' });
+  stage.appendChild(card);
+  const q = new URLSearchParams(location.search);
+  const press = (sel, on) => document.querySelectorAll(sel).forEach((b) => b.setAttribute('aria-pressed', b === on));
+  const setState = (s) => { card.hass = s === 'sparse' ? sparse() : full(); press('[data-state]', document.querySelector(`[data-state=${s}]`)); };
+  const setTheme = (t) => { document.body.className = t; press('[data-theme]', document.querySelector(`[data-theme=${t}]`)); card._render(); };
+  const setW = (w) => { stage.style.width = w ? w + 'px' : ''; press('[data-w]', document.querySelector(`[data-w="${w}"]`)); };
+  document.querySelectorAll('[data-state]').forEach((b) => b.onclick = () => setState(b.dataset.state));
+  document.querySelectorAll('[data-theme]').forEach((b) => b.onclick = () => setTheme(b.dataset.theme));
+  document.querySelectorAll('[data-w]').forEach((b) => b.onclick = () => setW(b.dataset.w));
+  setW(q.get('w') || ''); setState(q.get('state') || 'full'); setTheme(q.get('theme') || 'light');
+  window.harnessReady = true;
+})();
+</script>
+</body></html>

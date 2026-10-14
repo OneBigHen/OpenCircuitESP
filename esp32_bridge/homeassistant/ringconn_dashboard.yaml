@@ -1,7 +1,13 @@
 # RingConn dashboard (installed as /config/ringconn-dashboard.yaml, registered by packages/ringconn.yaml).
 title: RingConn
 views:
-  - title: RingConn
+  - title: Ring
+    path: ring
+    icon: mdi:ring
+    type: panel
+    cards:
+      - type: custom:ringconn-card
+  - title: Entities
     path: ringconn
     icon: mdi:ring
     type: sections

@@ -3,6 +3,24 @@
 #   ringconn_ha_token: <the collector's RING_HA_TOKEN from esp32_bridge/.env>
 # That key is read-only (GET only): it cannot ingest, confirm syncs or write diagnostics.
 rest:
+  # Rich payload for the custom RingConn card (excluded from the recorder: ~8 KB of attributes).
+  - resource: http://192.168.1.40:8765/ha?timezone=America/New_York
+    scan_interval: 60
+    timeout: 15
+    headers:
+      X-Ring-Token: !secret ringconn_ha_token
+    sensor:
+      - name: RingConn Dashboard
+        unique_id: ringconn_dashboard
+        icon: mdi:ring
+        value_template: "{{ value_json.generated_at }}"
+        json_attributes:
+          - latest
+          - series_24h
+          - steps_today
+          - days
+          - battery_drain_pct_per_h
+          - bridge
   - resource: http://192.168.1.40:8765/status
     scan_interval: 30
     timeout: 10

@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from browser_auth import SESSIONS
-from health_views import overview,export_chunks
+from health_views import overview,export_chunks,ha_dashboard
 from observations import days,diagnostics
 from zoneinfo import ZoneInfoNotFoundError
 
@@ -276,6 +276,12 @@ class API(BaseHTTPRequestHandler):
         db=connect()
         try:
             if p.path=="/status":return self.response(200,json.dumps(status(db)))
+            if p.path=="/ha":
+                args=parse_qs(p.query);dev=args.get("device",[""])[0].upper()
+                if not dev:dev=(db.execute("SELECT device FROM frames ORDER BY seen DESC LIMIT 1").fetchone() or [""])[0]
+                if not DEVICE.fullmatch(dev):return self.response(400,b'{"error":"invalid query"}')
+                diag=DIAG.read_text(errors="replace")[-60000:] if DIAG.exists() else ""
+                return self.response(200,json.dumps(ha_dashboard(db,dev,args.get("timezone",["America/New_York"])[0],diag)))
             if p.path not in ("/history","/export.csv","/overview","/days","/diagnostics"):
                 return self.response(404,b'{"error":"not found"}')
             args=parse_qs(p.query)
