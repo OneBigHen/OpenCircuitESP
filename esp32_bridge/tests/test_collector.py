@@ -57,6 +57,13 @@ class TestCollector(unittest.TestCase):
         seen=m.EPOCH+0x01200010
         self.assertEqual(m.timestamp_from_counter(0xfffff0,seen),m.EPOCH+0x00fffff0)
 
+    def test_in_case_follows_descriptor_byte_17(self):
+        now=int(time.time())
+        for stamp,case_byte,expected in ((now-60,255,0),(now,0x5a,1)):
+            b=bytearray(descriptor());b[17]=case_byte;b[-1]=m.checksum(b[:-1])
+            self.db.execute("BEGIN IMMEDIATE");m.ingest(self.db,self.row(bytes(b),stamp)+b"\n");self.db.commit()
+            x=m.status(self.db)["devices"][DEVICE]
+            self.assertEqual((x["in_case"],x["in_case_at"]),(expected,stamp))
     def test_same_status_frame_at_different_times_is_preserved(self):
         s=descriptor();now=int(time.time())
         m.ingest(self.db,self.row(s,now))
@@ -190,6 +197,28 @@ class TestLocalHTTP(unittest.TestCase):
         with self.assertRaises(HTTPError) as error:
             self.req("/status",token=False)
         self.assertEqual(error.exception.code,401)
+    def test_home_assistant_key_is_read_only(self):
+        from urllib.error import HTTPError
+        from urllib.request import Request,urlopen
+        old=m.HA_TOKEN;m.HA_TOKEN="a-separate-home-assistant-key-over-twenty"
+        try:
+            ok=urlopen(Request(self.base+"/status",headers={"X-Ring-Token":m.HA_TOKEN}),timeout=5)
+            self.assertEqual(ok.status,200)
+            for path in ("/ingest","/complete","/diag"):
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(Request(self.base+path,data=b"{}",headers={"X-Ring-Token":m.HA_TOKEN}),timeout=5)
+                self.assertEqual(error.exception.code,401,path)
+            with self.assertRaises(HTTPError) as error:
+                urlopen(Request(self.base+"/status",headers={"X-Ring-Token":"wrong"}),timeout=5)
+            self.assertEqual(error.exception.code,401)
+        finally:m.HA_TOKEN=old
+    def test_bridge_heartbeat_follows_time_polls(self):
+        import json as j
+        m.CONTACT[0]=0
+        self.assertIsNone(j.loads(self.req("/status")[1])["bridge_last_contact"])
+        self.req("/time",token=False)
+        contact=j.loads(self.req("/status")[1])["bridge_last_contact"]
+        self.assertLessEqual(abs(contact-int(time.time())),2)
     def test_atomic_batch_and_full_sync_receipt(self):
         from urllib.error import HTTPError
         frame,now=sample()

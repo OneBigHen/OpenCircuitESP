@@ -1,0 +1,27 @@
+# Production compose for the RingConn collector on docker-stable (CT/VM 109, 192.168.1.175).
+# Copy this folder to /srv/ringbridge, add a .env (see .env.example), then: docker compose up -d --build
+# Source for the image is pulled from ../../collector relative to the repo checkout at /srv/ringbridge/src.
+services:
+  ringconn-collector:
+    container_name: ringconn-collector
+    build: ./src/esp32_bridge/collector
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      RING_DB: /data/ringconn.db
+    user: "10001:10001"          # not root; ./storage must be owned by 10001
+    ports:
+      - "8765:8765"              # LAN only, never forward to the internet
+    volumes:
+      - ./storage:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

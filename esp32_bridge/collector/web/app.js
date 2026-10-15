@@ -6,16 +6,22 @@ import {
   freshness,
   comparison,
   comparisonText,
+  nearestPoint,
+  chargingSummary,
 } from "./model.mjs";
+import { buildConfig } from "./setup.mjs";
+import { clearExpiredSession } from "./session-view.mjs";
+import {
+  html,
+  dailyView,
+  connectionView,
+  setupView,
+  favoriteSettings,
+  DEFAULT_FAVORITES,
+  supportReport,
+} from "./ring-views.mjs";
 const $ = (selector) => document.querySelector(selector);
-const escape = (value) =>
-  String(value ?? "").replace(
-    /[&<>"']/g,
-    (char) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
-        char
-      ],
-  );
+const escape = html;
 const localDate = (date) =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 const when = (stamp, options = {}) =>
@@ -37,6 +43,11 @@ try {
 const state = {
   status: null,
   overview: null,
+  days: null,
+  diagnostics: null,
+  extraError: "",
+  dailyLimit: 30,
+  chartPoint: 0,
   device: "",
   preset: "day",
   anchor: localDate(new Date()),
@@ -89,8 +100,12 @@ async function api(path, body) {
       path !== "/auth/login" &&
       sequence === state.sequence
     ) {
-      await snapshotStore("clear").catch(() => {});
-      showLogin(error.message);
+      await clearExpiredSession(
+        sequence,
+        () => state.sequence,
+        () => snapshotStore("clear").catch(() => {}),
+        () => showLogin(error.message),
+      );
     }
     throw error;
   }
@@ -132,7 +147,7 @@ async function snapshotStore(mode, value) {
 }
 function showLogin(message = "") {
   ++state.sequence;
-  state.status = state.overview = null;
+  state.status = state.overview = state.days = state.diagnostics = null;
   state.samples = [];
   state.device = "";
   state.nextBefore = null;
@@ -222,7 +237,7 @@ function chart(name, small = false) {
   const labels = small
     ? ""
     : `<text class="chart-label" x="${pad}" y="${height - 2}">${escape(new Date(bounds.start * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" }))}</text><text class="chart-label" x="${width - pad}" y="${height - 2}" text-anchor="end">${escape(new Date((bounds.end - 1) * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" }))}</text>`;
-  return `<svg class="${small ? "sparkline" : "chart"}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${escape(METRICS[name].label)} chart: ${metric.count} readings; ${name === "charging" ? "latest state " + formatValue(metric.latest.value, name) : "average " + formatValue(metric.mean, name, prefs.temp) + " " + unit(name)}. Gaps show missing readings.">${grid}${lines}${labels}</svg>`;
+  return `<svg class="${small ? "sparkline" : "chart"}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" ${!small && route().tab === "metric" ? 'tabindex="0" data-inspect-chart="true" aria-describedby="chart-inspection"' : ""} role="img" aria-label="${escape(METRICS[name].label)} chart: ${metric.count} readings; ${name === "charging" ? "latest state " + formatValue(metric.latest.value, name) : "average " + formatValue(metric.mean, name, prefs.temp) + " " + unit(name)}. Gaps show missing readings.">${grid}${lines}${labels}</svg>`;
 }
 function card(name) {
   const metric = state.overview?.metrics[name];
@@ -248,7 +263,7 @@ function summary() {
   return (
     emptyBanner() +
     hero() +
-    `<div class="section-heading"><h2>Your daily observations</h2><p>${escape(when(range().end - 1, { hour: undefined, minute: undefined }))}</p></div><div class="metrics-grid">${["hrv_rmssd_ms", "spo2_pct", "respiratory_rate", "skin_temp_c", "quarter_hour_steps", "battery_pct"].map(card).join("")}</div>` +
+    `<div class="section-heading"><h2>Your daily observations</h2><p>${escape(when(range().end - 1, { hour: undefined, minute: undefined }))}</p></div><div class="metrics-grid">${favorites().map(card).join("")}</div>` +
     syncStrip() +
     unsupported()
   );
@@ -292,19 +307,32 @@ function sampleRows(name) {
 function detail(name) {
   const metric = state.overview?.metrics[name];
   if (state.offline)
-    return `<div class="detail-chart">${hero(name)}</div><div class="info-band"><h3>Exact readings unavailable offline</h3><p>This saved view contains chart summaries. Reconnect to load individual readings or export data.</p></div>`;
-  return `<div class="detail-heading"><a href="#browse">← Browse health</a><button class="quiet" id="export">Export selected range</button></div><div class="detail-chart">${hero(name)}</div><div class="info-band"><h3>About this measurement</h3><p>${escape(METRICS[name].description)}</p></div><div class="sample-section"><div class="section-heading"><h2>Recorded readings</h2><p>Exact observations, newest first</p></div><div class="sample-scroll"><table class="samples"><thead><tr><th>OBSERVED</th><th>VALUE</th><th>SOURCE</th></tr></thead><tbody id="sample-rows">${sampleRows(name) || '<tr><td colspan="3">No readings in this range.</td></tr>'}</tbody></table></div><div class="sample-actions"><span>${state.samples.length.toLocaleString()} of ${(metric?.count || 0).toLocaleString()} readings shown</span>${state.nextBefore ? '<button id="load-earlier" class="quiet">Load earlier readings</button>' : ""}</div></div>`;
+    return `<div class="detail-chart">${hero(name)}<p id="chart-inspection" class="chart-inspection" role="status">Tap or move across the chart to inspect recorded buckets. Keyboard: left/right arrows, Home or End.</p></div><div class="info-band"><h3>Exact readings unavailable offline</h3><p>This saved view contains chart summaries. Reconnect to load individual readings or export data.</p></div>`;
+  return `<div class="detail-heading"><a href="#browse">← Browse health</a><button class="quiet" id="export">Export selected range</button></div><div class="detail-chart">${hero(name)}<p id="chart-inspection" class="chart-inspection" role="status">Tap or move across the chart to inspect recorded buckets. Keyboard: left/right arrows, Home or End.</p></div><div class="info-band"><h3>About this measurement</h3><p>${escape(METRICS[name].description)}</p></div><div class="sample-section"><div class="section-heading"><h2>Recorded readings</h2><p>Exact observations, newest first</p></div><div class="sample-scroll"><table class="samples"><thead><tr><th>OBSERVED</th><th>VALUE</th><th>SOURCE</th></tr></thead><tbody id="sample-rows">${sampleRows(name) || '<tr><td colspan="3">No readings in this range.</td></tr>'}</tbody></table></div><div class="sample-actions"><span>${state.samples.length.toLocaleString()} of ${(metric?.count || 0).toLocaleString()} readings shown</span>${state.nextBefore ? '<button id="load-earlier" class="quiet">Load earlier readings</button>' : ""}</div></div>`;
+}
+function favorites() {
+  return Array.isArray(prefs.favorites)
+    ? prefs.favorites.filter((name) => METRICS[name])
+    : DEFAULT_FAVORITES;
 }
 function settings() {
   const secure = window.isSecureContext;
-  return `<div class="settings"><div class="settings-section"><h2>Your preferences</h2><div class="setting-row"><label for="theme">Appearance</label><select id="theme"><option value="auto">Follow device</option><option value="light">Light</option><option value="dark">Dark</option></select></div><div class="setting-row"><label for="temperature">Temperature</label><select id="temperature"><option value="C">Celsius</option><option value="F">Fahrenheit</option></select></div></div><div class="settings-section"><h2>Privacy & offline access</h2><p>Health data is kept on your collector. By default, this browser only saves the app shell and your display preferences.</p><div class="setting-row"><label for="offline-save">Keep my last view offline<span>Opt in to save a health snapshot on this device. Anyone with access to this browser may see it while offline. Signing out clears it.</span></label><input id="offline-save" type="checkbox" ${prefs.offline ? "checked" : ""}></div><button id="clear-local" class="quiet">Clear saved health data</button><button id="sign-out" class="quiet">Sign out</button></div><div class="settings-section"><h2>Make room on your home screen</h2><p>${secure ? "On iPhone: open Share, then Add to Home Screen. On desktop and Android, use your browser’s Install option." : "Open this collector through a private HTTPS address to enable home-screen installation and the offline shell on your phone."}</p>${state.install ? '<button id="install" class="primary">Install OpenCircuit</button>' : ""}<p>The app shell works offline. Your health snapshot is available offline only if you enable it above.</p></div><div class="settings-section"><h2>Your data, in context</h2><p>RingConn Gen 2 · ESP32 local bridge · Stored in your collector's SQLite archive. The current decoder provides ten measurement types. Apple Health synchronization requires a native iOS companion; this PWA does not write to HealthKit.</p><button id="export" class="quiet" ${!state.device ? "disabled" : ""}>Export selected date range</button></div></div>`;
+  return `<div class="settings">${favoriteSettings(favorites())}<div class="settings-section"><h2>Your preferences</h2><div class="setting-row"><label for="theme">Appearance</label><select id="theme"><option value="auto">Follow device</option><option value="light">Light</option><option value="dark">Dark</option></select></div><div class="setting-row"><label for="temperature">Temperature</label><select id="temperature"><option value="C">Celsius</option><option value="F">Fahrenheit</option></select></div></div><div class="settings-section"><h2>Privacy & offline access</h2><p>Health data is kept on your collector. By default, this browser only saves the app shell and your display preferences.</p><div class="setting-row"><label for="offline-save">Keep my last view offline<span>Opt in to save a health snapshot on this device. Anyone with access to this browser may see it while offline. Signing out clears it.</span></label><input id="offline-save" type="checkbox" ${prefs.offline ? "checked" : ""}></div><button id="clear-local" class="quiet">Clear saved health data</button><button id="sign-out" class="quiet">Sign out</button></div><div class="settings-section"><h2>Make room on your home screen</h2><p>${secure ? "On iPhone: open Share, then Add to Home Screen. On desktop and Android, use your browser’s Install option." : "Open this collector through a private HTTPS address to enable home-screen installation and the offline shell on your phone."}</p>${state.install ? '<button id="install" class="primary">Install OpenCircuit</button>' : ""}<p>The app shell works offline. Your health snapshot is available offline only if you enable it above.</p></div><div class="settings-section"><h2>Your data, in context</h2><p>RingConn Gen 2 · ESP32 local bridge · Stored in your collector's SQLite archive. The current decoder provides ten measurement types. Apple Health synchronization requires a native iOS companion; this PWA does not write to HealthKit.</p><button id="export" class="quiet" ${!state.device ? "disabled" : ""}>Export selected date range</button></div></div>`;
 }
 function route() {
   const [tab, name] = location.hash.slice(1).split("/");
   return tab === "metric" && METRICS[name]
     ? { tab, name }
     : {
-        tab: ["summary", "browse", "trends", "settings"].includes(tab)
+        tab: [
+          "summary",
+          "browse",
+          "trends",
+          "daily",
+          "connection",
+          "setup",
+          "settings",
+        ].includes(tab)
           ? tab
           : "summary",
       };
@@ -335,15 +363,23 @@ function render() {
         browse: "Browse your health",
         trends: "Patterns over time",
         settings: "Make it yours",
+        daily: "Every day, in view",
+        connection: "Your ring connection",
+        setup: "Set up your ESP32",
       }[tab];
   $("#page-subtitle").textContent = {
     summary: "Small observations. A bigger picture.",
     browse: "Measured values, with their context.",
     trends: "Take the longer view of your everyday.",
     settings: "A private journal, on your terms.",
+    daily: "Real observations. Calendar by calendar.",
+    connection: "From ring to archive, with evidence.",
+    setup: "Ready for your first sync.",
     metric: "Explore the observations behind each number.",
   }[tab];
-  $("#range-toolbar").hidden = tab === "settings";
+  $("#range-toolbar").hidden = ["settings", "connection", "setup"].includes(
+    tab,
+  );
   for (const link of document.querySelectorAll("[data-tab]")) {
     if (link.dataset.tab === (tab === "metric" ? "browse" : tab))
       link.setAttribute("aria-current", "page");
@@ -352,7 +388,15 @@ function render() {
   $("#view").innerHTML =
     tab === "metric"
       ? detail(name)
-      : { summary, browse, trends, settings }[tab]();
+      : {
+          summary,
+          browse,
+          trends,
+          settings,
+          daily: () => dailyView(state, prefs.temp),
+          connection: () => connectionView(state),
+          setup: setupView,
+        }[tab]();
   if (tab === "settings") {
     $("#theme").value = prefs.theme || "auto";
     $("#temperature").value = prefs.temp || "C";
@@ -364,6 +408,8 @@ async function saveSnapshot() {
       await snapshotStore("put", {
         status: state.status,
         overview: state.overview,
+        days: state.days,
+        diagnostics: state.diagnostics,
         device: state.device,
         preset: state.preset,
         anchor: state.anchor,
@@ -374,6 +420,135 @@ async function saveSnapshot() {
     }
   }
 }
+async function loadExtras() {
+  const tab = route().tab;
+  if (!state.device || state.offline || !["daily", "connection"].includes(tab))
+    return;
+  const sequence = state.sequence,
+    device = state.device;
+  const bounds = range();
+  const field = tab === "daily" ? "days" : "diagnostics";
+  const query = new URLSearchParams({ device });
+  if (tab === "daily") {
+    query.set("start", bounds.start);
+    query.set("end", bounds.end);
+    query.set(
+      "timezone",
+      Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    );
+  }
+  try {
+    const result = await api("/" + field + "?" + query);
+    if (
+      sequence !== state.sequence ||
+      device !== state.device ||
+      tab !== route().tab
+    )
+      return;
+    state[field] = result;
+    state.extraError = "";
+    render();
+    await saveSnapshot();
+  } catch (error) {
+    if (sequence !== state.sequence || tab !== route().tab) return;
+    state[field] = null;
+    state.extraError = error.message;
+    render();
+    notice(error.message, true);
+  }
+}
+function download(content, filename, type) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+$("#view").addEventListener("submit", (event) => {
+  if (event.target.id !== "setup-form") return;
+  event.preventDefault();
+  const form = event.target;
+  try {
+    const input = Object.fromEntries(new FormData(form));
+    const config = buildConfig(input);
+    download(config, "secrets.h", "text/plain");
+    form.elements.password.value = "";
+    form.elements.token.value = "";
+    $("#setup-result").textContent =
+      `Configuration downloaded. Run: pio run -d esp32_bridge/firmware -e ${input.board} -t upload. Then verify both history channels.`;
+  } catch (error) {
+    $("#setup-result").textContent = error.message;
+  }
+});
+function inspectChart(index) {
+  const name = route().name,
+    metric = state.overview?.metrics[name];
+  if (!metric?.series.length) return;
+  state.chartPoint = Math.min(metric.series.length - 1, Math.max(0, index));
+  const point = metric.series[state.chartPoint];
+  const chart = $("[data-inspect-chart]");
+  if (chart) {
+    let guide = chart.querySelector(".inspection-guide");
+    if (!guide) {
+      guide = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      guide.classList.add("inspection-guide");
+      guide.setAttribute("aria-hidden", "true");
+      chart.append(guide);
+    }
+    const bounds = state.overview.range;
+    const x =
+      30 +
+      ((point.timestamp - bounds.start) / (bounds.end - bounds.start)) * 580;
+    for (const [key, val] of Object.entries({ x1: x, x2: x, y1: 10, y2: 160 }))
+      guide.setAttribute(key, val);
+  }
+  $("#chart-inspection").textContent =
+    `Nearest recorded bucket: ${when(point.timestamp)} · ${point.count} readings · ${name === "charging" ? chargingSummary({ ...point, mean: point.value }) : "Average " + formatValue(point.value, name, prefs.temp) + " " + unit(name) + "; low " + formatValue(point.min, name, prefs.temp) + "; high " + formatValue(point.max, name, prefs.temp)}. Bucket summary, not an individual reading.`;
+}
+$("#view").addEventListener("pointermove", (event) => {
+  const chart = event.target.closest("[data-inspect-chart]");
+  if (!chart) return;
+  const rect = chart.getBoundingClientRect(),
+    bounds = state.overview.range;
+  const fraction = Math.max(
+    0,
+    Math.min(1, (((event.clientX - rect.left) / rect.width) * 640 - 30) / 580),
+  );
+  inspectChart(
+    nearestPoint(
+      state.overview.metrics[route().name].series,
+      bounds.start + fraction * (bounds.end - bounds.start),
+    ),
+  );
+});
+$("#view").addEventListener("pointerdown", (event) => {
+  const chart = event.target.closest("[data-inspect-chart]");
+  if (chart)
+    chart.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        clientX: event.clientX,
+      }),
+    );
+});
+$("#view").addEventListener("keydown", (event) => {
+  if (
+    !event.target.matches("[data-inspect-chart]") ||
+    !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
+  )
+    return;
+  event.preventDefault();
+  inspectChart(
+    event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? Infinity
+        : state.chartPoint + (event.key === "ArrowRight" ? 1 : -1),
+  );
+});
 async function loadSamples(append = false) {
   const { tab, name } = route();
   if (tab !== "metric" || !state.device || state.offline) return;
@@ -435,6 +610,9 @@ async function load() {
       bounds.start >= bounds.end
     )
       throw new Error("Choose a valid date range ending today or earlier.");
+    state.days = state.diagnostics = null;
+    state.extraError = "";
+    state.dailyLimit = 30;
     state.overview = state.device
       ? await api(
           "/overview?" +
@@ -461,11 +639,12 @@ async function load() {
         : "Collector connected";
     render();
     await loadSamples();
+    await loadExtras();
     await saveSnapshot();
   } catch (error) {
     if (sequence !== state.sequence) return;
     if (error.status === 401) {
-      state.status = state.overview = null;
+      state.status = state.overview = state.days = state.diagnostics = null;
       state.samples = [];
       await snapshotStore("clear").catch(() => {});
       showLogin();
@@ -518,8 +697,12 @@ async function exportData() {
     { cache: "no-store" },
   );
   if (response.status === 401 && sequence === state.sequence) {
-    await snapshotStore("clear").catch(() => {});
-    showLogin("Your session has ended. Sign in again.");
+    await clearExpiredSession(
+      sequence,
+      () => state.sequence,
+      () => snapshotStore("clear").catch(() => {}),
+      () => showLogin("Your session has ended. Sign in again."),
+    );
   }
   if (!response.ok)
     throw new Error("Export failed. Refresh your session and try again.");
@@ -584,6 +767,13 @@ $("#view").addEventListener("change", async (event) => {
     savePrefs();
     render();
   }
+  if (event.target.dataset.favorite) {
+    const selected = new Set(favorites());
+    if (event.target.checked) selected.add(event.target.dataset.favorite);
+    else selected.delete(event.target.dataset.favorite);
+    prefs.favorites = [...selected];
+    savePrefs();
+  }
   if (event.target.id === "offline-save") {
     prefs.offline = event.target.checked;
     savePrefs();
@@ -595,6 +785,26 @@ $("#view").addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
   try {
+    if (button.dataset.openDay) {
+      if (state.offline) {
+        notice("Reconnect to open a different day.");
+        return;
+      }
+      state.anchor = button.dataset.openDay;
+      state.preset = "day";
+      location.hash = "summary";
+      await load();
+    }
+    if (button.id === "more-days") {
+      state.dailyLimit += 30;
+      render();
+    }
+    if (button.id === "support-export" && state.diagnostics)
+      download(
+        JSON.stringify(supportReport(state), null, 2),
+        "opencircuit-sync-diagnostics.json",
+        "application/json",
+      );
     if (button.id === "export") {
       button.disabled = true;
       await exportData();
@@ -609,7 +819,7 @@ $("#view").addEventListener("click", async (event) => {
       savePrefs();
       if (state.offline) {
         ++state.sequence;
-        state.status = state.overview = null;
+        state.status = state.overview = state.days = state.diagnostics = null;
         state.samples = [];
         state.device = "";
         showLogin(
@@ -625,7 +835,7 @@ $("#view").addEventListener("click", async (event) => {
       prefs.pendingLogout = true;
       savePrefs();
       ++state.sequence;
-      state.status = state.overview = null;
+      state.status = state.overview = state.days = state.diagnostics = null;
       state.device = "";
       state.samples = [];
       await snapshotStore("clear").catch(() => {});
@@ -659,6 +869,7 @@ window.addEventListener("hashchange", () => {
   render();
   window.scrollTo({ top: 0, behavior: "instant" });
   loadSamples().catch((error) => notice(error.message, true));
+  loadExtras();
 });
 window.addEventListener("online", load);
 window.addEventListener("offline", () =>

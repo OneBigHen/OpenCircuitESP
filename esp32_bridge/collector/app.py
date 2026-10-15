@@ -7,14 +7,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from browser_auth import SESSIONS
-from health_views import overview,export_chunks
+from health_views import overview,export_chunks,ha_dashboard
+from observations import days,diagnostics
+from zoneinfo import ZoneInfoNotFoundError
 
 DB=Path(os.getenv("RING_DB","/data/ringconn.db"))
 TOKEN=os.getenv("RING_TOKEN","")
 VIEW_TOKEN=os.getenv("RING_VIEW_TOKEN","")
+HA_TOKEN=os.getenv("RING_HA_TOKEN","")  # read-only API key for Home Assistant REST sensors
 STATIC=Path(__file__).resolve().parent/'web'
 ASSETS={'/':'index.html','/index.html':'index.html','/app.css':'app.css',
-        '/app.js':'app.js','/model.mjs':'model.mjs','/sw.js':'sw.js',
+        '/app.js':'app.js','/model.mjs':'model.mjs','/setup.mjs':'setup.mjs','/ring-views.mjs':'ring-views.mjs','/session-view.mjs':'session-view.mjs','/sw.js':'sw.js',
         '/app.webmanifest':'app.webmanifest','/icon-192.png':'icon-192.png',
         '/icon-512.png':'icon-512.png','/apple-touch-icon.png':'apple-touch-icon.png'}
 CSP="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
@@ -23,6 +26,9 @@ DEVICE=re.compile(r"^(?:[A-F0-9]{2}:){5}[A-F0-9]{2}$")
 METRICS={"hr_bpm","hrv_rmssd_ms","spo2_pct","respiratory_rate","battery_pct",
          "battery_mv","skin_temp_c","case_battery_pct","quarter_hour_steps","charging"}
 MAX_BYTES=2*1024*1024
+DIAG=DB.parent/"diag.log"
+DIAG_CAP=512*1024
+CONTACT=[0]  # last time the ESP32 bridge reached us (/time poll or an authenticated upload)
 
 def connect(path=None):
     path=Path(path or DB)
@@ -45,6 +51,7 @@ def connect(path=None):
     CREATE TABLE IF NOT EXISTS uploads(
       id INTEGER PRIMARY KEY, device TEXT NOT NULL, committed INTEGER NOT NULL,
       frames INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS metrics_by_device_stamp ON metrics(device,stamp);
     CREATE INDEX IF NOT EXISTS metrics_by_time ON metrics(device,metric,stamp);
     CREATE TABLE IF NOT EXISTS sync_sessions(
       device TEXT NOT NULL, completed INTEGER NOT NULL, sleep_end_seen INTEGER NOT NULL,
@@ -121,7 +128,7 @@ def parse_page(db,device,channel,data,seen):
 
 def ingest(db,body):
     if len(body)>MAX_BYTES:raise ValueError("payload too large")
-    count=0;devices=set()
+    count=0;devices={}
     for idx,line in enumerate(body.splitlines(),1):
         if not line.strip():continue
         # MAX_BYTES already bounds work. Small frames can exceed 4,000 lines
@@ -147,10 +154,10 @@ def ingest(db,body):
                    (dev,ch,seen,raw[0],raw,digest))
         if raw[0] in (0x10,0x87):parse_status(db,dev,raw,seen)
         if raw[0] in (0x47,0x4c):parse_page(db,dev,ch,raw,seen)
-        devices.add(dev);count+=1
-    for dev in devices:
+        devices[dev]=devices.get(dev,0)+1;count+=1
+    for dev,received in devices.items():
         db.execute("INSERT INTO uploads(device,committed,frames) VALUES(?,?,?)",
-                   (dev,int(time.time()),count))
+                   (dev,int(time.time()),received))
     return count
 
 def mark_complete(db,body):
@@ -195,6 +202,11 @@ def status(db):
         item={"device":dev,"last_frame":when}
         for key,t,v in db.execute("SELECT metric,stamp,value FROM metrics WHERE device=? ORDER BY stamp DESC",(dev,)):
             if key not in item:item[key]=v;item[key+"_at"]=t
+        # Latest live descriptor (0x10/0x87): byte 17 is 0xff when the ring is out of its charging case.
+        row=db.execute("SELECT seen,raw FROM frames WHERE device=? AND opcode IN (16,135) ORDER BY seen DESC,rowid DESC LIMIT 1",(dev,)).fetchone()
+        if row:
+            raw=bytes.fromhex(row[1]) if isinstance(row[1],str) else bytes(row[1])
+            if len(raw)>=19:item["in_case"]=int(raw[17]!=255);item["in_case_at"]=row[0]
         item["frame_count"]=db.execute("SELECT COUNT(*) FROM frames WHERE device=?",(dev,)).fetchone()[0]
         item["epoch_count"]=db.execute("SELECT COUNT(*) FROM epochs WHERE device=? AND kind='activity'",(dev,)).fetchone()[0]
         item["last_upload"]=db.execute("SELECT MAX(committed) FROM uploads WHERE device=?",(dev,)).fetchone()[0]
@@ -203,7 +215,7 @@ def status(db):
         item["sync_state"]="healthy" if complete and (int(time.time())-complete)<36*3600 else "stale_or_never"
         item["last_frame_age_seconds"]=max(0,int(time.time())-when)
         result[dev]=item
-    return {"device_count":len(result),"devices":result}
+    return {"device_count":len(result),"devices":result,"bridge_last_contact":CONTACT[0] or None}
 
 def export_csv(db,device,since,limit=100000):
     """Authenticated, chronological, measured samples for off-platform backups."""
@@ -233,6 +245,8 @@ class API(BaseHTTPRequestHandler):
     def authorized(self,read_only=False):
         token=self.headers.get('X-Ring-Token','')
         token_ok=bool(TOKEN and hmac.compare_digest(token.encode(),TOKEN.encode()))
+        if read_only and not token_ok and HA_TOKEN:
+            token_ok=hmac.compare_digest(token.encode(),HA_TOKEN.encode())
         if not token_ok and not (read_only and SESSIONS.valid(self.headers.get('Cookie'))):
             self.response(401,b'{"error":"unauthorized"}');return False
         return True
@@ -246,22 +260,41 @@ class API(BaseHTTPRequestHandler):
                    '.webmanifest':'application/manifest+json','.png':'image/png'}
             return self.response(200,file.read_bytes(),types[file.suffix])
         if p.path=="/health":return self.response(200,b'{"ok":true}')
-        if p.path=="/time":return self.response(200,str(int(time.time())),"text/plain")
+        if p.path=="/firmware.bin":
+            key=parse_qs(p.query).get("key",[""])[0]
+            fw=DB.parent/"firmware.bin"
+            if not (TOKEN and hmac.compare_digest(key.encode(),TOKEN.encode())) or not fw.is_file():
+                return self.response(404,b'{"error":"not found"}')
+            return self.response(200,fw.read_bytes(),"application/octet-stream",{"Content-Disposition":'attachment; filename="ring-bridge-0x10000.bin"'})
+        if p.path=="/diag":
+            if not self.authorized(read_only=True):return
+            return self.response(200,DIAG.read_bytes() if DIAG.exists() else b"no diagnostics yet\n","text/plain; charset=utf-8")
+        if p.path=="/time":
+            CONTACT[0]=int(time.time())
+            return self.response(200,str(int(time.time())),"text/plain")
         if not self.authorized(read_only=True):return
         db=connect()
         try:
             if p.path=="/status":return self.response(200,json.dumps(status(db)))
-            if p.path not in ("/history","/export.csv","/overview"):
+            if p.path=="/ha":
+                args=parse_qs(p.query);dev=args.get("device",[""])[0].upper()
+                if not dev:dev=(db.execute("SELECT device FROM frames ORDER BY seen DESC LIMIT 1").fetchone() or [""])[0]
+                if not DEVICE.fullmatch(dev):return self.response(400,b'{"error":"invalid query"}')
+                diag=DIAG.read_text(errors="replace")[-60000:] if DIAG.exists() else ""
+                return self.response(200,json.dumps(ha_dashboard(db,dev,args.get("timezone",["America/New_York"])[0],diag)))
+            if p.path not in ("/history","/export.csv","/overview","/days","/diagnostics"):
                 return self.response(404,b'{"error":"not found"}')
             args=parse_qs(p.query)
             dev=args.get("device",[""])[0].upper();kind=args.get("metric",["hr_bpm"])[0]
             if not DEVICE.fullmatch(dev) or (p.path=="/history" and kind not in METRICS):
                 return self.response(400,b'{"error":"invalid query"}')
+            if p.path=='/diagnostics':return self.response(200,json.dumps(diagnostics(db,dev)))
             now=int(time.time())
             since=int(args.get('start',args.get('since',[str(now-86400)]))[0])
             until=int(args.get('end',args.get('until',[str(now+1)]))[0])
             if not 0<=since<until<=now+86400:
                 raise ValueError('invalid range')
+            if p.path=='/days':return self.response(200,json.dumps(days(db,dev,since,until,args.get('timezone',['UTC'])[0])))
             if p.path=='/overview':
                 if until-since>10*366*86400:raise ValueError('range too long')
                 bucket=max(1,int(args.get('bucket',['900'])[0]),(until-since+599)//600)
@@ -282,14 +315,26 @@ class API(BaseHTTPRequestHandler):
             return self.response(200,json.dumps({"device":dev,"metric":kind,"points":[
                 {"timestamp":t,"value":v,"source":source} for t,v,source in reversed(rows)],
                 'truncated':truncated,'next_before':f'{rows[-1][0]}:{rows[-1][2]}' if truncated else None}))
-        except (ValueError,OverflowError):
+        except (ValueError,OverflowError,ZoneInfoNotFoundError):
             return self.response(400,b'{"error":"bad query"}')
         finally:db.close()
     def do_POST(self):
         if self.path in ('/auth/login','/auth/logout'):return self.browser_auth()
+        if self.path=="/diag":
+            if not self.authorized():return
+            n=int(self.headers.get("Content-Length","0") or 0)
+            if not 0<n<=8192:return self.response(413,b'{"error":"bad size"}')
+            text=self.rfile.read(n).decode("utf-8","replace").replace("\r","")
+            stamp=time.strftime("%Y-%m-%d %H:%M:%S",time.localtime())
+            lines=text.split("\n");block="".join(f"{stamp} {'| ' if i else '## '}{l}\n" for i,l in enumerate(lines) if l)
+            old=DIAG.read_bytes() if DIAG.exists() else b""
+            DIAG.parent.mkdir(parents=True,exist_ok=True)
+            DIAG.write_bytes((old+block.encode())[-DIAG_CAP:])
+            return self.response(200,b'{"ok":true}')
         if self.path not in ("/ingest","/complete"):
             return self.response(404,b'{"error":"not found"}')
         if not self.authorized():return
+        CONTACT[0]=int(time.time())
         try:n=int(self.headers.get("Content-Length","-1"))
         except ValueError:n=-1
         if n<0 or n>(4096 if self.path=="/complete" else MAX_BYTES):
@@ -334,5 +379,7 @@ if __name__=="__main__":
         raise SystemExit("RING_TOKEN must be a private random token of at least 20 characters")
     if VIEW_TOKEN and (len(VIEW_TOKEN)<20 or VIEW_TOKEN.startswith('CHANGE_')):
         raise SystemExit('RING_VIEW_TOKEN must be a private random token of at least 20 characters')
+    if HA_TOKEN and (len(HA_TOKEN)<20 or HA_TOKEN.startswith('CHANGE_') or HA_TOKEN in (TOKEN,VIEW_TOKEN)):
+        raise SystemExit('RING_HA_TOKEN must be its own private random token of at least 20 characters')
     db=connect();db.close()
     ThreadingHTTPServer((os.getenv("RING_HOST","0.0.0.0"),int(os.getenv("RING_PORT","8765"))),API).serve_forever()

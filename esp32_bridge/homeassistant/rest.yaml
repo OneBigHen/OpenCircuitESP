@@ -1,7 +1,7 @@
 # Merge into Home Assistant's configuration.yaml; edit collector IP.
 # Add ringconn_token: 'YOUR_TOKEN' to secrets.yaml.
 rest:
-  - resource: http://192.168.1.20:8765/status
+  - resource: http://192.168.1.40:8765/status
     scan_interval: 300
     timeout: 15
     headers:
@@ -52,3 +52,17 @@ rest:
         unique_id: ringconn_last_upload
         device_class: timestamp
         value_template: "{% set ts = ((value_json.devices.values() | list | first) or {}).get('last_upload') %}{{ ts | timestamp_local if ts else 'unknown' }}"
+      - name: RingConn Case Battery
+        unique_id: ringconn_case_battery
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('case_battery_pct','unknown') if d.get('case_battery_pct_at',0) > as_timestamp(now()) - 604800 else 'unknown' }}"
+      - name: RingConn Charging
+        unique_id: ringconn_charging
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ 'unknown' if d.get('charging_at',0) < as_timestamp(now()) - 3600 else ('charging' if d.get('charging',0) | int(0) == 1 else 'not charging') }}"
+      - name: RingConn Last Frame Age
+        unique_id: ringconn_last_frame_age
+        unit_of_measurement: "s"
+        state_class: measurement
+        value_template: "{% set d = ((value_json.devices.values() | list | first) or {}) %}{{ d.get('last_frame_age_seconds','unknown') }}"

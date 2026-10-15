@@ -1,0 +1,27 @@
+name: RingConn Collector
+version: "0.1.0"
+slug: ringconn_collector
+description: Local-only collector, health page and API for the OpenCircuit ESP32 RingConn bridge
+url: https://github.com/OneBigHen/OpenCircuitESP
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+backup: cold          # stop the collector while HA backs it up so the SQLite file is consistent
+watchdog: http://[HOST]:[PORT:8765]/health
+ports:
+  8765/tcp: 8765
+ports_description:
+  8765/tcp: ESP32 bridge uploads, the health page and the read-only status API (LAN only)
+options:
+  ring_token: ""
+  view_token: ""
+  ha_token: ""
+  secure_cookie: false
+schema:
+  ring_token: password
+  view_token: password?
+  ha_token: password?
+  secure_cookie: bool

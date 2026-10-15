@@ -58,3 +58,132 @@ test("zero baselines and temperature changes use absolute differences", () => {
     "↑ 1.8 °F versus previous period",
   );
 });
+
+test("setup config rejects unsafe inputs and escapes C++ strings", async () => {
+  const { buildConfig } = await import("../collector/web/setup.mjs");
+  const input = {
+    ssid: 'home "wifi"',
+    password: "safe\\password",
+    collector: "http://192.168.1.20:8765",
+    token: "a".repeat(32),
+    ringName: "RingConn Gen2-1234",
+    mac: "",
+    timezone: "EST5EDT,M3.2.0,M11.1.0",
+    start: 9,
+    end: 22,
+    interval: 8,
+    board: "esp32dev",
+  };
+  const config = buildConfig(input);
+  assert.ok(config.includes('#define WIFI_SSID "home \\"wifi\\""'));
+  assert.ok(config.includes('#define WIFI_PASSWORD "safe\\\\password"'));
+  assert.throws(
+    () => buildConfig({ ...input, ringName: "RingConn" }),
+    /exact/i,
+  );
+  assert.throws(
+    () => buildConfig({ ...input, collector: "https://example.com" }),
+    /HTTP/i,
+  );
+  assert.throws(() => buildConfig({ ...input, token: "CHANGE_ME" }), /token/i);
+  assert.throws(() => buildConfig({ ...input, mac: "not-a-mac" }), /MAC/i);
+  assert.throws(
+    () => buildConfig({ ...input, start: 22, end: 9 }),
+    /schedule/i,
+  );
+});
+test("chart inspection selects nearest observed bucket without inventing points", async () => {
+  const { nearestPoint } = await import("../collector/web/model.mjs");
+  const points = [
+    { timestamp: 100, value: 60 },
+    { timestamp: 200, value: 70 },
+  ];
+  assert.equal(nearestPoint(points, 160), 1);
+  assert.equal(nearestPoint(points, 90), 0);
+  assert.equal(nearestPoint([], 90), -1);
+});
+test("setup rejects control bytes and placeholder ring identifiers", async () => {
+  const { buildConfig } = await import("../collector/web/setup.mjs");
+  const input = {
+    ssid: "home",
+    password: "password",
+    collector: "http://192.168.1.20:8765",
+    token: "a".repeat(32),
+    ringName: "RingConn Gen2-1234",
+    mac: "",
+    timezone: "UTC0",
+    start: 0,
+    end: 24,
+    interval: 8,
+    board: "esp32dev",
+  };
+  assert.throws(
+    () => buildConfig({ ...input, ssid: "home\u0000ignored" }),
+    /Wi-Fi/,
+  );
+  assert.throws(
+    () => buildConfig({ ...input, ringName: "RingConn Gen2-XXXX" }),
+    /exact/,
+  );
+  assert.throws(
+    () => buildConfig({ ...input, timezone: "America/New_York" }),
+    /timezone/i,
+  );
+});
+test("setup rejects unsupported collector URL prefixes", async () => {
+  const { buildConfig } = await import("../collector/web/setup.mjs");
+  assert.throws(
+    () =>
+      buildConfig({
+        ssid: "home",
+        password: "password",
+        collector: "http://192.168.1.20:8765/prefix",
+        token: "a".repeat(32),
+        ringName: "RingConn Gen2-1234",
+        mac: "",
+        timezone: "UTC0",
+        start: 0,
+        end: 24,
+        interval: 8,
+        board: "esp32dev",
+      }),
+    /root|path/i,
+  );
+});
+test("charging aggregates count states without inventing duration", async () => {
+  const { chargingSummary } = await import("../collector/web/model.mjs");
+  assert.equal(
+    chargingSummary({ mean: 0.5, count: 2, min: 0, max: 1 }),
+    "1 of 2 recorded states charging (50%). Both states observed.",
+  );
+  assert.equal(
+    chargingSummary({ mean: 0, count: 2, min: 0, max: 0 }),
+    "0 of 2 recorded states charging (0%). Not charging observed.",
+  );
+});
+test("an old asynchronous session cleanup cannot hide a newer signed-in view", async () => {
+  const { clearExpiredSession } = await import(
+    "../collector/web/session-view.mjs"
+  );
+  let sequence = 1,
+    hidden = false,
+    release;
+  const cleanup = new Promise((resolve) => (release = resolve));
+  const operation = clearExpiredSession(
+    1,
+    () => sequence,
+    () => cleanup,
+    () => (hidden = true),
+  );
+  sequence = 2;
+  release();
+  await operation;
+  assert.equal(hidden, false);
+  await clearExpiredSession(
+    2,
+    () => sequence,
+    async () => {},
+    () => (hidden = true),
+  );
+  assert.equal(hidden, true);
+});

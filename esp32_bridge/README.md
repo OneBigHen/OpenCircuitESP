@@ -73,6 +73,7 @@ When the collector is unavailable, the ESP32 preserves ACKed history in flash an
 cd esp32_bridge
 cp .env.example .env
 # Put a long random token in RING_TOKEN (e.g. openssl rand -hex 32).
+# Optional: RING_HA_TOKEN = a different random key that can only read (for Home Assistant).
 docker compose up -d --build
 curl http://YOUR_SERVER_LAN_IP:8765/health
 curl -H 'X-Ring-Token: YOUR_TOKEN' http://YOUR_SERVER_LAN_IP:8765/status
@@ -115,6 +116,24 @@ To discover your RingConn Gen 2's exact Bluetooth advertisement name, initially 
 - Stores the last successful sync in NVS to avoid aggressive reconnects after reboots.
 
 ## Home Assistant
+
+**Recommended:** install `homeassistant/ringconn_package.yaml` as `packages/ringconn.yaml` and
+`homeassistant/ringconn_dashboard.yaml` as `ringconn-dashboard.yaml` in HA's config folder
+(HA must load `packages:`). It adds 16 sensors (ring state, batteries, vitals, sync health), helper
+switches, a RingConn dashboard and two automations: ring goes into its charging case in the evening or
+overnight -> indoor lights off and bedtime mode on; ring comes out of the case -> day started.
+
+HA authenticates with a **separate read-only key**: set `RING_HA_TOKEN` in `.env` (random, 20+ chars,
+different from the other keys; it can only GET) and add `ringconn_ha_token: <that value>` to HA's
+`secrets.yaml`. Restart the collector after changing `.env`.
+
+Live ring/case state: between full history syncs the ESP32 reads the ring's status descriptor about
+once a minute (`STATUS_POLL_MS`), so `in_case`, charging and battery reach `/status` within a minute or two.
+`/status` reports `in_case` (1 when descriptor byte 17 is not `0xff`) with `in_case_at`. If the ring is
+unreachable (for example a closed case out of Bluetooth range) the state turns `unknown` after 10 minutes
+and the automations do not fire.
+
+The older single-file template below still works on its own.
 
 Merge the example `homeassistant/rest.yaml` into your `configuration.yaml` (one top-level `rest:` block), replace the host IP and set `ringconn_token` in `secrets.yaml`. Use `homeassistant/dashboard.yaml` as a starting dashboard.
 
@@ -163,3 +182,75 @@ curl -H 'X-Ring-Token: YOUR_TOKEN' \
 The `/history?device=...&metric=hr_bpm&since=...` API returns at most 5,000 chronological points (set `limit=...`). The Home Assistant REST sensors show the **latest observation**, becoming unknown when too stale (24–36h), and do not backfill all 2.5-minute historical records into HA Recorder. SQLite/CSV preserves those records for long-range analytics.
 
 **Caution:** changing the partition table on an already flashed ESP32 may erase LittleFS. Do not change the flash layout after collecting ring history without first uploading and backing it up.
+
+## Ring-day dashboard
+
+Open the collector's root URL and sign in with its ingest token or a dedicated
+`RING_VIEW_TOKEN`. The **Connection** tab shows archived channel terminations,
+complete syncs, recent uploads and measurement coverage. These describe stored
+transport evidence; they are not a live BLE or Wi-Fi probe. Export sync diagnostics
+for counts/timestamps without health values, raw frames, tokens or a full ring ID.
+
+The **Setup** assistant generates `secrets.h` locally for your AITRIP 30-pin
+ESP-WROOM-32 (`esp32dev`) or C6. Use the collector's trusted-LAN HTTP **root** URL,
+your ingest token, and the exact ring advertisement name from USB serial scanning.
+Do not enter a read-only viewing key as the ingest token. Password/token fields
+clear after download; the form does not save or send them. Save the file under
+`firmware/include/`, build and flash via USB. POSIX timezone presets cover US zones
+and UTC; edit `LOCAL_TIMEZONE` locally for other zones. The PWA uses your browser's
+IANA timezone for daily views independently of the firmware sync schedule.
+
+**Daily** groups all stored measurements by DST-aware local calendar dates and
+shows averages, ranges, observation counts/times and sources. Blank days remain
+blank. Charging summaries report observed state counts, not charging duration.
+Step-bucket averages are not daily step totals or distance. Tap **Open day** to
+explore that day's readings. Large ranges show 30 days initially; **Show earlier
+days** reveals more without truncating the query. Metric charts support tap/pointer
+inspection and left/right/Home/End keys. The guide line identifies the nearest
+recorded bucket, including its count, mean and range; exact samples remain below.
+Choose your summary favorites in Settings; only metric names are persisted.
+
+## Consistent archive backups and restore
+
+Use SQLite's online backup API rather than copying a live database and ignoring
+its WAL file. The backup includes raw frames, epochs, measurements and sync evidence.
+It creates a private mode-0600 file, checks integrity and refuses to overwrite an
+existing destination. Run from `esp32_bridge`:
+
+```bash
+# Check the live archive on its owning collector.
+docker compose exec ringconn-collector python /app/archive_tools.py check --database /data/ringconn.db
+# Collector stays running while SQLite takes a consistent snapshot.
+docker compose exec ringconn-collector python /app/archive_tools.py backup --database /data/ringconn.db --output /data/backups/ringconn-2026-10-09.db
+# Local alternative when operating directly on the same host:
+python3 collector/archive_tools.py backup --database storage/ringconn.db --output storage/backups/ringconn-2026-10-09.db
+```
+
+Keep backups private; they contain health data. Choose a new destination name for
+each backup and retain a copy on another protected disk. To restore a chosen backup,
+first validate and stage it, **then stop the collector before replacing its files**:
+
+```bash
+set -e  # Stop this restore sequence if any command fails.
+python3 collector/archive_tools.py check --database storage/backups/ringconn-2026-10-09.db
+# Continue only if the command succeeds and integrity is "ok".
+cp storage/backups/ringconn-2026-10-09.db storage/restore-candidate.db
+chmod 600 storage/restore-candidate.db
+docker compose stop ringconn-collector
+mkdir -m 700 storage/pre-restore-2026-10-09
+# Preserve the old database and any WAL/SHM together for rollback.
+for file in storage/ringconn.db storage/ringconn.db-wal storage/ringconn.db-shm; do
+  if [ -f "$file" ]; then mv "$file" storage/pre-restore-2026-10-09/; fi
+done
+mv storage/restore-candidate.db storage/ringconn.db
+python3 collector/archive_tools.py check --database storage/ringconn.db
+# Continue only after the restored integrity check succeeds.
+docker compose up -d ringconn-collector
+curl http://127.0.0.1:8765/health
+```
+
+Read back authenticated `/status` and the PWA's Connection/Daily views after
+restoring. Never reuse the old WAL/SHM with the restored database. If validation
+fails, keep the collector stopped and restore the preserved original database
+and its matching sidecars from the rollback directory. The backup CLI does not
+reset or operate the ring.
