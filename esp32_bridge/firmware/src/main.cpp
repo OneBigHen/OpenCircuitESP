@@ -22,7 +22,7 @@
 namespace {
 // Diagnostics: every log line goes to USB serial AND a RAM buffer that is POSTed
 // to the collector (/diag), so the bridge can be debugged over Wi-Fi alone.
-const char *FW_VERSION="diag-16";
+const char *FW_VERSION="diag-17";
 char dbuf[4096];size_t dlen=0;
 void dappend(const char*line){
   size_t n=strlen(line);
@@ -619,7 +619,12 @@ void cycle(){
   time_t now=time(nullptr);
   failed=false;packetDropped=false;
   // Overnight the sleep history is left untouched on the ring and drained once after waking.
-  if(!fullSyncDue(now)){
+  // diag-16 evening: a due full sync was retried on EVERY weak link (-93..-107 dBm) and failed
+  // every time. On a weak link off the charger, take the cheap status path instead and keep the
+  // full drain for a decent link or the charger (the ring buffers history for days).
+  bool weakDefer=lastSuccess&&!ringCharging&&client&&client->getRssi()<WEAK_RSSI
+                 &&now-lastSuccess<(time_t)(24UL*3600UL);
+  if(!fullSyncDue(now)||weakDefer){
     if(connectAndSync(true,true)){
       int rssi=client->getRssi();
       if(!ringCharging&&rssi<WEAK_RSSI){
@@ -643,6 +648,9 @@ void cycle(){
     lastSuccess=now;
     Preferences p;p.begin("ringbridge",false);p.putULong64("lastsync",(uint64_t)lastSuccess);p.end();
     dlog("Gen2 sleep + daytime channels synchronized");
-  }else dlog("Partial/failed drain: queued flash pages retained; retry later");
+  }else{
+    dlog("Partial/failed drain: queued flash pages retained; retry in 5 min");
+    holdOffUntil=millis()+5UL*60UL*1000UL;
+  }
 }
 void loop(){esp_task_wdt_reset();cycle();if(holding||!armed)diagPost();}
